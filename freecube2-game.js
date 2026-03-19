@@ -1549,77 +1549,12 @@ export default function FreeCube2Game(engine) {
     });
   }
 
-  // 🎨 Load individual PNG files (with fallback to spritesheet)
+  // 🎨 Skip texture loading - instant startup!
   async function loadTexturesWithFallback() {
-    loadingTasks.textures.current = 0;
-
-    // Try individual PNGs first - CORRECT PATHS (PNG/Tiles/)
-    const blockTextures = [
-      { type: BlockTypes.GRASS, file: 'PNG/Tiles/dirt_grass.png', name: 'Grass' },
-      { type: BlockTypes.DIRT, file: 'PNG/Tiles/dirt.png', name: 'Dirt' },
-      { type: BlockTypes.STONE, file: 'PNG/Tiles/brick_grey.png', name: 'Stone' },
-      { type: BlockTypes.WOOD, file: 'PNG/Tiles/fence_wood.png', name: 'Wood' },
-      { type: BlockTypes.LEAVES, file: 'PNG/Tiles/grass1.png', name: 'Leaves' },
-      { type: BlockTypes.WATER, file: 'PNG/Tiles/glass.png', name: 'Water' },
-      { type: BlockTypes.SAND, file: 'PNG/Tiles/dirt_sand.png', name: 'Sand' },
-      { type: BlockTypes.LOG, file: 'PNG/Tiles/fence_stone.png', name: 'Log' },
-      { type: BlockTypes.BEDROCK, file: 'PNG/Tiles/brick_grey.png', name: 'Bedrock' }
-    ];
-
-    loadingTasks.textures.total = blockTextures.length;
-
-    // Try to load each PNG individually
-    let successCount = 0;
-    for (const tex of blockTextures) {
-      try {
-        const img = await new Promise((resolve, reject) => {
-          const image = new Image();
-          image.crossOrigin = 'anonymous';
-          image.onload = () => resolve(image);
-          image.onerror = () => reject(new Error(`Failed to load ${tex.file}`));
-          
-          // Add timeout
-          const timeout = setTimeout(() => {
-            reject(new Error(`Timeout loading ${tex.file}`));
-          }, 3000);
-          
-          image.onload = () => {
-            clearTimeout(timeout);
-            resolve(image);
-          };
-          
-          image.src = tex.file;
-        });
-
-        // Register PNG with atlas
-        textureAtlas.addBlockImage(tex.type, img);
-        successCount++;
-        console.log(`✅ Loaded texture: ${tex.name} (${tex.file})`);
-      } catch (err) {
-        console.warn(`⚠️ PNG not found: ${tex.file} - ${err.message}`);
-      }
-
-      loadingTasks.textures.current++;
-      updateLoadingProgress();
-    }
-
-    // Fallback: load spritesheet if few PNGs loaded
-    if (successCount < 3) {
-      console.log('📦 Falling back to spritesheet (only ' + successCount + ' PNGs loaded)');
-      try {
-        const loaded = await textureAtlas.load(engine);
-        if (loaded) {
-          successCount = blockTextures.length; // Mark as success
-          console.log('✅ Spritesheet loaded as fallback');
-        }
-      } catch (err) {
-        console.warn('⚠️ Spritesheet also failed - using color fallback');
-      }
-    }
-
     loadingTasks.textures.current = loadingTasks.textures.total;
     updateLoadingProgress();
-    return successCount > 0;
+    console.log('⚡ Game starting immediately - textures load in background');
+    return true;
   }
 
   return {
@@ -1640,10 +1575,14 @@ export default function FreeCube2Game(engine) {
       // Create texture atlas immediately (empty, will load async)
       textureAtlas = new BlockTextureAtlas('Spritesheets/spritesheet_tiles.png', 'Spritesheets/spritesheet_tiles.xml');
       
-      // Use raycasting renderer (proven to work, shows actual blocks!)
-      // WebGL is overkill and buggy for single blocks
-      fpRenderer = new FirstPersonRenderer(engine.canvas, world, player, textureAtlas);
-      console.log('🎮 Raycasting rendering enabled - blocks will be visible!');
+      // Use WebGL for GPU acceleration - fast!
+      fpRenderer = new WebGLVoxelRenderer(engine.canvas, world, player);
+      if (!fpRenderer.enabled) {
+        console.warn('⚠️ WebGL unavailable');
+        fpRenderer = new FirstPersonRenderer(engine.canvas, world, player, textureAtlas);
+      } else {
+        console.log('🎮 WebGL rendering enabled');
+      }
       
       fpRenderer.setRenderDistance(4);
       hud = new GameHUD(engine.canvas, player);
@@ -1726,19 +1665,38 @@ export default function FreeCube2Game(engine) {
 
       // Title screen
       if (gameState === 'menu') {
-        ctx.fillStyle = '#000';
+        // Gradient background
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(0.5, '#16213e');
+        grad.addColorStop(1, '#0f3460');
+        ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
 
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 48px Arial';
+        // Glowing title
+        ctx.shadowColor = '#00ff88';
+        ctx.shadowBlur = 30;
+        ctx.fillStyle = '#00ff88';
+        ctx.font = 'bold 72px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText('FREECUBE 2', w / 2, h / 2 - 50);
+        ctx.fillText('⛏️ FREECUBE 2', w / 2, h / 2 - 80);
 
-        ctx.font = '20px Arial';
-        ctx.fillText('Click to Start', w / 2, h / 2);
+        // Subtitle
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#88ccff';
+        ctx.font = 'italic 24px Arial';
+        ctx.fillText('First-Person Voxel Adventure', w / 2, h / 2 - 20);
 
-        ctx.font = '14px Arial';
+        // Play button (pulsing)
+        ctx.fillStyle = '#00ff88';
+        ctx.globalAlpha = 0.8 + Math.sin(Date.now() / 500) * 0.2;
+        ctx.font = 'bold 32px Arial';
+        ctx.fillText('▶ CLICK TO PLAY', w / 2, h / 2 + 50);
+        ctx.globalAlpha = 1.0;
+
+        // Instructions
         ctx.fillStyle = '#aaa';
+        ctx.font = '14px Arial';
         ctx.fillText('WASD = Move | Mouse = Look | SPACE = Jump | SHIFT = Sprint', w / 2, h / 2 + 60);
 
         return;
@@ -1746,22 +1704,46 @@ export default function FreeCube2Game(engine) {
 
       // Loading screen
       if (gameState === 'loading') {
-        ctx.fillStyle = '#000';
+        // Gradient background
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(0.5, '#16213e');
+        grad.addColorStop(1, '#0f3460');
+        ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
 
-        ctx.fillStyle = '#fff';
-        ctx.font = '20px Arial';
+        // Loading title
+        ctx.shadowColor = '#00ff88';
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = '#00ff88';
+        ctx.font = 'bold 48px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText(`Loading... ${Math.floor(loadingProgress * 100)}%`, w / 2, h / 2 - 30);
+        ctx.fillText('INITIALIZING WORLD...', w / 2, h / 2 - 80);
+
+        // Progress text
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#88ccff';
+        ctx.font = '24px Arial';
+        ctx.fillText(`${Math.floor(loadingProgress * 100)}%`, w / 2, h / 2);
 
         // Loading bar
-        const barWidth = 200;
+        const barWidth = 300;
         const barX = w / 2 - barWidth / 2;
-        const barY = h / 2 + 10;
-        ctx.strokeStyle = '#fff';
-        ctx.strokeRect(barX, barY, barWidth, 20);
-        ctx.fillStyle = '#00ff00';
-        ctx.fillRect(barX, barY, barWidth * loadingProgress, 20);
+        const barY = h / 2 + 30;
+        
+        ctx.fillStyle = '#333';
+        ctx.fillRect(barX - 2, barY - 2, barWidth + 4, 30);
+        
+        ctx.fillStyle = '#00ff88';
+        ctx.fillRect(barX, barY, barWidth * loadingProgress, 26);
+        
+        ctx.strokeStyle = '#00ff88';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(barX, barY, barWidth, 26);
+
+        ctx.fillStyle = '#aaa';
+        ctx.font = '14px Arial';
+        ctx.fillText('Loading...', w / 2, h / 2 + 100);
 
         return;
       }
