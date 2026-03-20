@@ -1845,10 +1845,10 @@ class Player {
         this.vy = lerp(this.vy, -0.6, clamp(2.2 * dt, 0, 1));
       }
 
-      // Strong drag in water.
-      const drag = Math.pow(0.78, dt * 60);
+      // Water drag (keep it swimmy, not honey).
+      const drag = Math.pow(0.92, dt * 60);
       this.vx *= drag;
-      this.vy *= Math.pow(0.86, dt * 60);
+      this.vy *= Math.pow(0.96, dt * 60);
       this.vz *= drag;
       this.vy = clamp(this.vy, -6.5, 6.5);
       this.onGround = false;
@@ -3720,8 +3720,15 @@ class WebGLVoxelRenderer {
       gl.depthMask(false);
       for (const e of sorted) {
         const isItem = Number.isFinite(e.blockType);
-        if (!isItem) continue;
-        const image = this.textureLibrary?.getBlockFaceTexture(e.blockType, "top") || null;
+        const isZombie = !isItem && e.type === "zombie";
+        if (isZombie) {
+          // Zombie uses the 3D model renderer.
+          continue;
+        }
+
+        const image = isItem
+          ? this.textureLibrary?.getBlockFaceTexture(e.blockType, "top") || null
+          : this.entityTextures?.getImage(e.type) || null;
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const faceYaw = Math.atan2(this.player.x - e.x, this.player.z - e.z);
         const bob = isItem ? Math.sin((e.age || 0) * 6) * 0.08 : 0;
