@@ -3214,6 +3214,13 @@ class GreedyChunkMesher {
                 // Keep UVs matched to vertices when we swap for winding.
                 [uv[1], uv[3]] = [uv[3], uv[1]];
               }
+              // Keep textures oriented consistently across faces.
+              // Without this, some faces end up mirrored ("inverted") depending on face normal.
+              if (faceId === "south" || faceId === "west") {
+                for (let i = 0; i < 4; i += 1) {
+                  uv[i][0] = width - uv[i][0];
+                }
+              }
 
               const targetVertices = cell.transparent ? verticesTrans : verticesOpaque;
               const targetIndices = cell.transparent ? indicesTrans : indicesOpaque;
