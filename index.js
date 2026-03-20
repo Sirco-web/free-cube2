@@ -1717,26 +1717,51 @@ const __engine = (() => {
       // Setup debug console first
       this._setupDebugConsole();
       
-      // Always get 2D context for drawing
-      this.ctx2d = this.canvas.getContext('2d', { willReadFrequently: false });
-      if (!this.ctx2d) {
-        console.error('❌ Failed to get 2D canvas context!');
-        this.ctx2d = null;
-      } else {
-        console.log('✅ 2D Canvas Context obtained');
-        console.log('📐 Canvas dimensions:', this.canvas.width, 'x', this.canvas.height);
-        console.log('🖥️ Device pixel ratio:', window.devicePixelRatio);
-        console.log('📍 Canvas position:', this.canvas.style.position, this.canvas.style.zIndex);
-      }
-      
-      // Try WebGL (optional, for advanced use)
+      this.gl = null;
+      this.ctx2d = null;
+
+      // Prefer WebGL on the main game canvas. Asking for 2D first can lock
+      // some browsers into the canvas path and break later WebGL requests.
       try {
-        this.gl = this.canvas.getContext('webgl2', {antialias:true}) || this.canvas.getContext('webgl', {antialias:true});
-      } catch(e) { }
+        this.gl =
+          this.canvas.getContext('webgl2', {
+            antialias: true,
+            alpha: false,
+            depth: true,
+            stencil: false,
+            premultipliedAlpha: false,
+            preserveDrawingBuffer: false
+          }) ||
+          this.canvas.getContext('webgl', {
+            antialias: true,
+            alpha: false,
+            depth: true,
+            stencil: false,
+            premultipliedAlpha: false,
+            preserveDrawingBuffer: false
+          });
+      } catch (e) {
+        console.warn('⚠️ WebGL context init failed:', e?.message || e);
+      }
+
+      if (this.gl) {
+        console.log('✅ WebGL Context obtained on main canvas');
+      } else {
+        this.ctx2d = this.canvas.getContext('2d', { willReadFrequently: false });
+        if (!this.ctx2d) {
+          console.error('❌ Failed to get 2D canvas context!');
+          this.ctx2d = null;
+        } else {
+          console.log('✅ 2D Canvas Context obtained');
+          console.log('📐 Canvas dimensions:', this.canvas.width, 'x', this.canvas.height);
+          console.log('🖥️ Device pixel ratio:', window.devicePixelRatio);
+          console.log('📍 Canvas position:', this.canvas.style.position, this.canvas.style.zIndex);
+        }
+      }
+
       this.input = new Input(this.canvas);
       this.camera = new Camera2D();
-      // Only use 2D canvas for rendering (skip WebGL complications)
-      this.renderer2D = new Renderer2D(this.ctx2d, this.resources);
+      this.renderer2D = new Renderer2D(this.gl || this.ctx2d, this.resources);
       this.renderer3D = this.gl ? new Renderer3DPBR(this.gl) : null;
       this.physics = new Physics2D(this.scene);
       this.physics2DSolver = new Physics2DSolver(this.scene);
