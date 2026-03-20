@@ -869,6 +869,9 @@ function isCollidable(blockType) {
 }
 
 function shouldRenderFace(blockType, neighborType) {
+  if (blockType === BLOCK.WATER) {
+    return neighborType !== BLOCK.WATER;
+  }
   if (neighborType === BLOCK.AIR) {
     return true;
   }
@@ -1462,6 +1465,7 @@ class BrowserInput {
     this.pressedKeys = new Set();
     this.actionUnlockAt = 0;
     this.pointerLockEnabled = false;
+    this._lostPointerLock = false;
 
     this.canvas.style.cursor = "pointer";
     this.canvas.setAttribute("tabindex", "0");
@@ -1512,8 +1516,13 @@ class BrowserInput {
     };
 
     this.onPointerLockChange = () => {
+      const wasLocked = this.locked;
       this.locked = document.pointerLockElement === this.canvas;
       this.canvas.style.cursor = this.locked ? "none" : "pointer";
+      if (wasLocked && !this.locked && this.pointerLockEnabled) {
+        // ESC often exits pointer lock without sending a key event.
+        this._lostPointerLock = true;
+      }
       if (this.locked) {
         this.actionUnlockAt = performance.now() + 120;
       }
@@ -1588,6 +1597,14 @@ class BrowserInput {
     }
     return false;
   }
+
+  consumeLostPointerLock() {
+    if (this._lostPointerLock) {
+      this._lostPointerLock = false;
+      return true;
+    }
+    return false;
+  }
 }
 
 class Player {
@@ -1616,6 +1633,7 @@ class Player {
     this.hurtCooldown = 0;
     this.regenTimer = 0;
     this.starveTimer = 0;
+    this.inWater = false;
   }
 
   getEyePosition() {
@@ -1680,6 +1698,27 @@ class Player {
     return false;
   }
 
+  isInWater(world, x = this.x, y = this.y, z = this.z) {
+    const aabb = this.getAABB(x, y, z);
+    const minX = Math.floor(aabb.minX);
+    const maxX = Math.floor(aabb.maxX - 0.00001);
+    const minY = Math.floor(aabb.minY);
+    const maxY = Math.floor(aabb.maxY - 0.00001);
+    const minZ = Math.floor(aabb.minZ);
+    const maxZ = Math.floor(aabb.maxZ - 0.00001);
+
+    for (let bx = minX; bx <= maxX; bx += 1) {
+      for (let by = minY; by <= maxY; by += 1) {
+        for (let bz = minZ; bz <= maxZ; bz += 1) {
+          if (world.getBlock(bx, by, bz) === BLOCK.WATER && this.intersectsBlock(bx, by, bz, x, y, z)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   setPosition(x, y, z) {
     this.x = x;
     this.y = y;
@@ -1692,8 +1731,9 @@ class Player {
   applyLook(deltaX, deltaY, settings = DEFAULT_SETTINGS) {
     const sensitivity = settings.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity;
     const invertY = settings.invertY ? -1 : 1;
-    // PointerLock movementX is positive when moving mouse right, so yaw+ should turn right.
-    this.yaw += deltaX * sensitivity;
+    // PointerLock movementX is positive when moving mouse right.
+    // In our coordinate setup, subtracting makes "mouse left -> turn left" like Minecraft.
+    this.yaw -= deltaX * sensitivity;
     this.pitch = clamp(this.pitch - deltaY * sensitivity * 0.84 * invertY, -1.5, 1.5);
   }
 
@@ -1750,11 +1790,14 @@ class Player {
     this.breakCooldown = Math.max(0, this.breakCooldown - dt);
     this.placeCooldown = Math.max(0, this.placeCooldown - dt);
 
-    const forward = (input.isDown("w") || input.isDown("W") ? 1 : 0) - (input.isDown("s") || input.isDown("S") ? 1 : 0);
-    const strafe = (input.isDown("d") || input.isDown("D") ? 1 : 0) - (input.isDown("a") || input.isDown("A") ? 1 : 0);
-    const wantsSprint = input.isDown("Shift");
+    this.inWater = this.isInWater(world);
 
-    const speed = wantsSprint ? 6.2 : 4.6;
+    const forward = (input.isDown("w") || input.isDown("W") ? 1 : 0) - (input.isDown("s") || input.isDown("S") ? 1 : 0);
+    // Strafe should match Minecraft: A = left, D = right.
+    const strafe = (input.isDown("a") || input.isDown("A") ? 1 : 0) - (input.isDown("d") || input.isDown("D") ? 1 : 0);
+    const wantsSprint = !this.inWater && input.isDown("Shift");
+
+    const speed = this.inWater ? 2.25 : wantsSprint ? 6.2 : 4.6;
     const sinYaw = Math.sin(this.yaw);
     const cosYaw = Math.cos(this.yaw);
     const forwardX = sinYaw;
@@ -1772,7 +1815,7 @@ class Player {
 
     const targetVX = moveX * speed;
     const targetVZ = moveZ * speed;
-    const accel = this.onGround ? 16 : 5;
+    const accel = this.inWater ? 7.5 : this.onGround ? 16 : 5;
     const blend = clamp(accel * dt, 0, 1);
 
     this.vx = lerp(this.vx, targetVX, blend);
@@ -1783,14 +1826,42 @@ class Player {
       this.vz = lerp(this.vz, 0, clamp(12 * dt, 0, 1));
     }
 
-    if (this.onGround && input.consumePress(" ")) {
-      this.vy = 8.5;
+    if (this.inWater) {
+      // Fluid movement: buoyancy + drag + swim controls.
+      const wantUp = input.isDown(" ");
+      const wantDown = input.isDown("Shift");
+
+      // Gentle buoyancy (float slightly upward if not holding down).
+      if (!wantDown) {
+        this.vy += 10 * dt;
+      }
+      // Swim controls.
+      if (wantUp) {
+        this.vy = lerp(this.vy, 5.6, clamp(7.5 * dt, 0, 1));
+      } else if (wantDown) {
+        this.vy = lerp(this.vy, -4.2, clamp(7.5 * dt, 0, 1));
+      } else {
+        // Settle toward a slow sink/float.
+        this.vy = lerp(this.vy, -0.6, clamp(2.2 * dt, 0, 1));
+      }
+
+      // Strong drag in water.
+      const drag = Math.pow(0.78, dt * 60);
+      this.vx *= drag;
+      this.vy *= Math.pow(0.86, dt * 60);
+      this.vz *= drag;
+      this.vy = clamp(this.vy, -6.5, 6.5);
+      this.onGround = false;
+    } else {
+      if (this.onGround && input.consumePress(" ")) {
+        this.vy = 8.5;
+        this.onGround = false;
+      }
+
+      this.vy -= 24 * dt;
+      this.vy = Math.max(this.vy, -32);
       this.onGround = false;
     }
-
-    this.vy -= 24 * dt;
-    this.vy = Math.max(this.vy, -32);
-    this.onGround = false;
 
     this.x += this.vx * dt;
     this.resolveAxisCollisions(world, "x", this.vx * dt);
@@ -1942,6 +2013,7 @@ class Mob {
     this.wanderTimer = 0;
     this.wanderYaw = 0;
     this.attackCooldown = 0;
+    this.age = 0;
   }
 
   get radius() {
@@ -2002,6 +2074,7 @@ class Mob {
   }
 
   update(dt, world, player) {
+    this.age += dt;
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
     this.wanderTimer -= dt;
     if (this.wanderTimer <= 0) {
@@ -3247,6 +3320,7 @@ class WebGLVoxelRenderer {
     this._outline = this._createOutlineRenderer();
     this.entities = [];
     this._entities = this._createEntityRenderer();
+    this._zombie = this._createZombieRenderer();
 
     this.program = createProgram(
       gl,
@@ -3270,13 +3344,17 @@ class WebGLVoxelRenderer {
       }`,
       `#version 300 es
       precision highp float;
+      precision highp sampler2DArray;
       uniform sampler2DArray uTex;
       in vec2 vUV;
       flat in int vLayer;
       in float vLight;
       out vec4 outColor;
       void main(){
+        // Avoid sampling exactly on texel edges (nearest + fract causes visible seams).
         vec2 uv = fract(vUV);
+        vec2 inset = vec2(0.5 / 128.0);
+        uv = uv * (1.0 - inset * 2.0) + inset;
         vec4 tex = texture(uTex, vec3(uv, float(vLayer)));
         vec4 col = vec4(tex.rgb * vLight, tex.a);
         if(col.a < 0.06) discard;
@@ -3291,9 +3369,9 @@ class WebGLVoxelRenderer {
     this.mesher = new GreedyChunkMesher(world, atlas);
 
     gl.enable(gl.DEPTH_TEST);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
-    gl.frontFace(gl.CCW);
+    // Disable face culling: our greedy mesher can produce mixed winding on some GPUs/drivers.
+    // Backface culling being wrong looks like "inside out" blocks.
+    gl.disable(gl.CULL_FACE);
   }
 
   setRenderDistance(distance) {
@@ -3394,7 +3472,9 @@ class WebGLVoxelRenderer {
     const gl = this.gl;
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -3449,6 +3529,7 @@ class WebGLVoxelRenderer {
       item.record.transparent.draw();
     }
 
+    this._zombie.draw(this.proj, this.view, this.entities || []);
     this._entities.draw(this.proj, this.view, this.entities || []);
 
     // Outline is drawn last so it stays readable.
@@ -3561,6 +3642,7 @@ class WebGLVoxelRenderer {
       }`,
       `#version 300 es
       precision highp float;
+      precision highp sampler2D;
       uniform sampler2D uTex;
       uniform vec4 uColor;
       uniform float uUseTex;
@@ -3631,9 +3713,8 @@ class WebGLVoxelRenderer {
       gl.depthMask(false);
       for (const e of sorted) {
         const isItem = Number.isFinite(e.blockType);
-        const image = isItem
-          ? this.textureLibrary?.getBlockFaceTexture(e.blockType, "top") || null
-          : this.entityTextures?.getImage(e.type) || null;
+        if (!isItem) continue;
+        const image = this.textureLibrary?.getBlockFaceTexture(e.blockType, "top") || null;
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const faceYaw = Math.atan2(this.player.x - e.x, this.player.z - e.z);
         const bob = isItem ? Math.sin((e.age || 0) * 6) * 0.08 : 0;
@@ -3650,6 +3731,348 @@ class WebGLVoxelRenderer {
         gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
       }
       gl.depthMask(true);
+      gl.bindVertexArray(null);
+    };
+
+    return { draw };
+  }
+
+  _createZombieRenderer() {
+    const gl = this.gl;
+    const program = createProgram(
+      gl,
+      `#version 300 es
+      precision highp float;
+      layout(location=0) in vec3 aPos;
+      layout(location=1) in vec2 aUV;
+      uniform mat4 uProj;
+      uniform mat4 uView;
+      out vec2 vUV;
+      void main(){
+        gl_Position = uProj * uView * vec4(aPos, 1.0);
+        vUV = aUV;
+      }`,
+      `#version 300 es
+      precision highp float;
+      precision highp sampler2D;
+      uniform sampler2D uTex;
+      in vec2 vUV;
+      out vec4 outColor;
+      void main(){
+        vec4 col = texture(uTex, vUV);
+        if (col.a < 0.06) discard;
+        outColor = col;
+      }`
+    );
+
+    const uProj = gl.getUniformLocation(program, "uProj");
+    const uView = gl.getUniformLocation(program, "uView");
+    const uTex = gl.getUniformLocation(program, "uTex");
+
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+    const ibo = gl.createBuffer();
+
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 5 * 4, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 5 * 4, 3 * 4);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, 4, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+
+    const pushFace = (verts, idx, baseIndex, p0, p1, p2, p3, uv0, uv1, uv2, uv3) => {
+      verts.push(
+        p0[0], p0[1], p0[2], uv0[0], uv0[1],
+        p1[0], p1[1], p1[2], uv1[0], uv1[1],
+        p2[0], p2[1], p2[2], uv2[0], uv2[1],
+        p3[0], p3[1], p3[2], uv3[0], uv3[1]
+      );
+      idx.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex, baseIndex + 2, baseIndex + 3);
+      return baseIndex + 4;
+    };
+
+    const addBox = (verts, idx, baseIndex, corners, texW, texH, u, v, w, h, d) => {
+      // Corner indices:
+      // 0:(x0,y0,z0) 1:(x1,y0,z0) 2:(x1,y1,z0) 3:(x0,y1,z0)
+      // 4:(x0,y0,z1) 5:(x1,y0,z1) 6:(x1,y1,z1) 7:(x0,y1,z1)
+      const U = (px) => px / texW;
+      const V = (py) => py / texH;
+
+      const scaleU = texW >= 64 ? 1 : texW / 64;
+      const scaleV = texH >= 64 ? 1 : texH / 64;
+      const u0 = u * scaleU;
+      const v0 = v * scaleV;
+      const wU = w * scaleU;
+      const hV = h * scaleV;
+      const dU = d * scaleU;
+      const dV = d * scaleV;
+
+      const topU = u0 + dU;
+      const topV = v0;
+      const bottomU = u0 + dU + wU;
+      const bottomV = v0;
+      const leftU = u0;
+      const leftV = v0 + dV;
+      const frontU = u0 + dU;
+      const frontV = v0 + dV;
+      const rightU = u0 + dU + wU;
+      const rightV = v0 + dV;
+      const backU = u0 + dU + wU + dU;
+      const backV = v0 + dV;
+
+      // Top
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[7],
+        corners[6],
+        corners[2],
+        corners[3],
+        [U(topU), V(topV + dV)],
+        [U(topU + wU), V(topV + dV)],
+        [U(topU + wU), V(topV)],
+        [U(topU), V(topV)]
+      );
+      // Bottom
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[0],
+        corners[1],
+        corners[5],
+        corners[4],
+        [U(bottomU), V(bottomV)],
+        [U(bottomU + wU), V(bottomV)],
+        [U(bottomU + wU), V(bottomV + dV)],
+        [U(bottomU), V(bottomV + dV)]
+      );
+      // Front
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[4],
+        corners[5],
+        corners[6],
+        corners[7],
+        [U(frontU), V(frontV + hV)],
+        [U(frontU + wU), V(frontV + hV)],
+        [U(frontU + wU), V(frontV)],
+        [U(frontU), V(frontV)]
+      );
+      // Back
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[1],
+        corners[0],
+        corners[3],
+        corners[2],
+        [U(backU), V(backV + hV)],
+        [U(backU + wU), V(backV + hV)],
+        [U(backU + wU), V(backV)],
+        [U(backU), V(backV)]
+      );
+      // Left
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[0],
+        corners[4],
+        corners[7],
+        corners[3],
+        [U(leftU), V(leftV + hV)],
+        [U(leftU + dU), V(leftV + hV)],
+        [U(leftU + dU), V(leftV)],
+        [U(leftU), V(leftV)]
+      );
+      // Right
+      baseIndex = pushFace(
+        verts,
+        idx,
+        baseIndex,
+        corners[5],
+        corners[1],
+        corners[2],
+        corners[6],
+        [U(rightU), V(rightV + hV)],
+        [U(rightU + dU), V(rightV + hV)],
+        [U(rightU + dU), V(rightV)],
+        [U(rightU), V(rightV)]
+      );
+      return baseIndex;
+    };
+
+    const makeCorners = (x0, y0, z0, x1, y1, z1, rotX, pivotY, yaw, ox, oy, oz) => {
+      const sinY = Math.sin(yaw);
+      const cosY = Math.cos(yaw);
+      const sinX = Math.sin(rotX);
+      const cosX = Math.cos(rotX);
+      const s = 1 / 16;
+
+      const rotVertex = (x, y, z) => {
+        // X-rotation around pivotY in local pixel space.
+        const dy = y - pivotY;
+        const ry = dy * cosX - z * sinX;
+        const rz = dy * sinX + z * cosX;
+        const lx = x;
+        const ly = pivotY + ry;
+        const lz = rz;
+
+        // Yaw around origin.
+        const wx = (lx * cosY - lz * sinY) * s;
+        const wz = (lx * sinY + lz * cosY) * s;
+        const wy = ly * s;
+        return [ox + wx, oy + wy, oz + wz];
+      };
+
+      return [
+        rotVertex(x0, y0, z0),
+        rotVertex(x1, y0, z0),
+        rotVertex(x1, y1, z0),
+        rotVertex(x0, y1, z0),
+        rotVertex(x0, y0, z1),
+        rotVertex(x1, y0, z1),
+        rotVertex(x1, y1, z1),
+        rotVertex(x0, y1, z1)
+      ];
+    };
+
+    const draw = (proj, view, entities) => {
+      if (!entities || entities.length === 0) return;
+      const image = this.entityTextures?.getImage("zombie") || null;
+      if (!image) return;
+      const tex = this._getOrCreateSpriteTexture(image);
+      if (!tex) return;
+
+      const texW = image.width || 64;
+      const texH = image.height || 64;
+      const verts = [];
+      const idx = [];
+      let baseIndex = 0;
+
+      for (const e of entities) {
+        if (!e || e.type !== "zombie") continue;
+        const yaw = (e.yaw || 0) + Math.PI;
+        const ox = e.x;
+        const oy = e.y;
+        const oz = e.z;
+        const walk = Math.min(1, Math.hypot(e.vx || 0, e.vz || 0) / 2.2);
+        const phase = (e.age || 0) * 6;
+        const swing = Math.sin(phase) * 0.9 * walk;
+
+        // Head (8x8x8), uv (0,0)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(-4, 24, -4, 4, 32, 4, 0, 24, yaw, ox, oy, oz),
+          texW,
+          texH,
+          0,
+          0,
+          8,
+          8,
+          8
+        );
+        // Body (8x12x4), uv (16,16)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(-4, 12, -2, 4, 24, 2, 0, 12, yaw, ox, oy, oz),
+          texW,
+          texH,
+          16,
+          16,
+          8,
+          12,
+          4
+        );
+        // Right Arm (4x12x4), uv (40,16)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(-8, 12, -2, -4, 24, 2, swing, 24, yaw, ox, oy, oz),
+          texW,
+          texH,
+          40,
+          16,
+          4,
+          12,
+          4
+        );
+        // Left Arm (4x12x4), reuse uv (40,16)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(4, 12, -2, 8, 24, 2, -swing, 24, yaw, ox, oy, oz),
+          texW,
+          texH,
+          40,
+          16,
+          4,
+          12,
+          4
+        );
+        // Right Leg (4x12x4), uv (0,16)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(-4, 0, -2, 0, 12, 2, -swing, 12, yaw, ox, oy, oz),
+          texW,
+          texH,
+          0,
+          16,
+          4,
+          12,
+          4
+        );
+        // Left Leg (4x12x4), reuse uv (0,16)
+        baseIndex = addBox(
+          verts,
+          idx,
+          baseIndex,
+          makeCorners(0, 0, -2, 4, 12, 2, swing, 12, yaw, ox, oy, oz),
+          texW,
+          texH,
+          0,
+          16,
+          4,
+          12,
+          4
+        );
+      }
+
+      if (idx.length === 0) return;
+
+      gl.useProgram(program);
+      gl.uniformMatrix4fv(uProj, false, proj);
+      gl.uniformMatrix4fv(uView, false, view);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(uTex, 0);
+
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.DYNAMIC_DRAW);
+
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+      gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
       gl.bindVertexArray(null);
     };
 
@@ -3779,6 +4202,7 @@ export default function FreeCube2Game(engine) {
       style.id = "freecube2-ui-styles";
       style.textContent = `
         #freecube2-ui-root{position:fixed;inset:0;pointer-events:none;z-index:1000;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Arial}
+        #freecube2-ui-root.menu-open{pointer-events:auto}
         #freecube2-fps{position:fixed;left:10px;top:8px;padding:6px 8px;background:rgba(0,0,0,0.35);color:#eaffea;font:12px/1.1 monospace;border:1px solid rgba(255,255,255,0.12);border-radius:6px}
         #freecube2-boss{position:fixed;left:50%;top:14px;transform:translateX(-50%);width:min(520px,86vw);display:none}
         #freecube2-boss-name{margin-bottom:6px;text-align:center;color:rgba(255,255,255,0.95);font:700 13px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.6)}
@@ -3789,12 +4213,18 @@ export default function FreeCube2Game(engine) {
         #freecube2-xp-bar > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(94,236,171,0.96), rgba(72,162,255,0.96))}
         #freecube2-xp-level{margin-top:6px;text-align:center;color:rgba(220,235,255,0.9);font:700 12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.6)}
         #freecube2-status{position:fixed;left:50%;bottom:122px;transform:translateX(-50%);width:min(760px,92vw);display:none;justify-content:space-between;gap:14px}
-        .fc-hearts,.fc-hunger{display:flex;gap:4px;align-items:center}
-        .fc-heart,.fc-food{width:14px;height:14px;border-radius:4px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.25);box-shadow:0 4px 12px rgba(0,0,0,0.25)}
-        .fc-heart.full{background:linear-gradient(180deg, rgba(255,90,90,0.98), rgba(185,25,25,0.98))}
-        .fc-heart.half{background:linear-gradient(90deg, rgba(255,90,90,0.98) 50%, rgba(0,0,0,0.25) 50%)}
-        .fc-food.full{background:linear-gradient(180deg, rgba(255,208,92,0.98), rgba(170,92,20,0.98))}
-        .fc-food.half{background:linear-gradient(90deg, rgba(255,208,92,0.98) 50%, rgba(0,0,0,0.25) 50%)}
+        .fc-hearts,.fc-hunger{display:flex;gap:3px;align-items:center}
+        .fc-heart,.fc-food{width:16px;height:16px;display:inline-block;background:rgba(0,0,0,0.25);border:1px solid rgba(0,0,0,0.55);box-shadow:0 2px 0 rgba(0,0,0,0.45);image-rendering:pixelated}
+        .fc-heart{mask-repeat:no-repeat;mask-position:center;mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain}
+        .fc-food{mask-repeat:no-repeat;mask-position:center;mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain}
+        .fc-heart{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 14s-6-3.7-6-8.3C2 3 3.7 1.5 5.6 1.5c1.2 0 2.1.6 2.4 1.2.3-.6 1.2-1.2 2.4-1.2C12.3 1.5 14 3 14 5.7 14 10.3 8 14 8 14z'/%3E%3C/svg%3E");-webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 14s-6-3.7-6-8.3C2 3 3.7 1.5 5.6 1.5c1.2 0 2.1.6 2.4 1.2.3-.6 1.2-1.2 2.4-1.2C12.3 1.5 14 3 14 5.7 14 10.3 8 14 8 14z'/%3E%3C/svg%3E\")}
+        .fc-food{mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6.4 1.6c1.5 0 2.5 1.2 2.5 2.6v.6c0 .8.6 1.5 1.5 1.7l.5.1c1.8.4 3.1 2 3.1 3.8 0 2.3-1.9 4.2-4.2 4.2H7.2C4.9 14.6 3 12.7 3 10.4V4.2C3 2.8 4 1.6 5.5 1.6h.9z'/%3E%3C/svg%3E\");-webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6.4 1.6c1.5 0 2.5 1.2 2.5 2.6v.6c0 .8.6 1.5 1.5 1.7l.5.1c1.8.4 3.1 2 3.1 3.8 0 2.3-1.9 4.2-4.2 4.2H7.2C4.9 14.6 3 12.7 3 10.4V4.2C3 2.8 4 1.6 5.5 1.6h.9z'/%3E%3C/svg%3E\")}
+        .fc-heart.full{background:linear-gradient(180deg, rgba(255,72,72,0.98), rgba(150,18,18,0.98))}
+        .fc-heart.half{background:linear-gradient(90deg, rgba(255,72,72,0.98) 50%, rgba(0,0,0,0.22) 50%)}
+        .fc-heart.empty{background:rgba(0,0,0,0.22)}
+        .fc-food.full{background:linear-gradient(180deg, rgba(255,210,92,0.98), rgba(160,92,20,0.98))}
+        .fc-food.half{background:linear-gradient(90deg, rgba(255,210,92,0.98) 50%, rgba(0,0,0,0.22) 50%)}
+        .fc-food.empty{background:rgba(0,0,0,0.22)}
         #freecube2-chat{position:fixed;left:10px;bottom:86px;width:min(520px,72vw);pointer-events:none}
         #freecube2-chat-log{display:flex;flex-direction:column;gap:4px;max-height:42vh;overflow:hidden}
         .fc-chat-line{padding:4px 6px;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:rgba(235,245,255,0.95);font:12px/1.25 ui-monospace,Menlo,Consolas,monospace;backdrop-filter:blur(8px)}
@@ -3839,13 +4269,14 @@ export default function FreeCube2Game(engine) {
         .fc-world span{font:13px/1.2 ui-monospace,Menlo,Consolas,monospace;color:rgba(230,230,230,0.9)}
         .fc-field{display:flex;flex-direction:column;gap:6px;margin-top:10px}
         .fc-field label{font:12px/1 ui-monospace,Menlo,Consolas,monospace;color:rgba(255,255,255,0.9)}
-        .fc-field input{all:unset;height:34px;padding:0 10px;background:#111;border:2px solid #000;color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace}
-        .fc-field input:focus{outline:2px solid rgba(255,255,255,0.9)}
+        .fc-field input:not([type="range"]):not([type="checkbox"]){all:unset;height:34px;padding:0 10px;background:#111;border:2px solid #000;color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace}
+        .fc-field input:not([type="range"]):not([type="checkbox"]):focus{outline:2px solid rgba(255,255,255,0.9)}
         .fc-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
         .fc-small{font:12px/1.3 ui-monospace,Menlo,Consolas,monospace;color:rgba(255,255,255,0.82);text-shadow:0 2px 8px rgba(0,0,0,0.6)}
-        .fc-slider{width:100%}
+        .fc-slider{all:revert;width:100%}
         .fc-check{display:flex;align-items:center;gap:10px}
-        .fc-check input{width:18px;height:18px}
+        .fc-check input[type="checkbox"]{all:revert;width:18px;height:18px;accent-color:#fff;cursor:pointer}
+        .fc-check label{cursor:pointer}
         .fc-footer{display:flex;justify-content:space-between;gap:10px;margin-top:16px;color:rgba(255,255,255,0.85);font:12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
       `;
       document.head.appendChild(style);
@@ -4033,12 +4464,14 @@ export default function FreeCube2Game(engine) {
     const showScreen = (screen) => {
       Object.values(screens).forEach((el) => { el.style.display = "none"; });
       screens[screen].style.display = "block";
+      root.classList.add("menu-open");
       menuEl.classList.add("show");
       crosshairEl.style.display = screen === "loading" || screen === "menu" || screen === "title" || screen === "worlds" || screen === "settings" || screen === "pause" ? "none" : "";
     };
 
     const hideMenu = () => {
       menuEl.classList.remove("show");
+      root.classList.remove("menu-open");
       crosshairEl.style.display = "";
     };
 
@@ -4095,15 +4528,18 @@ export default function FreeCube2Game(engine) {
     for (let i = 0; i < HOTBAR_SLOTS; i += 1) {
       const slot = document.createElement("div");
       slot.className = "freecube2-slot" + (i === player.selectedHotbarSlot ? " sel" : "");
-      const img = document.createElement("img");
       const isCreative = settings.gameMode === GAME_MODE.CREATIVE;
       const blockType = isCreative ? HOTBAR_BLOCKS[i] : player.hotbarTypes[i];
       const count = isCreative ? 0 : player.hotbarCounts[i];
-      const path = blockType ? BLOCK_TEXTURE_PATHS[blockType]?.top : null;
+      const hasItem = isCreative ? !!blockType : blockType !== BLOCK.AIR && count > 0;
+      const path = hasItem ? BLOCK_TEXTURE_PATHS[blockType]?.top : null;
       const image = path ? textures?.images?.get(path) : null;
-      img.src = image?.src || "";
-      img.alt = blockType ? (BLOCK_INFO[blockType]?.name || "block") : "empty";
-      slot.appendChild(img);
+      if (image?.src) {
+        const img = document.createElement("img");
+        img.src = image.src;
+        img.alt = blockType ? (BLOCK_INFO[blockType]?.name || "block") : "empty";
+        slot.appendChild(img);
+      }
       if (!isCreative && count > 1) {
         const c = document.createElement("div");
         c.className = "fc-count";
@@ -4197,7 +4633,7 @@ export default function FreeCube2Game(engine) {
     return true;
   }
 
-  function spawnItemEntity(blockType, count, x, y, z, vx = 0, vy = 3.8, vz = 0) {
+  function spawnItemEntity(blockType, count, x, y, z, vx = 0, vy = 3.8, vz = 0, pickupDelay = 0.55) {
     items.push({
       kind: "item",
       blockType,
@@ -4208,7 +4644,8 @@ export default function FreeCube2Game(engine) {
       vx,
       vy,
       vz,
-      age: 0
+      age: 0,
+      pickupDelay
     });
   }
 
@@ -4223,12 +4660,56 @@ export default function FreeCube2Game(engine) {
     const x = eye.x + dir.x * 0.8;
     const y = eye.y + dir.y * 0.2;
     const z = eye.z + dir.z * 0.8;
-    spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4);
+    spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4, 0.55);
   }
 
   function updateItems(dt) {
     if (!items || items.length === 0) return;
     const gravity = 18;
+    const radius = 0.18;
+    const height = 0.34;
+    const bounce = 0.18;
+
+    const resolveAxis = (item, axis, delta) => {
+      let aabb = entityAABB(item.x, item.y, item.z, radius, height);
+      const minX = Math.floor(aabb.minX);
+      const maxX = Math.floor(aabb.maxX - 0.00001);
+      const minY = Math.floor(aabb.minY);
+      const maxY = Math.floor(aabb.maxY - 0.00001);
+      const minZ = Math.floor(aabb.minZ);
+      const maxZ = Math.floor(aabb.maxZ - 0.00001);
+
+      for (let bx = minX; bx <= maxX; bx += 1) {
+        for (let by = minY; by <= maxY; by += 1) {
+          for (let bz = minZ; bz <= maxZ; bz += 1) {
+            if (!isCollidable(world.getBlock(bx, by, bz))) continue;
+            if (!entityIntersectsBlock(item.x, item.y, item.z, radius, height, bx, by, bz)) continue;
+
+            if (axis === "x") {
+              if (delta > 0) item.x = bx - radius - 0.0001;
+              else item.x = bx + 1 + radius + 0.0001;
+              item.vx = 0;
+            } else if (axis === "z") {
+              if (delta > 0) item.z = bz - radius - 0.0001;
+              else item.z = bz + 1 + radius + 0.0001;
+              item.vz = 0;
+            } else if (axis === "y") {
+              if (delta > 0) {
+                item.y = by - height - 0.0001;
+                item.vy = Math.min(0, item.vy);
+              } else {
+                item.y = by + 1 + 0.0001;
+                if (Math.abs(item.vy) > 1.4) item.vy = -item.vy * bounce;
+                else item.vy = 0;
+              }
+            }
+
+            aabb = entityAABB(item.x, item.y, item.z, radius, height);
+          }
+        }
+      }
+    };
+
     const next = [];
     for (const item of items) {
       item.age += dt;
@@ -4238,7 +4719,7 @@ export default function FreeCube2Game(engine) {
       const dy = (item.y + 0.15) - (player.y + 0.9);
       const dz = item.z - player.z;
       const dist = Math.hypot(dx, dy, dz);
-      if (dist < 1.25 && item.age > 0.2) {
+      if (dist < 1.25 && item.age > (item.pickupDelay ?? 0.55)) {
         const left = addToInventory(item.blockType, item.count);
         if (left <= 0) {
           continue;
@@ -4250,20 +4731,21 @@ export default function FreeCube2Game(engine) {
       item.vy = Math.max(item.vy, -18);
 
       item.x += item.vx * dt;
+      resolveAxis(item, "x", item.vx * dt);
       item.z += item.vz * dt;
+      resolveAxis(item, "z", item.vz * dt);
       item.y += item.vy * dt;
+      resolveAxis(item, "y", item.vy * dt);
 
-      // Ground collision (simple).
       if (item.y < 0.1) {
         item.y = 0.1;
         item.vy = 0;
       }
-      const below = world.getBlock(Math.floor(item.x), Math.floor(item.y - 0.12), Math.floor(item.z));
-      if (isCollidable(below) && item.vy <= 0) {
-        item.y = Math.floor(item.y - 0.12) + 1.12;
-        item.vy = 0;
-        item.vx *= Math.pow(0.25, dt * 6);
-        item.vz *= Math.pow(0.25, dt * 6);
+
+      const grounded = isCollidable(world.getBlock(Math.floor(item.x), Math.floor(item.y - 0.1), Math.floor(item.z)));
+      if (grounded) {
+        item.vx *= Math.pow(0.32, dt * 6);
+        item.vz *= Math.pow(0.32, dt * 6);
       } else {
         item.vx *= Math.pow(0.92, dt * 60);
         item.vz *= Math.pow(0.92, dt * 60);
@@ -4615,29 +5097,31 @@ export default function FreeCube2Game(engine) {
   }
 
   function renderHearts(el, value, max) {
-    const hearts = Math.ceil(max / 2);
-    const fullHearts = Math.floor(value / 2);
-    const hasHalf = value % 2 === 1;
+    const hearts = 10;
+    const fullHearts = clamp(Math.floor(value / 2), 0, hearts);
+    const hasHalf = value % 2 === 1 && fullHearts < hearts;
     el.innerHTML = "";
     for (let i = 0; i < hearts; i += 1) {
       const d = document.createElement("div");
       d.className = "fc-heart";
       if (i < fullHearts) d.classList.add("full");
       else if (i === fullHearts && hasHalf) d.classList.add("half");
+      else d.classList.add("empty");
       el.appendChild(d);
     }
   }
 
   function renderHunger(el, value, max) {
-    const foods = Math.ceil(max / 2);
-    const full = Math.floor(value / 2);
-    const hasHalf = value % 2 === 1;
+    const foods = 10;
+    const full = clamp(Math.floor(value / 2), 0, foods);
+    const hasHalf = value % 2 === 1 && full < foods;
     el.innerHTML = "";
     for (let i = 0; i < foods; i += 1) {
       const d = document.createElement("div");
       d.className = "fc-food";
       if (i < full) d.classList.add("full");
       else if (i === full && hasHalf) d.classList.add("half");
+      else d.classList.add("empty");
       el.appendChild(d);
     }
   }
@@ -4838,16 +5322,18 @@ export default function FreeCube2Game(engine) {
     if (currentTarget.type === BLOCK.BEDROCK || currentTarget.type === BLOCK.WATER) return false;
     if (world.setBlock(currentTarget.x, currentTarget.y, currentTarget.z, BLOCK.AIR)) {
       if (!isCreativeMode()) {
-        const jitter = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 1.2;
+        const jx = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 2.2;
+        const jz = (random3(currentTarget.z, currentTarget.y, currentTarget.x, world.seed + 2002) - 0.5) * 2.2;
         spawnItemEntity(
           currentTarget.type,
           1,
           currentTarget.x + 0.5,
-          currentTarget.y + 0.3,
+          currentTarget.y + 0.55,
           currentTarget.z + 0.5,
-          jitter,
-          4.2,
-          -jitter
+          jx,
+          3.4,
+          jz,
+          0.55
         );
       }
       player.breakCooldown = settings.gameMode === GAME_MODE.CREATIVE ? 0.06 : 0.12;
@@ -5205,6 +5691,15 @@ export default function FreeCube2Game(engine) {
       ensureStore();
       updateChat(dt);
       updateHud(dt);
+
+      // When pointer lock is active, ESC may only exit pointer lock (no keydown).
+      // Treat that as "pause".
+      if (mode === "playing" && input.consumeLostPointerLock()) {
+        mode = "paused";
+        input.pointerLockEnabled = false;
+        if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
+        ui.showScreen("pause");
+      }
 
       if (input.consumePress("Escape")) {
         if (chatOpen) {
