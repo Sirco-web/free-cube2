@@ -1,5 +1,6 @@
-const GAME_VERSION = "4.8.1";
-const STORAGE_KEY = "freecube2-static-save-v5";
+const GAME_VERSION = "5.0.0";
+const STORAGE_NAMESPACE_VERSION = 6;
+const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
 const WORLD_SEED = 124578;
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 112;
@@ -34,8 +35,13 @@ const GAME_MODE = {
   CREATIVE: "creative"
 };
 
-const WORLDS_INDEX_KEY = "freecube2-worlds-index-v1";
-const WORLD_SAVE_PREFIX = "freecube2-world-save-v1:";
+const WORLDS_INDEX_KEY = `freecube2-worlds-index-v${STORAGE_NAMESPACE_VERSION}`;
+const WORLD_SAVE_PREFIX = `freecube2-world-save-v${STORAGE_NAMESPACE_VERSION}:`;
+const WORLD_EXPORT_FORMAT = "freecube2-world";
+const WORLD_EXPORT_FORMAT_VERSION = 2;
+const LEGACY_WORLD_INDEX_KEYS = ["freecube2-worlds-index-v1"];
+const LEGACY_WORLD_SAVE_PREFIXES = ["freecube2-world-save-v1:"];
+const LEGACY_PURGE_MARKER_KEY = `freecube2-storage-purge-complete-v${STORAGE_NAMESPACE_VERSION}`;
 const LEGACY_SAVE_KEYS = [
   "freecube2-static-save-v4",
   "freecube2-static-save-v5"
@@ -84,6 +90,51 @@ function normalizeWorldSeed(value, fallback = generateRandomWorldSeed()) {
   return (hash >>> 0) || fallback;
 }
 
+function makeSafeFileName(value, fallback = "world") {
+  const raw = String(value || fallback).trim();
+  const normalized = raw.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-").replace(/\s+/g, " ").trim();
+  const compact = normalized.replace(/[. ]+$/g, "").slice(0, 64);
+  return compact || fallback;
+}
+
+function downloadTextFile(filename, content, mimeType = "application/json") {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
+
+function purgeLegacySaveNamespaces() {
+  try {
+    if (localStorage.getItem(LEGACY_PURGE_MARKER_KEY) === "1") {
+      return;
+    }
+
+    const keysToRemove = new Set([...LEGACY_SAVE_KEYS, ...LEGACY_WORLD_INDEX_KEYS]);
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (LEGACY_WORLD_SAVE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+        keysToRemove.add(key);
+      }
+    }
+
+    for (const key of keysToRemove) {
+      localStorage.removeItem(key);
+    }
+    localStorage.setItem(LEGACY_PURGE_MARKER_KEY, "1");
+  } catch (error) {
+    console.warn("Legacy save purge failed:", error.message);
+  }
+}
+
 function serializeModifiedChunks(modifiedChunks) {
   const result = {};
   for (const [chunkKey, bucket] of modifiedChunks) {
@@ -128,6 +179,7 @@ class WorldStore {
     if (this.index) {
       return this.index;
     }
+    purgeLegacySaveNamespaces();
     try {
       const raw = localStorage.getItem(WORLDS_INDEX_KEY);
       if (raw) {
@@ -140,8 +192,7 @@ class WorldStore {
     } catch (error) {
       console.warn("World index load failed:", error.message);
     }
-    this.index = { version: 1, worlds: [], selectedWorldId: null };
-    this.migrateLegacySave();
+    this.index = { version: STORAGE_NAMESPACE_VERSION, worlds: [], selectedWorldId: null };
     this.saveIndex();
     return this.index;
   }
@@ -159,37 +210,7 @@ class WorldStore {
     }
   }
 
-  migrateLegacySave() {
-    if (!this.index || this.index.worlds.length > 0) {
-      return;
-    }
-    for (const key of LEGACY_SAVE_KEYS) {
-      try {
-        const raw = localStorage.getItem(key);
-        if (!raw) {
-          continue;
-        }
-        const data = JSON.parse(raw);
-        if (!data || typeof data !== "object") {
-          continue;
-        }
-        const seed = normalizeWorldSeed(data.seed, generateRandomWorldSeed());
-        const name = "Migrated World";
-        const worldId = this.createWorld({ name, seed, select: true });
-        this.saveWorld(worldId, {
-          seed,
-          modifiedChunks: data.modifiedChunks || {},
-          player: data.player || null,
-          settings: data.settings || null
-        });
-        localStorage.removeItem(key);
-        console.log("Migrated legacy save into world id", worldId);
-        break;
-      } catch (error) {
-        console.warn("Legacy migration failed:", error.message);
-      }
-    }
-  }
+  migrateLegacySave() {}
 
   listWorlds() {
     this.loadIndex();
@@ -299,6 +320,70 @@ class WorldStore {
     meta.lastPlayedAt = Date.now();
     meta.updatedAt = meta.lastPlayedAt;
     this.saveIndex();
+  }
+
+  exportWorld(worldId) {
+    const meta = this.getWorldMeta(worldId);
+    const save = this.loadWorld(worldId);
+    if (!meta || !save) {
+      return null;
+    }
+    return {
+      format: WORLD_EXPORT_FORMAT,
+      formatVersion: WORLD_EXPORT_FORMAT_VERSION,
+      gameVersion: GAME_VERSION,
+      exportedAt: Date.now(),
+      meta: {
+        name: meta.name,
+        seed: meta.seed,
+        createdAt: meta.createdAt || Date.now(),
+        updatedAt: meta.updatedAt || Date.now(),
+        lastPlayedAt: meta.lastPlayedAt || null
+      },
+      payload: {
+        version: save.version || GAME_VERSION,
+        seed: normalizeWorldSeed(save.seed ?? meta.seed, meta.seed),
+        modifiedChunks: save.modifiedChunks && typeof save.modifiedChunks === "object" ? save.modifiedChunks : {},
+        furnaces: save.furnaces && typeof save.furnaces === "object" ? save.furnaces : {},
+        player: save.player && typeof save.player === "object" ? save.player : null,
+        settings: save.settings && typeof save.settings === "object" ? save.settings : null
+      }
+    };
+  }
+
+  importWorld(data, { select = true } = {}) {
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+
+    const exportedMeta = data.meta && typeof data.meta === "object" ? data.meta : {};
+    const payloadCandidate = data.payload && typeof data.payload === "object"
+      ? data.payload
+      : (data.modifiedChunks || data.player || data.settings || data.furnaces || data.seed ? data : null);
+    if (!payloadCandidate || typeof payloadCandidate !== "object") {
+      return null;
+    }
+
+    const seed = normalizeWorldSeed(payloadCandidate.seed ?? exportedMeta.seed, generateRandomWorldSeed());
+    const name = String(exportedMeta.name || "Imported World").trim() || "Imported World";
+    const worldId = this.createWorld({ name, seed, select });
+    const meta = this.getWorldMeta(worldId);
+    if (meta) {
+      meta.createdAt = Number.isFinite(exportedMeta.createdAt) ? exportedMeta.createdAt : meta.createdAt;
+      meta.updatedAt = Date.now();
+      meta.lastPlayedAt = null;
+      this.saveIndex();
+    }
+
+    this.saveWorld(worldId, {
+      version: payloadCandidate.version || data.gameVersion || GAME_VERSION,
+      seed,
+      modifiedChunks: payloadCandidate.modifiedChunks && typeof payloadCandidate.modifiedChunks === "object" ? payloadCandidate.modifiedChunks : {},
+      furnaces: payloadCandidate.furnaces && typeof payloadCandidate.furnaces === "object" ? payloadCandidate.furnaces : {},
+      player: payloadCandidate.player && typeof payloadCandidate.player === "object" ? payloadCandidate.player : null,
+      settings: payloadCandidate.settings && typeof payloadCandidate.settings === "object" ? payloadCandidate.settings : null
+    });
+    return worldId;
   }
 }
 
@@ -2086,8 +2171,11 @@ class TerrainGenerator {
     this.hills = new FractalNoise(seed + 23, 4, 0.52, 2.05);
     this.details = new FractalNoise(seed + 37, 3, 0.55, 2.4);
     this.moisture = new FractalNoise(seed + 49, 4, 0.5, 2);
+    this.temperature = new FractalNoise(seed + 61, 4, 0.5, 2);
     this.ridges = new FractalNoise(seed + 71, 4, 0.48, 2.2);
+    this.forest = new FractalNoise(seed + 83, 4, 0.5, 2.1);
     this.peaks = new FractalNoise(seed + 93, 4, 0.5, 2.12);
+    this.erosion = new FractalNoise(seed + 107, 3, 0.54, 2.15);
     this.rivers = new FractalNoise(seed + 121, 3, 0.55, 2.3);
     this.cavesXZ = new FractalNoise(seed + 151, 3, 0.56, 2.1);
     this.cavesXY = new FractalNoise(seed + 173, 3, 0.52, 2.06);
@@ -2099,17 +2187,21 @@ class TerrainGenerator {
     const continental = this.continents.fractal(x * 0.0038, z * 0.0038) * 0.5 + 0.5;
     const hills = this.hills.fractal(x * 0.012, z * 0.012);
     const detail = this.details.fractal(x * 0.038, z * 0.038);
+    const erosion = this.erosion.fractal(x * 0.0075, z * 0.0075) * 0.5 + 0.5;
     const ridge = 1 - Math.abs(this.ridges.fractal(x * 0.009, z * 0.009));
     const peaks = Math.max(0, this.peaks.fractal(x * 0.0065, z * 0.0065) * 0.5 + 0.5 - 0.42);
     const river = 1 - Math.min(1, Math.abs(this.rivers.fractal(x * 0.0048, z * 0.0048)) * 4.4);
 
-    let height = 18;
-    height += continental * 18;
-    height += hills * 7;
-    height += ridge * 8;
+    let height = 16;
+    height += continental * 17;
+    height += hills * (5.5 + erosion * 4.5);
+    height += ridge * (4.5 + erosion * 5.5);
     height += detail * 2.8;
-    height += peaks * peaks * 28;
-    height -= river > 0.65 ? (river - 0.65) * 17 : 0;
+    height += peaks * peaks * (22 + erosion * 13);
+    if (continental < 0.33) {
+      height -= (0.33 - continental) * 15;
+    }
+    height -= river > 0.62 ? (river - 0.62) * 20 : 0;
 
     return clamp(Math.round(height), 6, WORLD_HEIGHT - 8);
   }
@@ -2117,6 +2209,8 @@ class TerrainGenerator {
   describeColumn(x, z) {
     const height = this.sampleHeight(x, z);
     const moisture = this.moisture.fractal(x * 0.006, z * 0.006) * 0.5 + 0.5;
+    const temperature = this.temperature.fractal(x * 0.0055, z * 0.0055) * 0.5 + 0.5;
+    const forest = this.forest.fractal(x * 0.0085, z * 0.0085) * 0.5 + 0.5;
     const river = 1 - Math.min(1, Math.abs(this.rivers.fractal(x * 0.0048, z * 0.0048)) * 4.4);
     const slope =
       Math.abs(this.sampleHeight(x + 1, z) - this.sampleHeight(x - 1, z)) +
@@ -2125,33 +2219,47 @@ class TerrainGenerator {
     let biome = "plains";
     let surface = BLOCK.GRASS;
     let filler = BLOCK.DIRT;
+    let topDepth = 4;
 
-    if (river > 0.72 || height <= SEA_LEVEL + 1) {
-      biome = "shore";
+    if (river > 0.74 || height <= SEA_LEVEL + 1) {
+      biome = "riverbank";
       surface = BLOCK.SAND;
       filler = BLOCK.SAND;
-    } else if (moisture < 0.28) {
+      topDepth = 5;
+    } else if (temperature > 0.66 && moisture < 0.34) {
       biome = "desert";
       surface = BLOCK.SAND;
       filler = BLOCK.SAND;
-    } else if (height > SEA_LEVEL + 28) {
+      topDepth = 5;
+    } else if (height > SEA_LEVEL + 30 || (height > SEA_LEVEL + 22 && slope > 7)) {
       biome = "mountains";
       surface = slope > 4 ? BLOCK.STONE : BLOCK.GRASS;
       filler = BLOCK.STONE;
+      topDepth = surface === BLOCK.STONE ? 2 : 3;
+    } else if (forest > 0.58 && moisture > 0.45 && slope < 6) {
+      biome = "forest";
+      topDepth = 4;
     } else if (height > SEA_LEVEL + 16 && slope > 7) {
       biome = "cliff";
       surface = BLOCK.STONE;
       filler = BLOCK.STONE;
+      topDepth = 2;
+    } else if (moisture > 0.72 && slope < 5) {
+      biome = "meadow";
+      topDepth = 4;
     }
 
     return {
       height,
       moisture,
+      temperature,
+      forest,
       river,
       slope,
       biome,
       surface,
-      filler
+      filler,
+      topDepth
     };
   }
 
@@ -2159,18 +2267,29 @@ class TerrainGenerator {
     if (
       column.surface !== BLOCK.GRASS ||
       column.height <= SEA_LEVEL + 1 ||
-      column.slope > 4 ||
-      column.biome === "mountains"
+      column.slope > 5 ||
+      column.biome === "mountains" ||
+      column.biome === "cliff"
     ) {
       return false;
     }
     const chance = random2(x, z, this.seed + 301);
-    const threshold = column.moisture > 0.6 ? 0.91 : 0.952;
+    let threshold = 0.955;
+    if (column.biome === "forest") {
+      threshold = 0.76;
+    } else if (column.biome === "meadow") {
+      threshold = 0.9;
+    } else if (column.moisture > 0.6) {
+      threshold = 0.9;
+    }
     return chance > threshold;
   }
 
-  getTreeHeight(x, z) {
-    return 4 + Math.floor(random2(x, z, this.seed + 401) * 3);
+  getTreeHeight(x, z, column = null) {
+    const biome = column?.biome || this.describeColumn(x, z).biome;
+    const base = biome === "forest" ? 5 : 4;
+    const variance = biome === "forest" ? 3 : 2;
+    return base + Math.floor(random2(x, z, this.seed + 401) * variance);
   }
 
   shouldCarveCave(x, y, z, surfaceY) {
@@ -2250,12 +2369,13 @@ class Chunk {
         const worldZ = baseZ + lz;
         const column = this.world.terrain.describeColumn(worldX, worldZ);
         const surfaceY = column.height;
+        const topDepth = Math.max(2, column.topDepth || 4);
 
         for (let y = 0; y < WORLD_HEIGHT; y += 1) {
           let type = BLOCK.AIR;
           if (y === 0) {
             type = BLOCK.BEDROCK;
-          } else if (y < surfaceY - 3) {
+          } else if (y < surfaceY - topDepth) {
             type = BLOCK.STONE;
           } else if (y < surfaceY) {
             type = column.filler;
@@ -2296,7 +2416,7 @@ class Chunk {
           column.height < WORLD_HEIGHT - 10 &&
           this.world.terrain.shouldPlaceTree(worldX, worldZ, column)
         ) {
-          this.applyWorldTree(worldX, column.height, worldZ, this.world.terrain.getTreeHeight(worldX, worldZ));
+          this.applyWorldTree(worldX, column.height, worldZ, this.world.terrain.getTreeHeight(worldX, worldZ, column));
         }
       }
     }
@@ -3146,7 +3266,8 @@ class Player {
     // PointerLock movementX is positive when moving mouse right.
     // In our coordinate setup, subtracting makes "mouse left -> turn left" like Minecraft.
     this.yaw -= deltaX * sensitivity;
-    this.pitch = clamp(this.pitch + deltaY * sensitivity * 0.84 * invertY, -1.5, 1.5);
+    // Standard Minecraft feel: mouse up looks up, mouse down looks down.
+    this.pitch = clamp(this.pitch - deltaY * sensitivity * 0.84 * invertY, -1.5, 1.5);
   }
 
   resolveAxisCollisions(world, axis, delta) {
@@ -6156,6 +6277,8 @@ export default function FreeCube2Game(engine) {
         #freecube2-hotbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:8px;padding:10px 12px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.14);border-radius:10px}
         #freecube2-inventory{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);display:none;pointer-events:auto;z-index:1002}
         .fc-inv-panel{min-width:min(664px,94vw);padding:18px;background:#c6c6c6;border:4px solid #1f1f1f;box-shadow:inset 4px 4px 0 #ffffff,inset -4px -4px 0 #555555,0 18px 48px rgba(0,0,0,0.42);image-rendering:pixelated}
+        .fc-inv-panel.context-table{min-width:min(536px,92vw)}
+        .fc-inv-panel.context-furnace{min-width:min(470px,88vw)}
         .fc-inv-title{margin-bottom:12px;color:#3a3a3a;font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;text-align:left;text-shadow:none}
         .fc-inv-top{display:flex;justify-content:center;gap:20px;align-items:stretch;margin-bottom:16px;flex-wrap:wrap}
         .fc-inv-pane{display:flex;flex-direction:column;gap:8px;min-width:0}
@@ -6163,6 +6286,7 @@ export default function FreeCube2Game(engine) {
         .fc-inv-subtitle{color:#3a3a3a;font:700 13px/1 ui-monospace,Menlo,Consolas,monospace;text-align:center;text-shadow:none}
         .fc-inv-column{display:grid;grid-template-columns:repeat(1,44px);gap:8px;justify-content:center}
         .fc-inv-crafting-row{display:flex;align-items:center;gap:12px}
+        .fc-inv-crafting-row.table{gap:18px}
         .fc-inv-grid-2{grid-template-columns:repeat(2,44px)}
         .fc-inv-grid-3{grid-template-columns:repeat(3,44px)}
         .fc-inv-arrow{color:#8a8a8a;font:900 28px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:none}
@@ -6301,20 +6425,20 @@ export default function FreeCube2Game(engine) {
       </div>
       <div id="freecube2-hotbar"></div>
       <div id="freecube2-inventory">
-        <div class="fc-inv-panel">
+        <div id="freecube2-inventory-panel" class="fc-inv-panel">
           <div id="freecube2-inventory-title" class="fc-inv-title">Inventory</div>
-          <div class="fc-inv-top">
-            <div class="fc-inv-pane">
+          <div id="freecube2-inventory-top" class="fc-inv-top">
+            <div id="freecube2-inventory-armor-pane" class="fc-inv-pane">
               <div class="fc-inv-subtitle">Armor</div>
               <div id="freecube2-inventory-armor" class="fc-inv-column"></div>
             </div>
-            <div class="fc-inv-pane fc-inv-preview-pane">
+            <div id="freecube2-inventory-preview-pane" class="fc-inv-pane fc-inv-preview-pane">
               <div class="fc-inv-subtitle">Player</div>
               <div id="freecube2-inventory-preview" class="fc-inv-preview"></div>
             </div>
-            <div class="fc-inv-pane">
+            <div id="freecube2-inventory-craft-pane" class="fc-inv-pane">
               <div id="freecube2-crafting-label" class="fc-inv-subtitle">Crafting</div>
-              <div class="fc-inv-crafting-row">
+              <div id="freecube2-crafting-row" class="fc-inv-crafting-row">
                 <div id="freecube2-crafting-grid" class="fc-inv-grid fc-inv-grid-2"></div>
                 <div class="fc-inv-arrow">→</div>
                 <div id="freecube2-crafting-output" class="freecube2-slot"></div>
@@ -6373,11 +6497,12 @@ export default function FreeCube2Game(engine) {
               <button class="fc-btn half" data-action="new-world">Create New World</button>
             </div>
             <div class="fc-row" style="margin-top:10px">
-              <button class="fc-btn small disabled" disabled>Edit</button>
+              <button class="fc-btn small" data-action="import-world">Import</button>
+              <button class="fc-btn small" data-action="export-world">Export</button>
               <button class="fc-btn small danger" data-action="delete-world">Delete</button>
-              <button class="fc-btn small disabled" disabled>Re-Create</button>
               <button class="fc-btn small" data-action="back-title">Cancel</button>
             </div>
+            <input id="fc-import-world-file" type="file" accept=".json,application/json" style="display:none" />
             <div id="fc-new-world" class="fc-card" style="display:none;margin-top:10px">
               <div style="font:900 18px ui-monospace,Menlo,Consolas,monospace;color:#fff;margin-bottom:8px;text-shadow:0 2px 10px rgba(0,0,0,0.7)">Create New World</div>
               <div class="fc-grid">
@@ -6515,10 +6640,16 @@ export default function FreeCube2Game(engine) {
     const xpLevelEl = root.querySelector("#freecube2-xp-level");
     const hotbarEl = root.querySelector("#freecube2-hotbar");
     const inventoryEl = root.querySelector("#freecube2-inventory");
+    const inventoryPanelEl = root.querySelector("#freecube2-inventory-panel");
     const inventoryTitleEl = root.querySelector("#freecube2-inventory-title");
+    const inventoryTopEl = root.querySelector("#freecube2-inventory-top");
+    const inventoryArmorPaneEl = root.querySelector("#freecube2-inventory-armor-pane");
+    const inventoryPreviewPaneEl = root.querySelector("#freecube2-inventory-preview-pane");
+    const inventoryCraftPaneEl = root.querySelector("#freecube2-inventory-craft-pane");
     const inventoryArmorEl = root.querySelector("#freecube2-inventory-armor");
     const inventoryPreviewEl = root.querySelector("#freecube2-inventory-preview");
     const inventoryCraftLabelEl = root.querySelector("#freecube2-crafting-label");
+    const inventoryCraftRowEl = root.querySelector("#freecube2-crafting-row");
     const inventoryCraftGridEl = root.querySelector("#freecube2-crafting-grid");
     const inventoryCraftResultEl = root.querySelector("#freecube2-crafting-output");
     const inventoryFurnacePaneEl = root.querySelector("#freecube2-furnace-pane");
@@ -6546,7 +6677,9 @@ export default function FreeCube2Game(engine) {
     const worldNameInput = root.querySelector("#fc-world-name");
     const worldSeedInput = root.querySelector("#fc-world-seed");
     const playWorldBtn = root.querySelector('[data-action="play-world"]');
+    const exportWorldBtn = root.querySelector('[data-action="export-world"]');
     const deleteWorldBtn = root.querySelector('[data-action="delete-world"]');
+    const importWorldFileInput = root.querySelector("#fc-import-world-file");
 
     const rdSlider = root.querySelector("#fc-rd");
     const rdLabel = root.querySelector("#fc-rd-label");
@@ -6614,10 +6747,16 @@ export default function FreeCube2Game(engine) {
       xpLevelEl,
       worldListEl,
       inventoryEl,
+      inventoryPanelEl,
       inventoryTitleEl,
+      inventoryTopEl,
+      inventoryArmorPaneEl,
+      inventoryPreviewPaneEl,
+      inventoryCraftPaneEl,
       inventoryArmorEl,
       inventoryPreviewEl,
       inventoryCraftLabelEl,
+      inventoryCraftRowEl,
       inventoryCraftGridEl,
       inventoryCraftResultEl,
       inventoryFurnacePaneEl,
@@ -6633,7 +6772,9 @@ export default function FreeCube2Game(engine) {
       worldNameInput,
       worldSeedInput,
       playWorldBtn,
+      exportWorldBtn,
       deleteWorldBtn,
+      importWorldFileInput,
       rdSlider,
       rdLabel,
       msSlider,
@@ -7057,13 +7198,20 @@ export default function FreeCube2Game(engine) {
     if (!ui || !player) return;
     const craftState = getActiveCraftState();
     const craftResult = getCraftingResult();
+    const isTable = inventoryContext === "table";
     const isFurnace = inventoryContext === "furnace";
     const furnaceState = getActiveFurnaceState(false);
     ui.inventoryTitleEl.textContent = isFurnace ? "Furnace" : craftState.title;
     ui.inventoryCraftLabelEl.textContent = craftState.label;
     ui.inventoryCraftGridEl.classList.toggle("fc-inv-grid-2", craftState.size === 2);
     ui.inventoryCraftGridEl.classList.toggle("fc-inv-grid-3", craftState.size === 3);
-    ui.inventoryCraftGridEl.parentElement.style.display = isFurnace ? "none" : "flex";
+    ui.inventoryCraftRowEl.classList.toggle("table", isTable);
+    ui.inventoryPanelEl.classList.toggle("context-table", isTable);
+    ui.inventoryPanelEl.classList.toggle("context-furnace", isFurnace);
+    ui.inventoryArmorPaneEl.style.display = isTable || isFurnace ? "none" : "flex";
+    ui.inventoryPreviewPaneEl.style.display = isTable || isFurnace ? "none" : "flex";
+    ui.inventoryCraftPaneEl.style.display = isFurnace ? "none" : "flex";
+    ui.inventoryCraftRowEl.style.display = isFurnace ? "none" : "flex";
     ui.inventoryCraftLabelEl.style.display = isFurnace ? "none" : "block";
     ui.inventoryFurnacePaneEl.classList.toggle("show", isFurnace);
 
@@ -8944,18 +9092,29 @@ export default function FreeCube2Game(engine) {
       const row = document.createElement("div");
       row.className = "fc-world" + (worldMeta.id === resolvedSelectedId ? " sel" : "");
       row.dataset.worldId = worldMeta.id;
-      row.innerHTML = `
-        <div>
-          <b>${worldMeta.name}</b><br/>
-          <span>Seed ${worldMeta.seed}</span>
-        </div>
-        <span>${worldMeta.lastPlayedAt ? new Date(worldMeta.lastPlayedAt).toLocaleDateString() : "Never played"}</span>
-      `;
+
+      const left = document.createElement("div");
+      const title = document.createElement("b");
+      title.textContent = worldMeta.name;
+      const br = document.createElement("br");
+      const seed = document.createElement("span");
+      seed.textContent = `Seed ${worldMeta.seed}`;
+      left.appendChild(title);
+      left.appendChild(br);
+      left.appendChild(seed);
+
+      const right = document.createElement("span");
+      right.textContent = worldMeta.lastPlayedAt ? new Date(worldMeta.lastPlayedAt).toLocaleDateString() : "Never played";
+
+      row.appendChild(left);
+      row.appendChild(right);
       ui.worldListEl.appendChild(row);
     });
     const canUseSelection = !!resolvedSelectedId && worlds.some((worldMeta) => worldMeta.id === resolvedSelectedId);
     ui.playWorldBtn.disabled = !canUseSelection;
     ui.playWorldBtn.classList.toggle("disabled", !canUseSelection);
+    ui.exportWorldBtn.disabled = !canUseSelection;
+    ui.exportWorldBtn.classList.toggle("disabled", !canUseSelection);
     ui.deleteWorldBtn.disabled = !canUseSelection;
     ui.deleteWorldBtn.classList.toggle("disabled", !canUseSelection);
   }
@@ -9079,6 +9238,43 @@ export default function FreeCube2Game(engine) {
     store.saveWorld(activeWorldId, payload);
     world.saveDirty = false;
     saveTimer = 0;
+  }
+
+  function exportSelectedWorld() {
+    ensureStore();
+    if (!selectedWorldId) {
+      alert("Select a world to export first.");
+      return;
+    }
+    if (activeWorldId === selectedWorldId) {
+      saveWorld(true);
+    }
+    const exported = store.exportWorld(selectedWorldId);
+    if (!exported) {
+      alert("That world could not be exported.");
+      return;
+    }
+    const meta = store.getWorldMeta(selectedWorldId);
+    const filename = `${makeSafeFileName(meta?.name || "world")}.freecube2-world.json`;
+    downloadTextFile(filename, JSON.stringify(exported, null, 2));
+  }
+
+  async function importWorldFile(file) {
+    ensureStore();
+    const text = await file.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new Error("That file is not valid JSON.");
+    }
+    const importedId = store.importWorld(parsed, { select: true });
+    if (!importedId) {
+      throw new Error("That file is not a supported FreeCube2 world export.");
+    }
+    selectedWorldId = importedId;
+    ui.newWorldCard.style.display = "none";
+    refreshWorldList(selectedWorldId);
   }
 
   function loadWorldFromStore(worldId) {
@@ -9700,6 +9896,11 @@ export default function FreeCube2Game(engine) {
         ui.worldNameInput.value = "";
         ui.worldSeedInput.value = "";
         ui.worldNameInput.focus();
+      } else if (action === "import-world") {
+        ui.importWorldFileInput.value = "";
+        ui.importWorldFileInput.click();
+      } else if (action === "export-world") {
+        exportSelectedWorld();
       } else if (action === "cancel-new-world") {
         ui.newWorldCard.style.display = "none";
       } else if (action === "create-world") {
@@ -9734,6 +9935,20 @@ export default function FreeCube2Game(engine) {
         event.preventDefault();
         createAndStartWorld();
       });
+    });
+
+    ui.importWorldFileInput.addEventListener("change", async () => {
+      const file = ui.importWorldFileInput.files?.[0];
+      if (!file) {
+        return;
+      }
+      try {
+        await importWorldFile(file);
+      } catch (error) {
+        alert(`Import failed: ${error.message}`);
+      } finally {
+        ui.importWorldFileInput.value = "";
+      }
     });
 
     ui.root.addEventListener("contextmenu", (event) => {
