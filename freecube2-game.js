@@ -1,4 +1,4 @@
-const GAME_VERSION = "4.5.2";
+const GAME_VERSION = "4.6.1";
 const STORAGE_KEY = "freecube2-static-save-v5";
 const WORLD_SEED = 124578;
 const CHUNK_SIZE = 16;
@@ -309,6 +309,47 @@ function unpackLocalKey(key) {
   return { x, y, z };
 }
 
+function serializeFurnaceStates(furnaces) {
+  const result = {};
+  for (const [key, state] of furnaces || []) {
+    if (!state || typeof state !== "object") continue;
+    result[key] = {
+      inputType: Number(state.inputType) || 0,
+      inputCount: Math.max(0, Math.floor(Number(state.inputCount) || 0)),
+      fuelType: Number(state.fuelType) || 0,
+      fuelCount: Math.max(0, Math.floor(Number(state.fuelCount) || 0)),
+      outputType: Number(state.outputType) || 0,
+      outputCount: Math.max(0, Math.floor(Number(state.outputCount) || 0)),
+      burnTime: Math.max(0, Number(state.burnTime) || 0),
+      burnTimeTotal: Math.max(0, Number(state.burnTimeTotal) || 0),
+      cookTime: Math.max(0, Number(state.cookTime) || 0)
+    };
+  }
+  return result;
+}
+
+function deserializeFurnaceStates(obj) {
+  const result = new Map();
+  if (!obj || typeof obj !== "object") {
+    return result;
+  }
+  for (const [key, state] of Object.entries(obj)) {
+    if (!state || typeof state !== "object") continue;
+    result.set(key, {
+      inputType: Number(state.inputType) || 0,
+      inputCount: Math.max(0, Math.floor(Number(state.inputCount) || 0)),
+      fuelType: Number(state.fuelType) || 0,
+      fuelCount: Math.max(0, Math.floor(Number(state.fuelCount) || 0)),
+      outputType: Number(state.outputType) || 0,
+      outputCount: Math.max(0, Math.floor(Number(state.outputCount) || 0)),
+      burnTime: Math.max(0, Number(state.burnTime) || 0),
+      burnTimeTotal: Math.max(0, Number(state.burnTimeTotal) || 0),
+      cookTime: Math.max(0, Number(state.cookTime) || 0)
+    });
+  }
+  return result;
+}
+
 function hash4(x, y, z, seed) {
   let h = seed >>> 0;
   h = Math.imul(h ^ (x | 0), 374761393);
@@ -410,7 +451,30 @@ const BLOCK = {
   PLANKS: 8,
   BRICK: 9,
   BEDROCK: 10,
-  GLASS: 11
+  GLASS: 11,
+  CRAFTING_TABLE: 12,
+  FURNACE: 13
+};
+
+const ITEM = {
+  STICK: 32,
+  WOODEN_PICKAXE: 33,
+  WOODEN_AXE: 34,
+  WOODEN_SHOVEL: 35,
+  WOODEN_SWORD: 36,
+  LEATHER_HELMET: 40,
+  LEATHER_CHESTPLATE: 41,
+  LEATHER_LEGGINGS: 42,
+  LEATHER_BOOTS: 43,
+  IRON_HELMET: 44,
+  IRON_CHESTPLATE: 45,
+  IRON_LEGGINGS: 46,
+  IRON_BOOTS: 47,
+  RAW_CHICKEN: 48,
+  COOKED_CHICKEN: 49,
+  RAW_MUTTON: 50,
+  COOKED_MUTTON: 51,
+  ROTTEN_FLESH: 52
 };
 
 const BLOCK_BREAK_TIME = {
@@ -420,6 +484,8 @@ const BLOCK_BREAK_TIME = {
   [BLOCK.STONE]: 1.4,
   [BLOCK.WOOD]: 1.05,
   [BLOCK.PLANKS]: 0.85,
+  [BLOCK.CRAFTING_TABLE]: 0.95,
+  [BLOCK.FURNACE]: 1.25,
   [BLOCK.LEAVES]: 0.2,
   [BLOCK.BRICK]: 1.9,
   [BLOCK.GLASS]: 0.28,
@@ -430,6 +496,26 @@ const BLOCK_BREAK_TIME = {
 function getBreakTime(blockType) {
   const t = BLOCK_BREAK_TIME[blockType];
   return Number.isFinite(t) ? Math.max(0.08, t) : 0.8;
+}
+
+function getToolBreakMultiplier(itemType, blockType) {
+  const tool = getItemToolType(itemType);
+  if (!tool) {
+    return 1;
+  }
+  if (tool === "shovel" && (blockType === BLOCK.DIRT || blockType === BLOCK.GRASS || blockType === BLOCK.SAND)) {
+    return 2.4;
+  }
+  if (tool === "axe" && (blockType === BLOCK.WOOD || blockType === BLOCK.PLANKS || blockType === BLOCK.CRAFTING_TABLE)) {
+    return 2.2;
+  }
+  if (tool === "pickaxe" && (blockType === BLOCK.STONE || blockType === BLOCK.BRICK || blockType === BLOCK.FURNACE)) {
+    return 2.6;
+  }
+  if (tool === "sword" && blockType === BLOCK.LEAVES) {
+    return 2;
+  }
+  return 1;
 }
 
 const BLOCK_INFO = {
@@ -560,6 +646,28 @@ const BLOCK_INFO = {
       side: rgb(184, 220, 235),
       bottom: rgb(162, 204, 221)
     }
+  },
+  [BLOCK.CRAFTING_TABLE]: {
+    name: "Crafting Table",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(120, 92, 62),
+      side: rgb(126, 92, 59),
+      bottom: rgb(115, 86, 55)
+    }
+  },
+  [BLOCK.FURNACE]: {
+    name: "Furnace",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(132, 132, 138),
+      side: rgb(114, 114, 120),
+      bottom: rgb(96, 96, 104)
+    }
   }
 };
 
@@ -618,6 +726,16 @@ const BLOCK_TEXTURE_PATHS = {
     top: "PNG/Tiles/glass.png",
     side: "PNG/Tiles/glass.png",
     bottom: "PNG/Tiles/glass.png"
+  },
+  [BLOCK.CRAFTING_TABLE]: {
+    top: "PNG/Tiles/table.png",
+    side: "PNG/Tiles/table.png",
+    bottom: "PNG/Tiles/table.png"
+  },
+  [BLOCK.FURNACE]: {
+    top: "PNG/Tiles/oven.png",
+    side: "PNG/Tiles/oven.png",
+    bottom: "PNG/Tiles/oven.png"
   }
 };
 
@@ -678,9 +796,307 @@ const TEXTURE_PACKS = {
       top: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
       side: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
       bottom: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png"
+    },
+    [BLOCK.CRAFTING_TABLE]: {
+      top: "PNG/Tiles/table.png",
+      side: "PNG/Tiles/table.png",
+      bottom: "PNG/Tiles/table.png"
+    },
+    [BLOCK.FURNACE]: {
+      top: "PNG/Tiles/oven.png",
+      side: "PNG/Tiles/oven.png",
+      bottom: "PNG/Tiles/oven.png"
     }
   }
 };
+
+const ARMOR_SLOT_KEYS = ["head", "chest", "legs", "feet"];
+const ARMOR_SLOT_LABELS = ["Helmet", "Chestplate", "Leggings", "Boots"];
+
+function svgDataUrl(svg) {
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+const ITEM_TEXTURE_SOURCES = {
+  [ITEM.STICK]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="8" y="1" width="2" height="3" fill="#8b5a2b"/>
+      <rect x="7" y="4" width="2" height="3" fill="#9f6a34"/>
+      <rect x="6" y="7" width="2" height="3" fill="#a96f3a"/>
+      <rect x="5" y="10" width="2" height="3" fill="#9f6a34"/>
+      <rect x="4" y="13" width="2" height="2" fill="#8b5a2b"/>
+    </svg>
+  `),
+  [ITEM.WOODEN_PICKAXE]: "PNG/Items/pick_bronze.png",
+  [ITEM.WOODEN_AXE]: "PNG/Items/axe_bronze.png",
+  [ITEM.WOODEN_SHOVEL]: "PNG/Items/shovel_bronze.png",
+  [ITEM.WOODEN_SWORD]: "PNG/Items/sword_bronze.png",
+  [ITEM.LEATHER_HELMET]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="3" width="10" height="2" fill="#7a4c2a"/>
+      <rect x="2" y="5" width="12" height="5" fill="#8c5b33"/>
+      <rect x="2" y="10" width="3" height="2" fill="#7a4c2a"/>
+      <rect x="11" y="10" width="3" height="2" fill="#7a4c2a"/>
+    </svg>
+  `),
+  [ITEM.LEATHER_CHESTPLATE]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="2" width="3" height="3" fill="#7a4c2a"/>
+      <rect x="10" y="2" width="3" height="3" fill="#7a4c2a"/>
+      <rect x="4" y="4" width="8" height="8" fill="#8c5b33"/>
+      <rect x="5" y="12" width="2" height="3" fill="#7a4c2a"/>
+      <rect x="9" y="12" width="2" height="3" fill="#7a4c2a"/>
+    </svg>
+  `),
+  [ITEM.LEATHER_LEGGINGS]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="2" width="10" height="3" fill="#7a4c2a"/>
+      <rect x="4" y="5" width="8" height="4" fill="#8c5b33"/>
+      <rect x="4" y="9" width="3" height="6" fill="#7a4c2a"/>
+      <rect x="9" y="9" width="3" height="6" fill="#7a4c2a"/>
+    </svg>
+  `),
+  [ITEM.LEATHER_BOOTS]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="4" width="4" height="8" fill="#8c5b33"/>
+      <rect x="9" y="4" width="4" height="8" fill="#8c5b33"/>
+      <rect x="2" y="12" width="6" height="2" fill="#7a4c2a"/>
+      <rect x="8" y="12" width="6" height="2" fill="#7a4c2a"/>
+    </svg>
+  `),
+  [ITEM.IRON_HELMET]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="3" width="10" height="2" fill="#dfe5ec"/>
+      <rect x="2" y="5" width="12" height="5" fill="#c7ced8"/>
+      <rect x="2" y="10" width="3" height="2" fill="#9da9b8"/>
+      <rect x="11" y="10" width="3" height="2" fill="#9da9b8"/>
+    </svg>
+  `),
+  [ITEM.IRON_CHESTPLATE]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="2" width="3" height="3" fill="#dfe5ec"/>
+      <rect x="10" y="2" width="3" height="3" fill="#dfe5ec"/>
+      <rect x="4" y="4" width="8" height="8" fill="#c7ced8"/>
+      <rect x="5" y="12" width="2" height="3" fill="#9da9b8"/>
+      <rect x="9" y="12" width="2" height="3" fill="#9da9b8"/>
+    </svg>
+  `),
+  [ITEM.IRON_LEGGINGS]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="2" width="10" height="3" fill="#dfe5ec"/>
+      <rect x="4" y="5" width="8" height="4" fill="#c7ced8"/>
+      <rect x="4" y="9" width="3" height="6" fill="#9da9b8"/>
+      <rect x="9" y="9" width="3" height="6" fill="#9da9b8"/>
+    </svg>
+  `),
+  [ITEM.IRON_BOOTS]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="4" width="4" height="8" fill="#c7ced8"/>
+      <rect x="9" y="4" width="4" height="8" fill="#c7ced8"/>
+      <rect x="2" y="12" width="6" height="2" fill="#9da9b8"/>
+      <rect x="8" y="12" width="6" height="2" fill="#9da9b8"/>
+    </svg>
+  `),
+  [ITEM.RAW_CHICKEN]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="5" y="2" width="6" height="9" rx="1" fill="#f2cfb9"/>
+      <rect x="4" y="4" width="8" height="7" fill="#f6d9c5"/>
+      <rect x="6" y="10" width="1" height="4" fill="#f7efe9"/>
+      <rect x="9" y="10" width="1" height="4" fill="#f7efe9"/>
+      <rect x="5" y="14" width="3" height="1" fill="#d9d0c6"/>
+      <rect x="8" y="14" width="3" height="1" fill="#d9d0c6"/>
+    </svg>
+  `),
+  [ITEM.COOKED_CHICKEN]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="5" y="2" width="6" height="9" rx="1" fill="#9a4d1f"/>
+      <rect x="4" y="4" width="8" height="7" fill="#b45e27"/>
+      <rect x="6" y="10" width="1" height="4" fill="#f4eadf"/>
+      <rect x="9" y="10" width="1" height="4" fill="#f4eadf"/>
+      <rect x="5" y="14" width="3" height="1" fill="#cec5bb"/>
+      <rect x="8" y="14" width="3" height="1" fill="#cec5bb"/>
+    </svg>
+  `),
+  [ITEM.RAW_MUTTON]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="4" width="10" height="8" fill="#d86e7c"/>
+      <rect x="4" y="5" width="8" height="6" fill="#ef8b99"/>
+      <rect x="11" y="6" width="2" height="2" fill="#f7e7d9"/>
+      <rect x="11" y="8" width="2" height="2" fill="#f7e7d9"/>
+    </svg>
+  `),
+  [ITEM.COOKED_MUTTON]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="4" width="10" height="8" fill="#8d4a24"/>
+      <rect x="4" y="5" width="8" height="6" fill="#ac6132"/>
+      <rect x="11" y="6" width="2" height="2" fill="#f5e8dd"/>
+      <rect x="11" y="8" width="2" height="2" fill="#f5e8dd"/>
+    </svg>
+  `),
+  [ITEM.ROTTEN_FLESH]: svgDataUrl(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+      <rect width="16" height="16" fill="none"/>
+      <rect x="3" y="4" width="10" height="8" fill="#5c7052"/>
+      <rect x="4" y="5" width="8" height="6" fill="#749266"/>
+      <rect x="5" y="6" width="2" height="2" fill="#b96d66"/>
+      <rect x="9" y="8" width="2" height="2" fill="#b96d66"/>
+    </svg>
+  `)
+};
+
+const ITEM_INFO = {
+  [ITEM.STICK]: { name: "Stick", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.STICK] },
+  [ITEM.WOODEN_PICKAXE]: { name: "Wooden Pickaxe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_PICKAXE], tool: "pickaxe" },
+  [ITEM.WOODEN_AXE]: { name: "Wooden Axe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_AXE], tool: "axe" },
+  [ITEM.WOODEN_SHOVEL]: { name: "Wooden Shovel", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_SHOVEL], tool: "shovel" },
+  [ITEM.WOODEN_SWORD]: { name: "Wooden Sword", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_SWORD], tool: "sword" },
+  [ITEM.LEATHER_HELMET]: { name: "Leather Helmet", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_HELMET], armorSlot: "head", armor: 1 },
+  [ITEM.LEATHER_CHESTPLATE]: { name: "Leather Chestplate", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_CHESTPLATE], armorSlot: "chest", armor: 3 },
+  [ITEM.LEATHER_LEGGINGS]: { name: "Leather Leggings", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_LEGGINGS], armorSlot: "legs", armor: 2 },
+  [ITEM.LEATHER_BOOTS]: { name: "Leather Boots", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_BOOTS], armorSlot: "feet", armor: 1 },
+  [ITEM.IRON_HELMET]: { name: "Iron Helmet", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_HELMET], armorSlot: "head", armor: 2 },
+  [ITEM.IRON_CHESTPLATE]: { name: "Iron Chestplate", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_CHESTPLATE], armorSlot: "chest", armor: 6 },
+  [ITEM.IRON_LEGGINGS]: { name: "Iron Leggings", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_LEGGINGS], armorSlot: "legs", armor: 5 },
+  [ITEM.IRON_BOOTS]: { name: "Iron Boots", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_BOOTS], armorSlot: "feet", armor: 2 },
+  [ITEM.RAW_CHICKEN]: { name: "Raw Chicken", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.RAW_CHICKEN], food: 2 },
+  [ITEM.COOKED_CHICKEN]: { name: "Cooked Chicken", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.COOKED_CHICKEN], food: 6 },
+  [ITEM.RAW_MUTTON]: { name: "Raw Mutton", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.RAW_MUTTON], food: 2 },
+  [ITEM.COOKED_MUTTON]: { name: "Cooked Mutton", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.COOKED_MUTTON], food: 6 },
+  [ITEM.ROTTEN_FLESH]: { name: "Rotten Flesh", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.ROTTEN_FLESH], food: 4 }
+};
+
+function getAllItemTexturePaths() {
+  return Object.values(ITEM_TEXTURE_SOURCES);
+}
+
+function getItemInfo(itemType) {
+  if (!Number.isFinite(itemType) || itemType <= 0) {
+    return null;
+  }
+  if (BLOCK_INFO[itemType]) {
+    return {
+      id: itemType,
+      name: BLOCK_INFO[itemType].name,
+      maxStack: itemType === BLOCK.WATER || itemType === BLOCK.BEDROCK ? 1 : 64,
+      placeBlock: itemType !== BLOCK.AIR && itemType !== BLOCK.WATER && itemType !== BLOCK.BEDROCK ? itemType : null,
+      blockType: itemType,
+      armor: 0,
+      armorSlot: null,
+      tool: null
+    };
+  }
+  return ITEM_INFO[itemType] || null;
+}
+
+function getItemName(itemType) {
+  return getItemInfo(itemType)?.name || "Unknown Item";
+}
+
+function getItemMaxStack(itemType) {
+  return getItemInfo(itemType)?.maxStack || 64;
+}
+
+function getPlacedBlockType(itemType) {
+  return getItemInfo(itemType)?.placeBlock || BLOCK.AIR;
+}
+
+function getItemArmorSlot(itemType) {
+  return getItemInfo(itemType)?.armorSlot || null;
+}
+
+function getItemArmorPoints(itemType) {
+  return getItemInfo(itemType)?.armor || 0;
+}
+
+function getItemToolType(itemType) {
+  return getItemInfo(itemType)?.tool || null;
+}
+
+function getItemFoodValue(itemType) {
+  return Math.max(0, Number(getItemInfo(itemType)?.food) || 0);
+}
+
+function getFurnaceFuelTime(itemType) {
+  return Math.max(0, Number(FURNACE_FUEL_TIME[itemType]) || 0);
+}
+
+function isFuelItem(itemType) {
+  return getFurnaceFuelTime(itemType) > 0;
+}
+
+function getSmeltingResult(itemType) {
+  return Number(SMELTING_RECIPES[itemType]) || BLOCK.AIR;
+}
+
+function isSmeltableItem(itemType) {
+  return getSmeltingResult(itemType) !== BLOCK.AIR;
+}
+
+function normalizeItemName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+}
+
+function resolveItemTypeByName(name) {
+  const key = normalizeItemName(name);
+  if (!key) return BLOCK.AIR;
+
+  for (const [id, info] of Object.entries(BLOCK_INFO)) {
+    if (normalizeItemName(info?.name) === key) {
+      return Number(id);
+    }
+  }
+  for (const [id, info] of Object.entries(ITEM_INFO)) {
+    if (normalizeItemName(info?.name) === key) {
+      return Number(id);
+    }
+  }
+
+  const aliases = {
+    log: BLOCK.WOOD,
+    leaves: BLOCK.LEAVES,
+    glass: BLOCK.GLASS,
+    crafting_table: BLOCK.CRAFTING_TABLE,
+    table: BLOCK.CRAFTING_TABLE,
+    furnace: BLOCK.FURNACE,
+    plank: BLOCK.PLANKS,
+    planks: BLOCK.PLANKS,
+    stick: ITEM.STICK,
+    wooden_pickaxe: ITEM.WOODEN_PICKAXE,
+    wooden_axe: ITEM.WOODEN_AXE,
+    wooden_shovel: ITEM.WOODEN_SHOVEL,
+    wooden_sword: ITEM.WOODEN_SWORD,
+    leather_helmet: ITEM.LEATHER_HELMET,
+    leather_chestplate: ITEM.LEATHER_CHESTPLATE,
+    leather_leggings: ITEM.LEATHER_LEGGINGS,
+    leather_boots: ITEM.LEATHER_BOOTS,
+    iron_helmet: ITEM.IRON_HELMET,
+    iron_chestplate: ITEM.IRON_CHESTPLATE,
+    iron_leggings: ITEM.IRON_LEGGINGS,
+    iron_boots: ITEM.IRON_BOOTS,
+    raw_chicken: ITEM.RAW_CHICKEN,
+    cooked_chicken: ITEM.COOKED_CHICKEN,
+    raw_mutton: ITEM.RAW_MUTTON,
+    cooked_mutton: ITEM.COOKED_MUTTON,
+    rotten_flesh: ITEM.ROTTEN_FLESH
+  };
+  return aliases[key] || BLOCK.AIR;
+}
 
 function getBlockTextureEntry(blockType, settingsState = DEFAULT_SETTINGS) {
   const packName = settingsState?.texturePack || DEFAULT_SETTINGS.texturePack;
@@ -715,6 +1131,109 @@ function getAllBlockTexturePaths() {
 
 const ENTITY_TEXTURE_CATALOG_PATH = "assets/entity/externalTextures.json";
 const ENTITY_TEXTURE_NAMES = new Set(["sheep", "zombie", "creeper", "spider", "villager", "chicken", "wolf"]);
+const OBJ_ENTITY_MODEL_PATHS = {
+  sheep: "assets/entity/models/sheep.obj",
+  chicken: "assets/entity/models/chicken.obj",
+  creeper: "assets/entity/models/creeper.obj",
+  spider: "assets/entity/models/spider.obj",
+  villager: "assets/entity/models/villager.obj",
+  wolf: "assets/entity/models/wolf.obj"
+};
+
+const MOB_DEFS = {
+  zombie: {
+    radius: 0.34,
+    height: 1.8,
+    maxHealth: 20,
+    speed: 2.2,
+    hostile: true,
+    aggroRange: 14,
+    attackDamage: 2,
+    attackReach: 1.2,
+    meleeDamage: 4,
+    modelHeight: 1.8,
+    yawOffset: Math.PI
+  },
+  sheep: {
+    radius: 0.42,
+    height: 1.35,
+    maxHealth: 8,
+    speed: 1.05,
+    hostile: false,
+    scareRange: 7,
+    meleeDamage: 1,
+    modelHeight: 1.35,
+    yawOffset: Math.PI,
+    shellScale: 1.08,
+    shellTint: [1, 1, 1, 0.38]
+  },
+  chicken: {
+    radius: 0.26,
+    height: 0.9,
+    maxHealth: 4,
+    speed: 1.15,
+    hostile: false,
+    scareRange: 6,
+    meleeDamage: 1,
+    modelHeight: 0.9,
+    yawOffset: Math.PI
+  },
+  creeper: {
+    radius: 0.36,
+    height: 1.7,
+    maxHealth: 20,
+    speed: 1.85,
+    hostile: true,
+    aggroRange: 13,
+    attackDamage: 3,
+    attackReach: 1.3,
+    meleeDamage: 4,
+    modelHeight: 1.7,
+    yawOffset: Math.PI
+  },
+  spider: {
+    radius: 0.72,
+    height: 0.95,
+    maxHealth: 16,
+    speed: 2.15,
+    hostile: true,
+    aggroRange: 14,
+    attackDamage: 2,
+    attackReach: 1.5,
+    meleeDamage: 3,
+    modelHeight: 0.95,
+    yawOffset: Math.PI
+  },
+  villager: {
+    radius: 0.34,
+    height: 1.8,
+    maxHealth: 20,
+    speed: 1.05,
+    hostile: false,
+    scareRange: 8,
+    meleeDamage: 1,
+    modelHeight: 1.8,
+    yawOffset: Math.PI
+  },
+  wolf: {
+    radius: 0.4,
+    height: 1.0,
+    maxHealth: 8,
+    speed: 1.55,
+    hostile: false,
+    scareRange: 6,
+    meleeDamage: 2,
+    modelHeight: 1.0,
+    yawOffset: Math.PI
+  }
+};
+
+const PASSIVE_MOB_TYPES = ["sheep", "chicken", "villager", "wolf"];
+const HOSTILE_MOB_TYPES = ["zombie", "creeper", "spider"];
+
+function getMobDef(type) {
+  return MOB_DEFS[type] || MOB_DEFS.sheep;
+}
 
 class TextureLibrary {
   constructor(engine) {
@@ -735,7 +1254,7 @@ class TextureLibrary {
     }
 
     this.loadStarted = true;
-    const uniquePaths = getAllBlockTexturePaths();
+    const uniquePaths = [...new Set([...getAllBlockTexturePaths(), ...getAllItemTexturePaths()])];
 
     this.total = uniquePaths.length;
     let loaded = 0;
@@ -770,12 +1289,24 @@ class TextureLibrary {
     const path = getBlockTexturePath(blockType, faceId, settingsState);
     return this.images.get(path) || null;
   }
+
+  getItemTexture(itemType, settingsState = this.settings) {
+    const info = getItemInfo(itemType);
+    if (!info) {
+      return null;
+    }
+    if (info.blockType) {
+      return this.getBlockFaceTexture(info.blockType, "top", settingsState);
+    }
+    return this.images.get(info.texture) || null;
+  }
 }
 
 class EntityTextureLibrary {
   constructor(engine) {
     this.engine = engine;
     this.images = new Map();
+    this.billboardImages = new Map();
     this.glTextures = new Map();
     this.ready = false;
     this.failed = false;
@@ -822,6 +1353,36 @@ class EntityTextureLibrary {
     return this.images.get(type) || null;
   }
 
+  getBillboardImage(type) {
+    const image = this.getImage(type);
+    if (!image) {
+      return null;
+    }
+    if (this.billboardImages.has(type)) {
+      return this.billboardImages.get(type);
+    }
+
+    let billboard = image;
+    if ((type === "zombie" || type === "creeper") && image.width >= 64 && image.height >= 32) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 16;
+      canvas.height = 32;
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 8, 8, 8, 8, 4, 0, 8, 8);
+      ctx.drawImage(image, 20, 20, 8, 12, 4, 8, 8, 12);
+      ctx.drawImage(image, 44, 20, 4, 12, 0, 8, 4, 12);
+      ctx.drawImage(image, 44, 20, 4, 12, 12, 8, 4, 12);
+      ctx.drawImage(image, 4, 20, 4, 12, 4, 20, 4, 12);
+      ctx.drawImage(image, 4, 20, 4, 12, 8, 20, 4, 12);
+      billboard = canvas;
+    }
+
+    this.billboardImages.set(type, billboard);
+    return billboard;
+  }
+
   getGLTexture(gl, type) {
     const image = this.getImage(type);
     if (!image) {
@@ -843,7 +1404,134 @@ class EntityTextureLibrary {
   }
 }
 
+function parseObjModel(text) {
+  const positions = [];
+  const uvs = [];
+  const normals = [];
+  const vertices = [];
+  const indices = [];
+  const vertexMap = new Map();
+
+  const useVertex = (token) => {
+    const cached = vertexMap.get(token);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const [viRaw, vtiRaw, vniRaw] = token.split("/");
+    const vi = Number(viRaw) - 1;
+    const vti = Number(vtiRaw) - 1;
+    const vni = Number(vniRaw) - 1;
+    const pos = positions[vi] || [0, 0, 0];
+    const uv = uvs[vti] || [0, 0];
+    const normal = normals[vni] || [0, 1, 0];
+    const index = vertices.length / 8;
+    vertices.push(pos[0], pos[1], pos[2], uv[0], uv[1], normal[0], normal[1], normal[2]);
+    vertexMap.set(token, index);
+    return index;
+  };
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split(/\s+/);
+    const tag = parts.shift();
+    if (tag === "v") {
+      positions.push(parts.slice(0, 3).map(Number));
+    } else if (tag === "vt") {
+      uvs.push([Number(parts[0]) || 0, Number(parts[1]) || 0]);
+    } else if (tag === "vn") {
+      normals.push(parts.slice(0, 3).map(Number));
+    } else if (tag === "f") {
+      const face = parts.map(useVertex);
+      for (let i = 1; i < face.length - 1; i += 1) {
+        indices.push(face[0], face[i], face[i + 1]);
+      }
+    }
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (const pos of positions) {
+    if (!pos) continue;
+    minX = Math.min(minX, pos[0]);
+    minY = Math.min(minY, pos[1]);
+    minZ = Math.min(minZ, pos[2]);
+    maxX = Math.max(maxX, pos[0]);
+    maxY = Math.max(maxY, pos[1]);
+    maxZ = Math.max(maxZ, pos[2]);
+  }
+
+  return {
+    vertices: new Float32Array(vertices),
+    indices: new Uint32Array(indices),
+    bounds: {
+      minX: Number.isFinite(minX) ? minX : -0.5,
+      minY: Number.isFinite(minY) ? minY : 0,
+      minZ: Number.isFinite(minZ) ? minZ : -0.5,
+      maxX: Number.isFinite(maxX) ? maxX : 0.5,
+      maxY: Number.isFinite(maxY) ? maxY : 1,
+      maxZ: Number.isFinite(maxZ) ? maxZ : 0.5
+    }
+  };
+}
+
+class ObjModelLibrary {
+  constructor(engine) {
+    this.engine = engine;
+    this.models = new Map();
+    this.ready = false;
+    this.failed = false;
+    this.readyPromise = null;
+  }
+
+  startLoading() {
+    if (this.readyPromise) {
+      return this.readyPromise;
+    }
+    this.readyPromise = Promise.all(
+      Object.entries(OBJ_ENTITY_MODEL_PATHS).map(async ([type, path]) => {
+        try {
+          const text = await this.engine.resources.fetchText(path);
+          this.models.set(type, parseObjModel(text));
+        } catch (error) {
+          console.warn(`OBJ model failed for ${type}: ${error.message}`);
+        }
+      })
+    )
+      .then(() => {
+        this.ready = this.models.size > 0;
+        console.log("OBJ entity models ready:", Array.from(this.models.keys()));
+        return this.ready;
+      })
+      .catch((error) => {
+        this.failed = true;
+        console.warn("OBJ entity model library failed:", error.message);
+        return false;
+      });
+    return this.readyPromise;
+  }
+
+  getModel(type) {
+    return this.models.get(type) || null;
+  }
+
+  hasModel(type) {
+    return this.models.has(type);
+  }
+}
+
 const HOTBAR_SLOTS = 9;
+const INVENTORY_ROWS = 4;
+const INVENTORY_COLS = 9;
+const INVENTORY_SLOTS = INVENTORY_ROWS * INVENTORY_COLS;
+const MAIN_INVENTORY_START = HOTBAR_SLOTS;
+const ARMOR_SLOTS = 4;
+const CRAFT_GRID_SMALL = 4;
+const CRAFT_GRID_LARGE = 9;
 
 const HOTBAR_BLOCKS = [
   BLOCK.GRASS,
@@ -851,11 +1539,101 @@ const HOTBAR_BLOCKS = [
   BLOCK.STONE,
   BLOCK.WOOD,
   BLOCK.PLANKS,
+  BLOCK.CRAFTING_TABLE,
+  BLOCK.FURNACE,
   BLOCK.LEAVES,
   BLOCK.SAND,
-  BLOCK.BRICK,
   BLOCK.GLASS
 ];
+
+const CRAFTING_RECIPES = [
+  {
+    pattern: [
+      [BLOCK.WOOD]
+    ],
+    result: { itemType: BLOCK.PLANKS, count: 4 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS],
+      [BLOCK.PLANKS]
+    ],
+    result: { itemType: ITEM.STICK, count: 4 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS, BLOCK.PLANKS],
+      [BLOCK.PLANKS, BLOCK.PLANKS]
+    ],
+    result: { itemType: BLOCK.CRAFTING_TABLE, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.STONE, BLOCK.STONE, BLOCK.STONE],
+      [BLOCK.STONE, 0, BLOCK.STONE],
+      [BLOCK.STONE, BLOCK.STONE, BLOCK.STONE]
+    ],
+    result: { itemType: BLOCK.FURNACE, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS, BLOCK.PLANKS, BLOCK.PLANKS],
+      [0, ITEM.STICK, 0],
+      [0, ITEM.STICK, 0]
+    ],
+    result: { itemType: ITEM.WOODEN_PICKAXE, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS, BLOCK.PLANKS],
+      [BLOCK.PLANKS, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.WOODEN_AXE, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS],
+      [ITEM.STICK],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.WOODEN_SHOVEL, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS],
+      [BLOCK.PLANKS],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.WOODEN_SWORD, count: 1 }
+  }
+];
+
+const FURNACE_FUEL_TIME = {
+  [BLOCK.WOOD]: 15,
+  [BLOCK.PLANKS]: 8,
+  [ITEM.STICK]: 3.5
+};
+
+const FURNACE_SMELT_TIME = 5.5;
+
+const SMELTING_RECIPES = {
+  [ITEM.RAW_CHICKEN]: ITEM.COOKED_CHICKEN,
+  [ITEM.RAW_MUTTON]: ITEM.COOKED_MUTTON
+};
+
+const MOB_LOOT_TABLES = {
+  sheep: [
+    { itemType: ITEM.RAW_MUTTON, min: 1, max: 2 }
+  ],
+  chicken: [
+    { itemType: ITEM.RAW_CHICKEN, min: 1, max: 2 }
+  ],
+  zombie: [
+    { itemType: ITEM.ROTTEN_FLESH, min: 1, max: 2 }
+  ]
+};
 
 const FACE_DEFS = [
   {
@@ -1490,7 +2268,7 @@ class World {
 
     while (traveled <= maxDistance) {
       const blockType = this.getBlock(x, y, z);
-      if (blockType !== BLOCK.AIR && traveled > 0) {
+      if (blockType !== BLOCK.AIR && blockType !== BLOCK.WATER && traveled > 0) {
         return {
           x,
           y,
@@ -1758,9 +2536,7 @@ class Player {
     this.breakCooldown = 0;
     this.placeCooldown = 0;
     this.selectedHotbarSlot = 0;
-    // Survival inventory hotbar. Creative uses HOTBAR_BLOCKS palette instead.
-    this.hotbarTypes = new Uint8Array(HOTBAR_SLOTS);
-    this.hotbarCounts = new Uint16Array(HOTBAR_SLOTS);
+    this.initializeInventory();
     this.maxHealth = 20;
     this.health = 20;
     this.maxHunger = 20;
@@ -1773,6 +2549,26 @@ class Player {
     this.inWater = false;
     this.fallDistance = 0;
     this.pendingFallDamage = 0;
+    this.isSprinting = false;
+  }
+
+  initializeInventory() {
+    this.inventoryTypes = new Uint8Array(INVENTORY_SLOTS);
+    this.inventoryCounts = new Uint16Array(INVENTORY_SLOTS);
+    this.hotbarTypes = this.inventoryTypes.subarray(0, HOTBAR_SLOTS);
+    this.hotbarCounts = this.inventoryCounts.subarray(0, HOTBAR_SLOTS);
+    this.armorTypes = new Uint8Array(ARMOR_SLOTS);
+    this.armorCounts = new Uint8Array(ARMOR_SLOTS);
+  }
+
+  getArmorPoints() {
+    let total = 0;
+    for (let i = 0; i < ARMOR_SLOTS; i += 1) {
+      if ((this.armorCounts[i] || 0) > 0) {
+        total += getItemArmorPoints(this.armorTypes[i] || 0);
+      }
+    }
+    return total;
   }
 
   getEyePosition() {
@@ -1873,7 +2669,7 @@ class Player {
     // PointerLock movementX is positive when moving mouse right.
     // In our coordinate setup, subtracting makes "mouse left -> turn left" like Minecraft.
     this.yaw -= deltaX * sensitivity;
-    this.pitch = clamp(this.pitch - deltaY * sensitivity * 0.84 * invertY, -1.5, 1.5);
+    this.pitch = clamp(this.pitch + deltaY * sensitivity * 0.84 * invertY, -1.5, 1.5);
   }
 
   resolveAxisCollisions(world, axis, delta) {
@@ -1936,9 +2732,6 @@ class Player {
     const forward = (input.isDown("w") || input.isDown("W") ? 1 : 0) - (input.isDown("s") || input.isDown("S") ? 1 : 0);
     // Strafe should match Minecraft: A = left, D = right.
     const strafe = (input.isDown("a") || input.isDown("A") ? 1 : 0) - (input.isDown("d") || input.isDown("D") ? 1 : 0);
-    const wantsSprint = !this.inWater && input.isDown("Shift");
-
-    const speed = this.inWater ? 3.05 : wantsSprint ? 6.2 : 4.6;
     const sinYaw = Math.sin(this.yaw);
     const cosYaw = Math.cos(this.yaw);
     const forwardX = sinYaw;
@@ -1953,6 +2746,10 @@ class Player {
       moveX /= length;
       moveZ /= length;
     }
+    const wantsSprint = !this.inWater && this.hunger > 0 && length > 0 && input.isDown("Shift");
+    this.isSprinting = wantsSprint;
+
+    const speed = this.inWater ? 2.8 : wantsSprint ? 6.9 : 4.6;
 
     const targetVX = moveX * speed;
     const targetVZ = moveZ * speed;
@@ -1970,28 +2767,20 @@ class Player {
     if (this.inWater) {
       // Fluid movement: buoyancy + drag + swim controls.
       const wantUp = input.isDown(" ");
-      const wantDown = input.isDown("Shift");
 
-      // Gentle buoyancy (float slightly upward if not holding down).
-      if (!wantDown) {
-        this.vy += 10 * dt;
-      }
-      // Swim controls.
+      // Swim controls: sink by default, only rise while holding jump.
       if (wantUp) {
-        this.vy = lerp(this.vy, 6.2, clamp(8.6 * dt, 0, 1));
-      } else if (wantDown) {
-        this.vy = lerp(this.vy, -4.8, clamp(8.2 * dt, 0, 1));
+        this.vy = lerp(this.vy, 4.8, clamp(7.8 * dt, 0, 1));
       } else {
-        // Settle toward a slow sink/float.
-        this.vy = lerp(this.vy, -0.35, clamp(2.4 * dt, 0, 1));
+        this.vy = lerp(this.vy, -2.3, clamp(2.6 * dt, 0, 1));
       }
 
       // Water drag (keep it swimmy, not honey).
-      const drag = Math.pow(0.965, dt * 60);
+      const drag = Math.pow(0.955, dt * 60);
       this.vx *= drag;
-      this.vy *= Math.pow(0.985, dt * 60);
+      this.vy *= Math.pow(0.975, dt * 60);
       this.vz *= drag;
-      this.vy = clamp(this.vy, -7.2, 7.2);
+      this.vy = clamp(this.vy, -5.5, 5.5);
       this.onGround = false;
     } else {
       if (this.onGround && input.consumePress(" ")) {
@@ -2066,6 +2855,10 @@ class Player {
       yaw: this.yaw,
       pitch: this.pitch,
       selectedHotbarSlot: this.selectedHotbarSlot,
+      inventoryTypes: Array.from(this.inventoryTypes),
+      inventoryCounts: Array.from(this.inventoryCounts),
+      armorTypes: Array.from(this.armorTypes),
+      armorCounts: Array.from(this.armorCounts),
       hotbarTypes: Array.from(this.hotbarTypes),
       hotbarCounts: Array.from(this.hotbarCounts),
       health: this.health,
@@ -2087,15 +2880,26 @@ class Player {
       this.yaw = data.yaw;
       this.pitch = data.pitch;
       this.selectedHotbarSlot = clamp(Number(data.selectedHotbarSlot) || 0, 0, HOTBAR_SLOTS - 1);
-      this.hotbarTypes = new Uint8Array(HOTBAR_SLOTS);
-      this.hotbarCounts = new Uint16Array(HOTBAR_SLOTS);
-      if (Array.isArray(data.hotbarTypes) && Array.isArray(data.hotbarCounts)) {
-        for (let i = 0; i < HOTBAR_SLOTS; i += 1) {
-          const t = Number(data.hotbarTypes[i]) || 0;
-          const c = Number(data.hotbarCounts[i]) || 0;
+      this.initializeInventory();
+      const savedTypes = Array.isArray(data.inventoryTypes) ? data.inventoryTypes : data.hotbarTypes;
+      const savedCounts = Array.isArray(data.inventoryCounts) ? data.inventoryCounts : data.hotbarCounts;
+      if (Array.isArray(savedTypes) && Array.isArray(savedCounts)) {
+        for (let i = 0; i < Math.min(INVENTORY_SLOTS, savedTypes.length, savedCounts.length); i += 1) {
+          const t = Number(savedTypes[i]) || 0;
+          const c = Number(savedCounts[i]) || 0;
           if (t > 0 && c > 0) {
-            this.hotbarTypes[i] = t;
-            this.hotbarCounts[i] = clamp(Math.floor(c), 0, 65535);
+            this.inventoryTypes[i] = t;
+            this.inventoryCounts[i] = clamp(Math.floor(c), 0, getItemMaxStack(t));
+          }
+        }
+      }
+      if (Array.isArray(data.armorTypes) && Array.isArray(data.armorCounts)) {
+        for (let i = 0; i < Math.min(ARMOR_SLOTS, data.armorTypes.length, data.armorCounts.length); i += 1) {
+          const t = Number(data.armorTypes[i]) || 0;
+          const c = Number(data.armorCounts[i]) || 0;
+          if (t > 0 && c > 0 && getItemArmorSlot(t) === ARMOR_SLOT_KEYS[i]) {
+            this.armorTypes[i] = t;
+            this.armorCounts[i] = 1;
           }
         }
       }
@@ -2156,6 +2960,72 @@ function entityWouldCollide(world, x, y, z, radius, height) {
   return false;
 }
 
+function findWalkableY(world, x, z, hintY = SEA_LEVEL + 4, clearance = 2) {
+  const blockX = Math.floor(x);
+  const blockZ = Math.floor(z);
+  const startY = clamp(Math.floor(hintY) + 3, 1, WORLD_HEIGHT - 3);
+  const endY = Math.max(1, startY - 14);
+
+  const canStandAt = (groundY) => {
+    if (!isCollidable(world.getBlock(blockX, groundY, blockZ))) return false;
+    for (let i = 1; i <= clearance; i += 1) {
+      if (isCollidable(world.getBlock(blockX, groundY + i, blockZ))) return false;
+    }
+    return true;
+  };
+
+  for (let y = startY; y >= endY; y -= 1) {
+    if (canStandAt(y)) {
+      return y + 1.001;
+    }
+  }
+
+  for (let y = WORLD_HEIGHT - 3; y >= 1; y -= 1) {
+    if (canStandAt(y)) {
+      return y + 1.001;
+    }
+  }
+  return null;
+}
+
+function rayIntersectAABB(origin, direction, maxDistance, aabb) {
+  let tMin = 0;
+  let tMax = maxDistance;
+  const axes = [
+    ["x", "minX", "maxX"],
+    ["y", "minY", "maxY"],
+    ["z", "minZ", "maxZ"]
+  ];
+
+  for (const [axis, minKey, maxKey] of axes) {
+    const d = direction[axis];
+    const o = origin[axis];
+    const min = aabb[minKey];
+    const max = aabb[maxKey];
+    if (Math.abs(d) < 1e-6) {
+      if (o < min || o > max) {
+        return null;
+      }
+      continue;
+    }
+    const inv = 1 / d;
+    let t0 = (min - o) * inv;
+    let t1 = (max - o) * inv;
+    if (t0 > t1) {
+      const swap = t0;
+      t0 = t1;
+      t1 = swap;
+    }
+    tMin = Math.max(tMin, t0);
+    tMax = Math.min(tMax, t1);
+    if (tMax < tMin) {
+      return null;
+    }
+  }
+
+  return tMin >= 0 && tMin <= maxDistance ? tMin : null;
+}
+
 class Mob {
   constructor(type = "zombie") {
     this.type = type;
@@ -2167,18 +3037,28 @@ class Mob {
     this.vz = 0;
     this.yaw = 0;
     this.onGround = false;
-    this.wanderTimer = 0;
-    this.wanderYaw = 0;
+    this.goalX = null;
+    this.goalZ = null;
+    this.goalTimer = 0;
+    this.grazeTimer = 0;
+    this.fleeTimer = 0;
+    this.jumpCooldown = 0;
     this.attackCooldown = 0;
+    this.hurtTimer = 0;
+    this.stuckTimer = 0;
+    this.lastX = 0;
+    this.lastZ = 0;
+    this.maxHealth = getMobDef(type).maxHealth;
+    this.health = this.maxHealth;
     this.age = 0;
   }
 
   get radius() {
-    return 0.32;
+    return getMobDef(this.type).radius;
   }
 
   get height() {
-    return 1.8;
+    return getMobDef(this.type).height;
   }
 
   setPosition(x, y, z) {
@@ -2188,6 +3068,70 @@ class Mob {
     this.vx = 0;
     this.vy = 0;
     this.vz = 0;
+    this.lastX = x;
+    this.lastZ = z;
+  }
+
+  chooseGoal(world, minDistance = 2.5, maxDistance = 8, preferredYaw = Math.random() * Math.PI * 2) {
+    for (let tries = 0; tries < 14; tries += 1) {
+      const angle = preferredYaw + (Math.random() - 0.5) * Math.PI * 1.2;
+      const dist = minDistance + Math.random() * (maxDistance - minDistance);
+      const targetX = this.x + Math.sin(angle) * dist;
+      const targetZ = this.z + Math.cos(angle) * dist;
+      const targetY = findWalkableY(world, targetX, targetZ, this.y + 1, this.height > 1.2 ? 2 : 1);
+      if (!Number.isFinite(targetY)) continue;
+      if (Math.abs(targetY - this.y) > 2.4) continue;
+      if (entityWouldCollide(world, targetX, targetY, targetZ, this.radius, this.height)) continue;
+      this.goalX = targetX;
+      this.goalZ = targetZ;
+      this.goalTimer = 1.6 + Math.random() * 3.4;
+      return true;
+    }
+    this.goalX = this.x;
+    this.goalZ = this.z;
+    this.goalTimer = 1;
+    return false;
+  }
+
+  takeDamage(amount, sourceX = this.x, sourceZ = this.z) {
+    const dmg = Math.max(0, Number(amount) || 0);
+    if (dmg <= 0 || this.hurtTimer > 0.08) {
+      return false;
+    }
+    this.health = Math.max(0, this.health - dmg);
+    this.hurtTimer = 0.3;
+    this.fleeTimer = getMobDef(this.type).hostile ? 0 : 2.8;
+    const dx = this.x - sourceX;
+    const dz = this.z - sourceZ;
+    const len = Math.hypot(dx, dz) || 1;
+    this.vx += (dx / len) * 3.2;
+    this.vz += (dz / len) * 3.2;
+    this.vy = Math.max(this.vy, 4.8);
+    this.goalX = null;
+    this.goalZ = null;
+    return this.health <= 0;
+  }
+
+  _forwardBlocked(world, moveX, moveZ) {
+    const len = Math.hypot(moveX, moveZ);
+    if (len < 0.001) return "";
+    const dirX = moveX / len;
+    const dirZ = moveZ / len;
+    const probeX = this.x + dirX * (this.radius + 0.22);
+    const probeZ = this.z + dirZ * (this.radius + 0.22);
+    const footY = Math.floor(this.y + 0.05);
+    const headY = Math.floor(this.y + Math.min(this.height - 0.2, 1.1));
+    const frontFeet = world.getBlock(Math.floor(probeX), footY, Math.floor(probeZ));
+    const frontHead = world.getBlock(Math.floor(probeX), headY, Math.floor(probeZ));
+    const standY = findWalkableY(world, probeX, probeZ, this.y + 0.8, this.height > 1.2 ? 2 : 1);
+    const dropTooFar = standY !== null && standY < this.y - 1.15;
+    if (isCollidable(frontFeet) || isCollidable(frontHead)) {
+      return "obstacle";
+    }
+    if (dropTooFar || standY === null) {
+      return "ledge";
+    }
+    return "";
   }
 
   resolveAxis(world, axis, delta) {
@@ -2231,33 +3175,81 @@ class Mob {
   }
 
   update(dt, world, player) {
+    const def = getMobDef(this.type);
     this.age += dt;
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
-    this.wanderTimer -= dt;
-    if (this.wanderTimer <= 0) {
-      const rx = Math.floor(this.x);
-      const rz = Math.floor(this.z);
-      this.wanderTimer = 1.2 + random3(rx, Math.floor(this.y), rz, world.seed + 900) * 2.2;
-      this.wanderYaw = random2(rx, rz, world.seed + 901) * Math.PI * 2;
-    }
+    this.goalTimer -= dt;
+    this.grazeTimer = Math.max(0, this.grazeTimer - dt);
+    this.fleeTimer = Math.max(0, this.fleeTimer - dt);
+    this.hurtTimer = Math.max(0, this.hurtTimer - dt);
+    this.jumpCooldown = Math.max(0, this.jumpCooldown - dt);
 
-    // Mild bias toward the player if close, just to feel alive.
     const dxp = player.x - this.x;
     const dzp = player.z - this.z;
     const dist = Math.hypot(dxp, dzp);
-    const chase = this.type === "zombie" && dist < 12 ? 0.55 : 0;
-    const targetYaw = chase > 0 ? Math.atan2(dxp, dzp) : this.wanderYaw;
-    this.yaw = lerpAngle(this.yaw, targetYaw, clamp(dt * 3, 0, 1));
+    const isHostile = !!def.hostile;
+    const shouldFlee = !isHostile && (this.fleeTimer > 0 || dist < (def.scareRange || 0));
+    let targetX = this.goalX;
+    let targetZ = this.goalZ;
+    let desiredSpeed = 0;
+    let preferredYaw = this.yaw;
 
-    const speed = chase > 0 ? 2.2 : this.type === "sheep" ? 1.05 : 1.35;
-    const sin = Math.sin(this.yaw);
-    const cos = Math.cos(this.yaw);
-    const mvx = sin * speed;
-    const mvz = cos * speed;
+    if (isHostile && dist < def.aggroRange) {
+      targetX = player.x;
+      targetZ = player.z;
+      desiredSpeed = def.speed;
+      preferredYaw = Math.atan2(dxp, dzp);
+      this.goalTimer = Math.max(this.goalTimer, 0.2);
+    } else if (shouldFlee) {
+      const awayX = this.x - dxp;
+      const awayZ = this.z - dzp;
+      preferredYaw = Math.atan2(awayX, awayZ);
+      if (!Number.isFinite(targetX) || !Number.isFinite(targetZ) || this.goalTimer <= 0) {
+        this.chooseGoal(world, 5, 10, preferredYaw);
+        targetX = this.goalX;
+        targetZ = this.goalZ;
+      }
+      desiredSpeed = def.speed * 1.15;
+    } else {
+      const reached = Number.isFinite(targetX) && Number.isFinite(targetZ) && Math.hypot(targetX - this.x, targetZ - this.z) < 0.9;
+      if (!Number.isFinite(targetX) || !Number.isFinite(targetZ) || this.goalTimer <= 0 || reached) {
+        this.chooseGoal(world, 1.8, 7.5, this.yaw + (Math.random() - 0.5) * Math.PI);
+        targetX = this.goalX;
+        targetZ = this.goalZ;
+        this.grazeTimer = Math.random() < 0.28 ? 0.6 + Math.random() * 1.6 : 0;
+      }
+      desiredSpeed = this.grazeTimer > 0 ? 0 : def.speed * 0.9;
+    }
 
-    const accel = this.onGround ? 10 : 3;
-    this.vx = lerp(this.vx, mvx, clamp(accel * dt, 0, 1));
-    this.vz = lerp(this.vz, mvz, clamp(accel * dt, 0, 1));
+    if (Number.isFinite(targetX) && Number.isFinite(targetZ)) {
+      preferredYaw = Math.atan2(targetX - this.x, targetZ - this.z);
+    }
+
+    this.yaw = lerpAngle(this.yaw, preferredYaw, clamp(dt * 5, 0, 1));
+
+    let moveX = Math.sin(this.yaw) * desiredSpeed;
+    let moveZ = Math.cos(this.yaw) * desiredSpeed;
+    const blockState = this._forwardBlocked(world, moveX, moveZ);
+    if (blockState) {
+      if (blockState === "obstacle" && this.onGround && this.jumpCooldown <= 0) {
+        this.vy = Math.max(this.vy, 6.1);
+        this.jumpCooldown = 0.6;
+      } else if (!isHostile || blockState === "ledge") {
+        this.chooseGoal(world, 2.2, 6.5, this.yaw + (Math.random() < 0.5 ? -1 : 1) * (0.9 + Math.random() * 0.8));
+      } else {
+        this.yaw += (Math.random() < 0.5 ? -1 : 1) * 0.8;
+      }
+      moveX *= 0.3;
+      moveZ *= 0.3;
+    }
+
+    const accel = this.onGround ? 11 : 4;
+    this.vx = lerp(this.vx, moveX, clamp(accel * dt, 0, 1));
+    this.vz = lerp(this.vz, moveZ, clamp(accel * dt, 0, 1));
+    if (desiredSpeed <= 0.001 && this.onGround) {
+      this.vx = lerp(this.vx, 0, clamp(dt * 10, 0, 1));
+      this.vz = lerp(this.vz, 0, clamp(dt * 10, 0, 1));
+    }
 
     // Gravity.
     this.vy -= 22 * dt;
@@ -2274,13 +3266,18 @@ class Mob {
     this.y += this.vy * dt;
     this.resolveAxis(world, "y", this.vy * dt);
 
-    // Small step-up attempt if we're blocked and grounded.
-    if (this.onGround && (Math.abs(this.vx) + Math.abs(this.vz)) > 0.2) {
-      const tryY = this.y + 0.35;
-      if (!entityWouldCollide(world, this.x, tryY, this.z, this.radius, this.height)) {
-        this.y = tryY;
+    const moved = Math.hypot(this.x - this.lastX, this.z - this.lastZ);
+    if (desiredSpeed > 0.2 && moved < 0.02) {
+      this.stuckTimer += dt;
+      if (this.stuckTimer > 0.75) {
+        this.chooseGoal(world, 2.2, 6.8, this.yaw + (Math.random() < 0.5 ? -1 : 1) * 1.2);
+        this.stuckTimer = 0;
       }
+    } else {
+      this.stuckTimer = 0;
     }
+    this.lastX = this.x;
+    this.lastZ = this.z;
 
     if (this.y < -40) {
       const spawn = world.findSpawn(Math.floor(player.x), Math.floor(player.z));
@@ -2688,7 +3685,7 @@ class VoxelRenderer {
       const p = this.projectPoint(item.x, item.y + bob, item.z);
       if (!p) continue;
       const size = clamp((240 / Math.max(0.2, p.depth)) * scale, 10 * scale, 22 * scale);
-      const tex = this.textures?.getBlockFaceTexture(item.blockType, "top", this.settings) || null;
+      const tex = this.textures?.getItemTexture(item.itemType ?? item.blockType, this.settings) || null;
       ctx.save();
       ctx.globalAlpha = 0.95;
       if (tex) {
@@ -3483,11 +4480,13 @@ class WebGLVoxelRenderer {
     this.targetBlock = null;
     this.textureLibrary = null;
     this.entityTextures = null;
+    this.objModelLibrary = null;
     this._spriteTextures = new WeakMap();
     this._outline = this._createOutlineRenderer();
     this.entities = [];
     this._entities = this._createEntityRenderer();
     this._zombie = this._createZombieRenderer();
+    this._objEntities = this._createObjEntityRenderer();
 
     this.program = createProgram(
       gl,
@@ -3625,8 +4624,13 @@ class WebGLVoxelRenderer {
   updateCamera() {
     const gl = this.gl;
     const aspect = gl.canvas.width / gl.canvas.height;
+    this.fov = ((this.settings?.fovDegrees || DEFAULT_SETTINGS.fovDegrees) * Math.PI) / 180;
     mat4Perspective(this.proj, this.fov, aspect, 0.02, 1200);
-    const eye = [this.player.x, this.player.y + PLAYER_EYE_HEIGHT, this.player.z];
+    const bobStrength = this.settings?.viewBobbing === false ? 0 : clamp(Math.hypot(this.player.vx, this.player.vz) / 5.4, 0, 1);
+    const bobPhase = performance.now() * 0.012;
+    const bobY = this.player.onGround ? Math.abs(Math.sin(bobPhase)) * 0.045 * bobStrength : 0;
+    const bobX = this.player.onGround ? Math.cos(bobPhase * 0.5) * 0.028 * bobStrength : 0;
+    const eye = [this.player.x + bobX, this.player.y + PLAYER_EYE_HEIGHT - bobY, this.player.z];
     const dir = this.player.getLookVector();
     const center = [eye[0] + dir.x, eye[1] + dir.y, eye[2] + dir.z];
     mat4LookAt(this.view, eye, center, [0, 1, 0]);
@@ -3700,7 +4704,10 @@ class WebGLVoxelRenderer {
       item.record.transparent.draw();
     }
 
-    this._zombie.draw(this.proj, this.view, this.entities || []);
+    if (this.settings?.mobModels !== false) {
+      this._objEntities.draw(this.proj, this.view, this.entities || []);
+      this._zombie.draw(this.proj, this.view, this.entities || []);
+    }
     this._entities.draw(this.proj, this.view, this.entities || []);
 
     // Outline is drawn last so it stays readable.
@@ -3883,16 +4890,23 @@ class WebGLVoxelRenderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
       for (const e of sorted) {
-        const isItem = Number.isFinite(e.blockType);
+        const isItem = Number.isFinite(e.itemType ?? e.blockType);
         const isZombie = !isItem && e.type === "zombie";
-        if (isZombie) {
+        const hasObjModel = !isItem && this.objModelLibrary?.hasModel(e.type);
+        const hasEntityTexture = !isItem && !!(this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type));
+        const canUseObjModel = hasObjModel && hasEntityTexture;
+        const canUseZombieModel = isZombie && !!this.entityTextures?.getImage("zombie");
+        if (canUseObjModel && this.settings?.mobModels !== false) {
+          continue;
+        }
+        if (canUseZombieModel && this.settings?.mobModels !== false) {
           // Zombie uses the 3D model renderer.
           continue;
         }
 
         const image = isItem
-          ? this.textureLibrary?.getBlockFaceTexture(e.blockType, "top", this.settings) || null
-          : this.entityTextures?.getImage(e.type) || null;
+          ? this.textureLibrary?.getItemTexture(e.itemType ?? e.blockType, this.settings) || null
+          : this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type) || null;
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const faceYaw = Math.atan2(this.player.x - e.x, this.player.z - e.z);
         const bob = isItem ? Math.sin((e.age || 0) * 6) * 0.08 : 0;
@@ -4256,6 +5270,150 @@ class WebGLVoxelRenderer {
 
     return { draw };
   }
+
+  _createObjEntityRenderer() {
+    const gl = this.gl;
+    const program = createProgram(
+      gl,
+      `#version 300 es
+      precision highp float;
+      layout(location=0) in vec3 aPos;
+      layout(location=1) in vec2 aUV;
+      uniform mat4 uProj;
+      uniform mat4 uView;
+      uniform vec3 uPos;
+      uniform float uYaw;
+      uniform float uScale;
+      uniform vec2 uCenterXZ;
+      uniform float uMinY;
+      uniform float uYOffset;
+      out vec2 vUV;
+      void main(){
+        float s = sin(uYaw);
+        float c = cos(uYaw);
+        vec3 local = vec3(
+          (aPos.x - uCenterXZ.x) * uScale,
+          (aPos.y - uMinY) * uScale + uYOffset,
+          (aPos.z - uCenterXZ.y) * uScale
+        );
+        vec3 p = vec3(
+          local.x * c - local.z * s,
+          local.y,
+          local.x * s + local.z * c
+        ) + uPos;
+        gl_Position = uProj * uView * vec4(p, 1.0);
+        vUV = aUV;
+      }`,
+      `#version 300 es
+      precision highp float;
+      precision highp sampler2D;
+      uniform sampler2D uTex;
+      uniform vec4 uColor;
+      in vec2 vUV;
+      out vec4 outColor;
+      void main(){
+        vec4 col = texture(uTex, vUV) * uColor;
+        if (col.a < 0.12) discard;
+        outColor = col;
+      }`
+    );
+
+    const uProj = gl.getUniformLocation(program, "uProj");
+    const uView = gl.getUniformLocation(program, "uView");
+    const uPos = gl.getUniformLocation(program, "uPos");
+    const uYaw = gl.getUniformLocation(program, "uYaw");
+    const uScale = gl.getUniformLocation(program, "uScale");
+    const uCenterXZ = gl.getUniformLocation(program, "uCenterXZ");
+    const uMinY = gl.getUniformLocation(program, "uMinY");
+    const uYOffset = gl.getUniformLocation(program, "uYOffset");
+    const uTex = gl.getUniformLocation(program, "uTex");
+    const uColor = gl.getUniformLocation(program, "uColor");
+
+    const buffers = new Map();
+
+    const getBuffer = (type) => {
+      if (buffers.has(type)) {
+        return buffers.get(type);
+      }
+      const model = this.objModelLibrary?.getModel(type);
+      if (!model) {
+        return null;
+      }
+      const vao = gl.createVertexArray();
+      const vbo = gl.createBuffer();
+      const ibo = gl.createBuffer();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, model.vertices, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, model.indices, gl.STATIC_DRAW);
+      const stride = 8 * 4;
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, stride, 3 * 4);
+      gl.bindVertexArray(null);
+      const record = { vao, vbo, ibo, indexCount: model.indices.length, bounds: model.bounds };
+      buffers.set(type, record);
+      return record;
+    };
+
+    const drawModel = (buffer, tex, entity, scaleMul = 1, color = [1, 1, 1, 1], yOffset = 0) => {
+      const def = getMobDef(entity.type);
+      const bounds = buffer.bounds || { minX: -0.5, minY: 0, minZ: -0.5, maxX: 0.5, maxY: 1, maxZ: 0.5 };
+      const modelHeight = Math.max(0.01, bounds.maxY - bounds.minY);
+      const scale = ((def.modelHeight || def.height || 1) / modelHeight) * scaleMul;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform3f(uPos, entity.x, entity.y, entity.z);
+      gl.uniform1f(uYaw, (entity.yaw || 0) + (def.yawOffset || 0));
+      gl.uniform1f(uScale, scale);
+      gl.uniform2f(uCenterXZ, (bounds.minX + bounds.maxX) * 0.5, (bounds.minZ + bounds.maxZ) * 0.5);
+      gl.uniform1f(uMinY, bounds.minY);
+      gl.uniform1f(uYOffset, yOffset);
+      gl.uniform4f(uColor, color[0], color[1], color[2], color[3]);
+      gl.bindVertexArray(buffer.vao);
+      gl.drawElements(gl.TRIANGLES, buffer.indexCount, gl.UNSIGNED_INT, 0);
+    };
+
+    const draw = (proj, view, entities) => {
+      if (!entities || entities.length === 0) return;
+      gl.useProgram(program);
+      gl.uniformMatrix4fv(uProj, false, proj);
+      gl.uniformMatrix4fv(uView, false, view);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(uTex, 0);
+      gl.depthMask(true);
+
+      for (const e of entities) {
+        if (!e || Number.isFinite(e.itemType ?? e.blockType)) continue;
+        const model = this.objModelLibrary?.getModel(e.type);
+        if (!model) continue;
+        const image = this.entityTextures?.getImage(e.type) || null;
+        const tex = image ? this._getOrCreateSpriteTexture(image) : null;
+        const buffer = getBuffer(e.type);
+        if (!buffer || !tex) continue;
+        const def = getMobDef(e.type);
+        const walkFactor = clamp(Math.hypot(e.vx || 0, e.vz || 0) / Math.max(0.1, def.speed || 1), 0, 1);
+        const bob = Math.sin((e.age || 0) * 8) * 0.02 * walkFactor;
+        const hurtTint = e.hurtTimer > 0 ? [1, 0.74, 0.74, 1] : [1, 1, 1, 1];
+
+        drawModel(buffer, tex, e, 1, hurtTint, bob);
+
+        if (e.type === "sheep" && def.shellScale) {
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.depthMask(false);
+          drawModel(buffer, tex, e, def.shellScale, def.shellTint || [1, 1, 1, 0.42], bob + 0.01);
+          gl.depthMask(true);
+          gl.disable(gl.BLEND);
+        }
+      }
+
+      gl.bindVertexArray(null);
+    };
+
+    return { draw };
+  }
 }
 
 function buildChunkLoadList(centerChunkX, centerChunkZ, radius) {
@@ -4277,6 +5435,7 @@ export default function FreeCube2Game(engine) {
   let store = null;
   let textures = null;
   let entityTextures = null;
+  let objModels = null;
   let gl = null;
   let atlas = null;
   let glRenderer = null;
@@ -4290,6 +5449,7 @@ export default function FreeCube2Game(engine) {
   let activeWorldId = null;
   let mode = "menu"; // menu | loading | playing | paused
   let chatOpen = false;
+  let inventoryOpen = false;
   let chatLines = [];
   let chatNeedsRender = false;
   let mobs = [];
@@ -4304,6 +5464,19 @@ export default function FreeCube2Game(engine) {
   let fpsTimer = 0;
   let fpsSmoothed = 0;
   let currentTarget = null;
+  let currentEntityTarget = null;
+  let inventoryCursor = { type: BLOCK.AIR, count: 0 };
+  let inventoryContext = "inventory";
+  let inventoryCraftTypes = new Uint8Array(CRAFT_GRID_SMALL);
+  let inventoryCraftCounts = new Uint16Array(CRAFT_GRID_SMALL);
+  let tableCraftTypes = new Uint8Array(CRAFT_GRID_LARGE);
+  let tableCraftCounts = new Uint16Array(CRAFT_GRID_LARGE);
+  let furnaceStates = new Map();
+  let activeFurnaceKey = null;
+  let inventoryDrag = { pending: false, active: false, button: 0, origin: null, targets: [], targetKeys: new Set() };
+  let suppressInventoryClick = false;
+  let mobRenderWarnings = new Set();
+  let lastMobRenderSummaryAt = 0;
 
   let ui = null;
   let loadingStartChunk = null;
@@ -4390,19 +5563,24 @@ export default function FreeCube2Game(engine) {
         #freecube2-xp-bar{height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.14);overflow:hidden}
         #freecube2-xp-bar > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(94,236,171,0.96), rgba(72,162,255,0.96))}
         #freecube2-xp-level{margin-top:6px;text-align:center;color:rgba(220,235,255,0.9);font:700 12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.6)}
-        #freecube2-status{position:fixed;left:50%;bottom:122px;transform:translateX(-50%);width:min(760px,92vw);display:none;justify-content:space-between;gap:14px}
-        .fc-hearts,.fc-hunger{display:flex;gap:3px;align-items:center}
-        .fc-heart,.fc-food{width:16px;height:16px;display:inline-block;background:rgba(0,0,0,0.25);border:1px solid rgba(0,0,0,0.55);box-shadow:0 2px 0 rgba(0,0,0,0.45);image-rendering:pixelated}
+        #freecube2-status{position:fixed;left:50%;bottom:122px;transform:translateX(-50%);width:min(820px,94vw);display:none;justify-content:space-between;gap:14px}
+        .fc-armor,.fc-hearts,.fc-hunger{display:flex;gap:3px;align-items:center}
+        .fc-heart,.fc-food,.fc-armor-icon{width:16px;height:16px;display:inline-block;background:rgba(0,0,0,0.25);border:1px solid rgba(0,0,0,0.55);box-shadow:0 2px 0 rgba(0,0,0,0.45);image-rendering:pixelated}
         .fc-heart{mask-repeat:no-repeat;mask-position:center;mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain}
         .fc-food{mask-repeat:no-repeat;mask-position:center;mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain}
+        .fc-armor-icon{mask-repeat:no-repeat;mask-position:center;mask-size:contain;-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain}
         .fc-heart{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 14s-6-3.7-6-8.3C2 3 3.7 1.5 5.6 1.5c1.2 0 2.1.6 2.4 1.2.3-.6 1.2-1.2 2.4-1.2C12.3 1.5 14 3 14 5.7 14 10.3 8 14 8 14z'/%3E%3C/svg%3E");-webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 14s-6-3.7-6-8.3C2 3 3.7 1.5 5.6 1.5c1.2 0 2.1.6 2.4 1.2.3-.6 1.2-1.2 2.4-1.2C12.3 1.5 14 3 14 5.7 14 10.3 8 14 8 14z'/%3E%3C/svg%3E\")}
         .fc-food{mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6.4 1.6c1.5 0 2.5 1.2 2.5 2.6v.6c0 .8.6 1.5 1.5 1.7l.5.1c1.8.4 3.1 2 3.1 3.8 0 2.3-1.9 4.2-4.2 4.2H7.2C4.9 14.6 3 12.7 3 10.4V4.2C3 2.8 4 1.6 5.5 1.6h.9z'/%3E%3C/svg%3E\");-webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6.4 1.6c1.5 0 2.5 1.2 2.5 2.6v.6c0 .8.6 1.5 1.5 1.7l.5.1c1.8.4 3.1 2 3.1 3.8 0 2.3-1.9 4.2-4.2 4.2H7.2C4.9 14.6 3 12.7 3 10.4V4.2C3 2.8 4 1.6 5.5 1.6h.9z'/%3E%3C/svg%3E\")}
+        .fc-armor-icon{mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 2h6l2 2v3l-1 1v4H4V8L3 7V4l2-2zm1 2L5 5v1h1v5h4V6h1V5L10 4H6z'/%3E%3C/svg%3E\");-webkit-mask-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 2h6l2 2v3l-1 1v4H4V8L3 7V4l2-2zm1 2L5 5v1h1v5h4V6h1V5L10 4H6z'/%3E%3C/svg%3E\")}
         .fc-heart.full{background:linear-gradient(180deg, rgba(255,72,72,0.98), rgba(150,18,18,0.98))}
         .fc-heart.half{background:linear-gradient(90deg, rgba(255,72,72,0.98) 50%, rgba(0,0,0,0.22) 50%)}
         .fc-heart.empty{background:rgba(0,0,0,0.22)}
         .fc-food.full{background:linear-gradient(180deg, rgba(255,210,92,0.98), rgba(160,92,20,0.98))}
         .fc-food.half{background:linear-gradient(90deg, rgba(255,210,92,0.98) 50%, rgba(0,0,0,0.22) 50%)}
         .fc-food.empty{background:rgba(0,0,0,0.22)}
+        .fc-armor-icon.full{background:linear-gradient(180deg, rgba(255,255,255,0.98), rgba(160,170,185,0.98))}
+        .fc-armor-icon.half{background:linear-gradient(90deg, rgba(255,255,255,0.98) 50%, rgba(0,0,0,0.22) 50%)}
+        .fc-armor-icon.empty{background:rgba(0,0,0,0.22)}
         #freecube2-chat{position:fixed;left:10px;bottom:86px;width:min(520px,72vw);pointer-events:none}
         #freecube2-chat-log{display:flex;flex-direction:column;gap:4px;max-height:42vh;overflow:hidden}
         .fc-chat-line{padding:4px 6px;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:rgba(235,245,255,0.95);font:12px/1.25 ui-monospace,Menlo,Consolas,monospace;backdrop-filter:blur(8px)}
@@ -4418,10 +5596,61 @@ export default function FreeCube2Game(engine) {
         #freecube2-mining{position:fixed;left:50%;top:50%;transform:translate(-50%, 46px);width:180px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden;display:none}
         #freecube2-mining-bar{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
         #freecube2-hotbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:8px;padding:10px 12px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.14);border-radius:10px}
+        #freecube2-inventory{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);display:none;pointer-events:auto;z-index:1002}
+        .fc-inv-panel{min-width:min(720px,94vw);padding:16px;background:rgba(20,18,14,0.94);border:3px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.12),0 24px 60px rgba(0,0,0,0.45)}
+        .fc-inv-title{margin-bottom:12px;color:#fff;font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;text-align:center;text-shadow:0 2px 8px rgba(0,0,0,0.7)}
+        .fc-inv-top{display:flex;justify-content:center;gap:20px;align-items:stretch;margin-bottom:16px;flex-wrap:wrap}
+        .fc-inv-pane{display:flex;flex-direction:column;gap:8px;min-width:0}
+        .fc-inv-preview-pane{min-width:152px}
+        .fc-inv-subtitle{color:#fff;font:700 13px/1 ui-monospace,Menlo,Consolas,monospace;text-align:center;text-shadow:0 2px 8px rgba(0,0,0,0.7)}
+        .fc-inv-column{display:grid;grid-template-columns:repeat(1,44px);gap:8px;justify-content:center}
+        .fc-inv-crafting-row{display:flex;align-items:center;gap:12px}
+        .fc-inv-grid-2{grid-template-columns:repeat(2,44px)}
+        .fc-inv-grid-3{grid-template-columns:repeat(3,44px)}
+        .fc-inv-arrow{color:#fff;font:900 28px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 8px rgba(0,0,0,0.7)}
+        .fc-inv-grid{display:grid;grid-template-columns:repeat(9,44px);gap:8px;justify-content:center}
+        .fc-inv-grid + .fc-inv-grid{margin-top:18px}
+        .fc-inv-cursor{position:fixed;left:0;top:0;transform:translate(-50%,-50%);display:none;pointer-events:none;z-index:1003}
         .freecube2-slot{position:relative;width:44px;height:44px;border-radius:8px;background:rgba(18,24,35,0.92);border:2px solid rgba(255,255,255,0.12);display:grid;place-items:center}
+        .freecube2-slot.drag-target{border-color:rgba(255,216,112,0.96);box-shadow:0 0 0 2px rgba(255,216,112,0.18) inset}
         .freecube2-slot.sel{border-color:rgba(255,255,255,0.9);box-shadow:0 0 0 3px rgba(90,200,255,0.25) inset}
         .freecube2-slot img{width:36px;height:36px;image-rendering:pixelated}
         .freecube2-slot .fc-count{position:absolute;right:6px;bottom:4px;color:rgba(255,255,255,0.95);font:900 12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 0 rgba(0,0,0,0.75)}
+        .fc-inv-preview{width:152px;min-height:192px;padding:12px;background:linear-gradient(180deg, rgba(10,10,10,0.86), rgba(26,26,26,0.82));border:2px solid rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center}
+        .fc-inv-player{position:relative;width:86px;height:168px;image-rendering:pixelated}
+        .fc-inv-player .body{position:absolute;background:#3aa4c1}
+        .fc-inv-player .skin{background:#e6cfb2}
+        .fc-inv-player .hair{background:#3d2816}
+        .fc-inv-player .shirt{background:#24c6d8}
+        .fc-inv-player .pants{background:#3ad6e4}
+        .fc-inv-player .belt{background:#3a3024}
+        .fc-inv-player .boots{background:#f0f0f0}
+        .fc-inv-player .head{left:27px;top:0;width:32px;height:32px}
+        .fc-inv-player .hair{left:27px;top:0;width:32px;height:12px}
+        .fc-inv-player .torso{left:31px;top:34px;width:24px;height:46px}
+        .fc-inv-player .arm-left{left:15px;top:34px;width:14px;height:46px}
+        .fc-inv-player .arm-right{left:57px;top:34px;width:14px;height:46px}
+        .fc-inv-player .leg-left{left:31px;top:84px;width:18px;height:56px}
+        .fc-inv-player .leg-right{left:49px;top:84px;width:18px;height:56px}
+        .fc-inv-player .belt{left:31px;top:74px;width:36px;height:8px}
+        .fc-inv-player .boots{left:31px;top:138px;width:36px;height:8px}
+        .fc-inv-player .armor{position:absolute;display:none;background:rgba(230,235,244,0.72);border:1px solid rgba(255,255,255,0.38)}
+        .fc-inv-player.has-head .armor-head{display:block;left:25px;top:-2px;width:36px;height:18px}
+        .fc-inv-player.has-chest .armor-chest{display:block;left:27px;top:31px;width:32px;height:36px}
+        .fc-inv-player.has-legs .armor-legs{display:block;left:29px;top:78px;width:36px;height:34px}
+        .fc-inv-player.has-feet .armor-feet{display:block;left:29px;top:132px;width:36px;height:12px}
+        .fc-inv-furnace{display:none;min-width:242px}
+        .fc-inv-furnace.show{display:flex}
+        .fc-furnace-layout{display:grid;grid-template-columns:44px 58px 68px 44px;grid-template-rows:44px 44px;align-items:center;justify-content:center;column-gap:12px;row-gap:8px}
+        .fc-furnace-slot-input{grid-column:1;grid-row:1}
+        .fc-furnace-slot-fuel{grid-column:1;grid-row:2}
+        .fc-furnace-fire{grid-column:2;grid-row:2;display:flex;align-items:flex-end;justify-content:center;height:44px}
+        .fc-furnace-firebar{width:18px;height:32px;border-radius:4px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
+        .fc-furnace-firebar > div{height:0%;width:100%;background:linear-gradient(180deg, rgba(255,228,112,0.98), rgba(255,104,24,0.98))}
+        .fc-furnace-arrow{grid-column:3;grid-row:1 / span 2;display:flex;align-items:center;gap:8px;color:#fff;font:900 28px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 8px rgba(0,0,0,0.7)}
+        .fc-furnace-progress{width:54px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
+        .fc-furnace-progress > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
+        .fc-furnace-slot-output{grid-column:4;grid-row:1 / span 2}
         #freecube2-menu{position:fixed;inset:0;display:none;pointer-events:auto;background:#2b2b2b url('PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
         @keyframes fc-menu-pan{0%{background-position:0 0}100%{background-position:-256px -256px}}
         #freecube2-menu::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.06), transparent 52%),linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.55));pointer-events:none}
@@ -4477,6 +5706,7 @@ export default function FreeCube2Game(engine) {
       <div id="freecube2-crosshair"></div>
       <div id="freecube2-mining"><div id="freecube2-mining-bar"></div></div>
       <div id="freecube2-status">
+        <div class="fc-armor" id="freecube2-armor"></div>
         <div class="fc-hearts" id="freecube2-hearts"></div>
         <div class="fc-hunger" id="freecube2-hunger"></div>
       </div>
@@ -4485,6 +5715,47 @@ export default function FreeCube2Game(engine) {
         <div id="freecube2-xp-level">0</div>
       </div>
       <div id="freecube2-hotbar"></div>
+      <div id="freecube2-inventory">
+        <div class="fc-inv-panel">
+          <div id="freecube2-inventory-title" class="fc-inv-title">Inventory</div>
+          <div class="fc-inv-top">
+            <div class="fc-inv-pane">
+              <div class="fc-inv-subtitle">Armor</div>
+              <div id="freecube2-inventory-armor" class="fc-inv-column"></div>
+            </div>
+            <div class="fc-inv-pane fc-inv-preview-pane">
+              <div class="fc-inv-subtitle">Player</div>
+              <div id="freecube2-inventory-preview" class="fc-inv-preview"></div>
+            </div>
+            <div class="fc-inv-pane">
+              <div id="freecube2-crafting-label" class="fc-inv-subtitle">Crafting</div>
+              <div class="fc-inv-crafting-row">
+                <div id="freecube2-crafting-grid" class="fc-inv-grid fc-inv-grid-2"></div>
+                <div class="fc-inv-arrow">→</div>
+                <div id="freecube2-crafting-output" class="freecube2-slot"></div>
+              </div>
+            </div>
+            <div id="freecube2-furnace-pane" class="fc-inv-pane fc-inv-furnace">
+              <div class="fc-inv-subtitle">Furnace</div>
+              <div class="fc-furnace-layout">
+                <div id="freecube2-furnace-input" class="freecube2-slot fc-furnace-slot-input"></div>
+                <div id="freecube2-furnace-fuel" class="freecube2-slot fc-furnace-slot-fuel"></div>
+                <div class="fc-furnace-fire">
+                  <div class="fc-furnace-firebar"><div id="freecube2-furnace-burn"></div></div>
+                </div>
+                <div class="fc-furnace-arrow">
+                  →
+                  <div class="fc-furnace-progress"><div id="freecube2-furnace-progress"></div></div>
+                </div>
+                <div id="freecube2-furnace-output" class="freecube2-slot fc-furnace-slot-output"></div>
+              </div>
+            </div>
+          </div>
+          <div id="freecube2-inventory-main" class="fc-inv-grid"></div>
+          <div id="freecube2-inventory-hotbar" class="fc-inv-grid"></div>
+        </div>
+      </div>
+      <div id="freecube2-inventory-cursor" class="freecube2-slot fc-inv-cursor"></div>
       <div id="freecube2-menu" class="show">
         <div id="freecube2-panel">
           <div id="fc-screen-title">
@@ -4569,7 +5840,7 @@ export default function FreeCube2Game(engine) {
               </div>
               <div class="fc-field fc-check">
                 <input id="fc-mob-models" type="checkbox" />
-                <label for="fc-mob-models">3D zombie model</label>
+                <label for="fc-mob-models">3D mob models</label>
               </div>
               <div class="fc-field fc-check">
                 <input id="fc-inv" type="checkbox" />
@@ -4627,12 +5898,29 @@ export default function FreeCube2Game(engine) {
     const miningEl = root.querySelector("#freecube2-mining");
     const miningBar = root.querySelector("#freecube2-mining-bar");
     const statusEl = root.querySelector("#freecube2-status");
+    const armorEl = root.querySelector("#freecube2-armor");
     const heartsEl = root.querySelector("#freecube2-hearts");
     const hungerEl = root.querySelector("#freecube2-hunger");
     const xpEl = root.querySelector("#freecube2-xp");
     const xpFill = root.querySelector("#freecube2-xp-bar > div");
     const xpLevelEl = root.querySelector("#freecube2-xp-level");
     const hotbarEl = root.querySelector("#freecube2-hotbar");
+    const inventoryEl = root.querySelector("#freecube2-inventory");
+    const inventoryTitleEl = root.querySelector("#freecube2-inventory-title");
+    const inventoryArmorEl = root.querySelector("#freecube2-inventory-armor");
+    const inventoryPreviewEl = root.querySelector("#freecube2-inventory-preview");
+    const inventoryCraftLabelEl = root.querySelector("#freecube2-crafting-label");
+    const inventoryCraftGridEl = root.querySelector("#freecube2-crafting-grid");
+    const inventoryCraftResultEl = root.querySelector("#freecube2-crafting-output");
+    const inventoryFurnacePaneEl = root.querySelector("#freecube2-furnace-pane");
+    const inventoryFurnaceInputEl = root.querySelector("#freecube2-furnace-input");
+    const inventoryFurnaceFuelEl = root.querySelector("#freecube2-furnace-fuel");
+    const inventoryFurnaceOutputEl = root.querySelector("#freecube2-furnace-output");
+    const inventoryFurnaceBurnEl = root.querySelector("#freecube2-furnace-burn");
+    const inventoryFurnaceProgressEl = root.querySelector("#freecube2-furnace-progress");
+    const inventoryMainEl = root.querySelector("#freecube2-inventory-main");
+    const inventoryHotbarEl = root.querySelector("#freecube2-inventory-hotbar");
+    const inventoryCursorEl = root.querySelector("#freecube2-inventory-cursor");
     const menuEl = root.querySelector("#freecube2-menu");
 
     const screens = {
@@ -4702,12 +5990,29 @@ export default function FreeCube2Game(engine) {
       miningEl,
       miningBar,
       statusEl,
+      armorEl,
       heartsEl,
       hungerEl,
       xpEl,
       xpFill,
       xpLevelEl,
       worldListEl,
+      inventoryEl,
+      inventoryTitleEl,
+      inventoryArmorEl,
+      inventoryPreviewEl,
+      inventoryCraftLabelEl,
+      inventoryCraftGridEl,
+      inventoryCraftResultEl,
+      inventoryFurnacePaneEl,
+      inventoryFurnaceInputEl,
+      inventoryFurnaceFuelEl,
+      inventoryFurnaceOutputEl,
+      inventoryFurnaceBurnEl,
+      inventoryFurnaceProgressEl,
+      inventoryMainEl,
+      inventoryHotbarEl,
+      inventoryCursorEl,
       newWorldCard,
       worldNameInput,
       worldSeedInput,
@@ -4743,25 +6048,10 @@ export default function FreeCube2Game(engine) {
     for (let i = 0; i < HOTBAR_SLOTS; i += 1) {
       const slot = document.createElement("div");
       slot.className = "freecube2-slot" + (i === player.selectedHotbarSlot ? " sel" : "");
-      const isCreative = settings.gameMode === GAME_MODE.CREATIVE;
-      const blockType = isCreative ? HOTBAR_BLOCKS[i] : player.hotbarTypes[i];
-      const count = isCreative ? 0 : player.hotbarCounts[i];
-      const hasItem = isCreative ? !!blockType : blockType !== BLOCK.AIR && count > 0;
-      const image = hasItem ? textures?.getBlockFaceTexture(blockType, "top", settings) : null;
-      if (image?.src) {
-        const img = document.createElement("img");
-        img.src = image.src;
-        img.alt = blockType ? (BLOCK_INFO[blockType]?.name || "block") : "empty";
-        slot.appendChild(img);
-      }
-      if (!isCreative && count > 1) {
-        const c = document.createElement("div");
-        c.className = "fc-count";
-        c.textContent = String(count);
-        slot.appendChild(c);
-      }
+      renderSlotContents(slot, i, true);
       ui.hotbarEl.appendChild(slot);
     }
+    renderInventoryUI();
   }
 
   function updateHotbarSelection() {
@@ -4770,13 +6060,1140 @@ export default function FreeCube2Game(engine) {
     slots.forEach((slot, idx) => {
       slot.classList.toggle("sel", idx === player.selectedHotbarSlot);
     });
+    const invHotbarSlots = Array.from(ui.inventoryHotbarEl.querySelectorAll(".freecube2-slot"));
+    invHotbarSlots.forEach((slot, idx) => {
+      slot.classList.toggle("sel", idx === player.selectedHotbarSlot);
+    });
+  }
+
+  function getInventorySlotType(index) {
+    if (!player) return BLOCK.AIR;
+    const count = player.inventoryCounts[index] || 0;
+    if (count <= 0) return BLOCK.AIR;
+    return player.inventoryTypes[index] || BLOCK.AIR;
+  }
+
+  function getInventorySlotCount(index) {
+    return player ? (player.inventoryCounts[index] || 0) : 0;
+  }
+
+  function setInventorySlot(index, type, count) {
+    if (!player || index < 0 || index >= INVENTORY_SLOTS) return;
+    if (!type || type === BLOCK.AIR || count <= 0) {
+      player.inventoryTypes[index] = BLOCK.AIR;
+      player.inventoryCounts[index] = 0;
+      return;
+    }
+    player.inventoryTypes[index] = type;
+    player.inventoryCounts[index] = clamp(Math.floor(count), 0, getItemMaxStack(type));
+  }
+
+  function getArmorSlotType(index) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return BLOCK.AIR;
+    return (player.armorCounts[index] || 0) > 0 ? (player.armorTypes[index] || BLOCK.AIR) : BLOCK.AIR;
+  }
+
+  function getArmorSlotCount(index) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return 0;
+    return player.armorCounts[index] || 0;
+  }
+
+  function setArmorSlot(index, type, count) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return;
+    const slotKey = ARMOR_SLOT_KEYS[index];
+    if (!type || type === BLOCK.AIR || count <= 0 || getItemArmorSlot(type) !== slotKey) {
+      player.armorTypes[index] = BLOCK.AIR;
+      player.armorCounts[index] = 0;
+      return;
+    }
+    player.armorTypes[index] = type;
+    player.armorCounts[index] = 1;
+  }
+
+  function packBlockPositionKey(x, y, z) {
+    return `${Math.floor(x)}|${Math.floor(y)}|${Math.floor(z)}`;
+  }
+
+  function getFurnaceStateByKey(key, create = false) {
+    if (!key) return null;
+    let state = furnaceStates.get(key) || null;
+    if (!state && create) {
+      state = {
+        inputType: BLOCK.AIR,
+        inputCount: 0,
+        fuelType: BLOCK.AIR,
+        fuelCount: 0,
+        outputType: BLOCK.AIR,
+        outputCount: 0,
+        burnTime: 0,
+        burnTimeTotal: 0,
+        cookTime: 0
+      };
+      furnaceStates.set(key, state);
+    }
+    return state;
+  }
+
+  function getFurnaceStateAt(x, y, z, create = false) {
+    return getFurnaceStateByKey(packBlockPositionKey(x, y, z), create);
+  }
+
+  function getActiveFurnaceState(create = false) {
+    return getFurnaceStateByKey(activeFurnaceKey, create);
+  }
+
+  function trimFurnaceSlot(typeKey, countKey, state) {
+    if (!state) return;
+    if (!state[typeKey] || state[typeKey] === BLOCK.AIR || (state[countKey] || 0) <= 0) {
+      state[typeKey] = BLOCK.AIR;
+      state[countKey] = 0;
+    }
+  }
+
+  function isFurnaceEmpty(state) {
+    if (!state) return true;
+    return (
+      (state.inputCount || 0) <= 0 &&
+      (state.fuelCount || 0) <= 0 &&
+      (state.outputCount || 0) <= 0 &&
+      (state.burnTime || 0) <= 0 &&
+      (state.cookTime || 0) <= 0
+    );
+  }
+
+  function pruneFurnaceState(key) {
+    if (!key) return;
+    const state = furnaceStates.get(key);
+    if (isFurnaceEmpty(state)) {
+      furnaceStates.delete(key);
+    }
+  }
+
+  function getFurnaceSlotValue(slot) {
+    const state = getActiveFurnaceState(false);
+    if (!state) return { type: BLOCK.AIR, count: 0 };
+    if (slot === "input") {
+      return { type: state.inputCount > 0 ? (state.inputType || BLOCK.AIR) : BLOCK.AIR, count: state.inputCount || 0 };
+    }
+    if (slot === "fuel") {
+      return { type: state.fuelCount > 0 ? (state.fuelType || BLOCK.AIR) : BLOCK.AIR, count: state.fuelCount || 0 };
+    }
+    return { type: state.outputCount > 0 ? (state.outputType || BLOCK.AIR) : BLOCK.AIR, count: state.outputCount || 0 };
+  }
+
+  function setFurnaceSlotValue(slot, type, count) {
+    const state = getActiveFurnaceState(true);
+    if (!state) return;
+    if (slot === "input") {
+      state.inputType = !type || type === BLOCK.AIR || count <= 0 ? BLOCK.AIR : type;
+      state.inputCount = state.inputType === BLOCK.AIR ? 0 : clamp(Math.floor(count), 0, getItemMaxStack(type));
+      trimFurnaceSlot("inputType", "inputCount", state);
+    } else if (slot === "fuel") {
+      state.fuelType = !type || type === BLOCK.AIR || count <= 0 ? BLOCK.AIR : type;
+      state.fuelCount = state.fuelType === BLOCK.AIR ? 0 : clamp(Math.floor(count), 0, getItemMaxStack(type));
+      trimFurnaceSlot("fuelType", "fuelCount", state);
+    } else {
+      state.outputType = !type || type === BLOCK.AIR || count <= 0 ? BLOCK.AIR : type;
+      state.outputCount = state.outputType === BLOCK.AIR ? 0 : clamp(Math.floor(count), 0, getItemMaxStack(type));
+      trimFurnaceSlot("outputType", "outputCount", state);
+    }
+    pruneFurnaceState(activeFurnaceKey);
+  }
+
+  function getFurnaceCookProgress(state = getActiveFurnaceState(false)) {
+    if (!state) return 0;
+    return clamp((state.cookTime || 0) / FURNACE_SMELT_TIME, 0, 1);
+  }
+
+  function getFurnaceBurnProgress(state = getActiveFurnaceState(false)) {
+    if (!state) return 0;
+    if ((state.burnTimeTotal || 0) <= 0 || (state.burnTime || 0) <= 0) return 0;
+    return clamp((state.burnTime || 0) / (state.burnTimeTotal || 1), 0, 1);
+  }
+
+  function getActiveCraftState() {
+    const isTable = inventoryContext === "table";
+    return isTable
+      ? { types: tableCraftTypes, counts: tableCraftCounts, size: 3, slots: CRAFT_GRID_LARGE, title: "Crafting Table", label: "Crafting 3x3" }
+      : { types: inventoryCraftTypes, counts: inventoryCraftCounts, size: 2, slots: CRAFT_GRID_SMALL, title: "Inventory", label: "Crafting 2x2" };
+  }
+
+  function getCraftSlotType(index) {
+    const state = getActiveCraftState();
+    if (index < 0 || index >= state.slots) return BLOCK.AIR;
+    return (state.counts[index] || 0) > 0 ? (state.types[index] || BLOCK.AIR) : BLOCK.AIR;
+  }
+
+  function getCraftSlotCount(index) {
+    const state = getActiveCraftState();
+    if (index < 0 || index >= state.slots) return 0;
+    return state.counts[index] || 0;
+  }
+
+  function setCraftSlot(index, type, count) {
+    const state = getActiveCraftState();
+    if (index < 0 || index >= state.slots) return;
+    if (!type || type === BLOCK.AIR || count <= 0) {
+      state.types[index] = BLOCK.AIR;
+      state.counts[index] = 0;
+      return;
+    }
+    state.types[index] = type;
+    state.counts[index] = clamp(Math.floor(count), 0, getItemMaxStack(type));
+  }
+
+  function trimCraftingMatrix(types, counts, size) {
+    let minRow = size;
+    let maxRow = -1;
+    let minCol = size;
+    let maxCol = -1;
+
+    for (let row = 0; row < size; row += 1) {
+      for (let col = 0; col < size; col += 1) {
+        const index = row * size + col;
+        if ((counts[index] || 0) <= 0 || (types[index] || 0) === BLOCK.AIR) continue;
+        minRow = Math.min(minRow, row);
+        maxRow = Math.max(maxRow, row);
+        minCol = Math.min(minCol, col);
+        maxCol = Math.max(maxCol, col);
+      }
+    }
+
+    if (maxRow < minRow || maxCol < minCol) {
+      return [];
+    }
+
+    const result = [];
+    for (let row = minRow; row <= maxRow; row += 1) {
+      const outRow = [];
+      for (let col = minCol; col <= maxCol; col += 1) {
+        const index = row * size + col;
+        outRow.push((counts[index] || 0) > 0 ? (types[index] || BLOCK.AIR) : BLOCK.AIR);
+      }
+      result.push(outRow);
+    }
+    return result;
+  }
+
+  function mirrorMatrixHorizontally(matrix) {
+    return matrix.map((row) => [...row].reverse());
+  }
+
+  function matricesEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (let row = 0; row < a.length; row += 1) {
+      if ((a[row] || []).length !== (b[row] || []).length) return false;
+      for (let col = 0; col < a[row].length; col += 1) {
+        if ((a[row][col] || 0) !== (b[row][col] || 0)) return false;
+      }
+    }
+    return true;
+  }
+
+  function getCraftingResult() {
+    const state = getActiveCraftState();
+    const matrix = trimCraftingMatrix(state.types, state.counts, state.size);
+    if (matrix.length === 0) {
+      return null;
+    }
+    for (const recipe of CRAFTING_RECIPES) {
+      const recipeHeight = recipe.pattern.length;
+      const recipeWidth = recipe.pattern[0]?.length || 0;
+      if (recipeHeight > state.size || recipeWidth > state.size) continue;
+      if (matrix.length !== recipeHeight || matrix[0].length !== recipeWidth) continue;
+      if (matricesEqual(matrix, recipe.pattern) || (recipe.mirrored && matricesEqual(matrix, mirrorMatrixHorizontally(recipe.pattern)))) {
+        return recipe;
+      }
+    }
+    return null;
+  }
+
+  function consumeCraftingIngredients(recipe) {
+    const state = getActiveCraftState();
+    const pattern = recipe.pattern;
+    const matrix = trimCraftingMatrix(state.types, state.counts, state.size);
+    const mirrored = recipe.mirrored && matricesEqual(matrix, mirrorMatrixHorizontally(recipe.pattern)) && !matricesEqual(matrix, recipe.pattern);
+    const target = mirrored ? mirrorMatrixHorizontally(pattern) : pattern;
+
+    let minRow = state.size;
+    let minCol = state.size;
+    for (let row = 0; row < state.size; row += 1) {
+      for (let col = 0; col < state.size; col += 1) {
+        const index = row * state.size + col;
+        if ((state.counts[index] || 0) <= 0 || (state.types[index] || 0) === BLOCK.AIR) continue;
+        minRow = Math.min(minRow, row);
+        minCol = Math.min(minCol, col);
+      }
+    }
+
+    for (let row = 0; row < target.length; row += 1) {
+      for (let col = 0; col < target[row].length; col += 1) {
+        const expected = target[row][col] || BLOCK.AIR;
+        if (!expected) continue;
+        const index = (minRow + row) * state.size + (minCol + col);
+        const next = Math.max(0, (state.counts[index] || 0) - 1);
+        state.counts[index] = next;
+        if (next <= 0) {
+          state.types[index] = BLOCK.AIR;
+        }
+      }
+    }
+  }
+
+  function returnCraftItemsToInventory() {
+    const state = getActiveCraftState();
+    for (let index = 0; index < state.slots; index += 1) {
+      const type = state.types[index] || BLOCK.AIR;
+      const count = state.counts[index] || 0;
+      if (!type || type === BLOCK.AIR || count <= 0) continue;
+      const left = addToInventory(type, count, false);
+      if (left > 0 && player) {
+        const eye = player.getEyePosition();
+        spawnItemEntity(type, left, eye.x, eye.y - 0.4, eye.z, 0, 1.6, 0, 0.2);
+      }
+      state.types[index] = BLOCK.AIR;
+      state.counts[index] = 0;
+    }
+  }
+
+  function renderItemStack(slot, itemType, count = 0, showCount = true, placeholder = "") {
+    slot.innerHTML = "";
+    if (placeholder) {
+      slot.title = placeholder;
+    } else {
+      slot.removeAttribute("title");
+    }
+    if (!itemType || itemType === BLOCK.AIR || count <= 0) return;
+    const image = textures?.getItemTexture(itemType, settings);
+    if (image?.src) {
+      const img = document.createElement("img");
+      img.src = image.src;
+      img.alt = getItemName(itemType);
+      slot.appendChild(img);
+    }
+    if (showCount && count > 1) {
+      const c = document.createElement("div");
+      c.className = "fc-count";
+      c.textContent = String(count);
+      slot.appendChild(c);
+    }
+  }
+
+  function renderSlotContents(slot, inventoryIndex, isHotbar = false) {
+    if (!player) {
+      slot.innerHTML = "";
+      return;
+    }
+    const isCreative = settings.gameMode === GAME_MODE.CREATIVE;
+    const itemType = isCreative && isHotbar ? HOTBAR_BLOCKS[inventoryIndex] : getInventorySlotType(inventoryIndex);
+    const count = isCreative && isHotbar ? 1 : getInventorySlotCount(inventoryIndex);
+    renderItemStack(slot, itemType, count, !isCreative);
+  }
+
+  function updateInventoryCursorVisual() {
+    if (!ui) return;
+    ui.inventoryCursorEl.innerHTML = "";
+    if (!inventoryOpen || inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      ui.inventoryCursorEl.style.display = "none";
+      return;
+    }
+    ui.inventoryCursorEl.style.display = "grid";
+    renderItemStack(ui.inventoryCursorEl, inventoryCursor.type, inventoryCursor.count, true);
+  }
+
+  function updateInventoryCursorPosition() {
+    if (!ui || !inventoryOpen || ui.inventoryCursorEl.style.display === "none") return;
+    const mouse = input?.getMousePosition?.() || { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    ui.inventoryCursorEl.style.left = `${mouse.x}px`;
+    ui.inventoryCursorEl.style.top = `${mouse.y}px`;
+  }
+
+  function clearInventoryDragVisuals() {
+    if (!ui) return;
+    ui.root.querySelectorAll(".freecube2-slot.drag-target").forEach((slot) => slot.classList.remove("drag-target"));
+  }
+
+  function renderInventoryPreview() {
+    if (!ui) return;
+    const armorClasses = ARMOR_SLOT_KEYS.map((slotKey, index) => getArmorSlotCount(index) > 0 ? `has-${slotKey}` : "")
+      .filter(Boolean)
+      .join(" ");
+    ui.inventoryPreviewEl.innerHTML = `
+      <div class="fc-inv-player ${armorClasses}">
+        <div class="body skin head"></div>
+        <div class="body hair"></div>
+        <div class="body shirt torso"></div>
+        <div class="body skin arm-left"></div>
+        <div class="body skin arm-right"></div>
+        <div class="body pants leg-left"></div>
+        <div class="body pants leg-right"></div>
+        <div class="body belt"></div>
+        <div class="body boots"></div>
+        <div class="armor armor-head"></div>
+        <div class="armor armor-chest"></div>
+        <div class="armor armor-legs"></div>
+        <div class="armor armor-feet"></div>
+      </div>
+    `;
+  }
+
+  function renderInventoryUI() {
+    if (!ui || !player) return;
+    const craftState = getActiveCraftState();
+    const craftResult = getCraftingResult();
+    const isFurnace = inventoryContext === "furnace";
+    const furnaceState = getActiveFurnaceState(false);
+    ui.inventoryTitleEl.textContent = isFurnace ? "Furnace" : craftState.title;
+    ui.inventoryCraftLabelEl.textContent = craftState.label;
+    ui.inventoryCraftGridEl.classList.toggle("fc-inv-grid-2", craftState.size === 2);
+    ui.inventoryCraftGridEl.classList.toggle("fc-inv-grid-3", craftState.size === 3);
+    ui.inventoryCraftGridEl.parentElement.style.display = isFurnace ? "none" : "flex";
+    ui.inventoryCraftLabelEl.style.display = isFurnace ? "none" : "block";
+    ui.inventoryFurnacePaneEl.classList.toggle("show", isFurnace);
+
+    ui.inventoryArmorEl.innerHTML = "";
+    ui.inventoryCraftGridEl.innerHTML = "";
+    ui.inventoryMainEl.innerHTML = "";
+    ui.inventoryHotbarEl.innerHTML = "";
+
+    for (let index = 0; index < ARMOR_SLOTS; index += 1) {
+      const slot = document.createElement("div");
+      slot.className = "freecube2-slot";
+      slot.dataset.armorIndex = String(index);
+      renderItemStack(slot, getArmorSlotType(index), getArmorSlotCount(index), true, ARMOR_SLOT_LABELS[index]);
+      ui.inventoryArmorEl.appendChild(slot);
+    }
+    renderInventoryPreview();
+
+    if (!isFurnace) {
+      for (let index = 0; index < craftState.slots; index += 1) {
+        const slot = document.createElement("div");
+        slot.className = "freecube2-slot";
+        slot.dataset.craftIndex = String(index);
+        renderItemStack(slot, getCraftSlotType(index), getCraftSlotCount(index), true);
+        ui.inventoryCraftGridEl.appendChild(slot);
+      }
+    }
+
+    ui.inventoryCraftResultEl.dataset.craftOutput = isFurnace ? "" : "1";
+    ui.inventoryCraftResultEl.style.display = isFurnace ? "none" : "grid";
+    if (!isFurnace) {
+      renderItemStack(ui.inventoryCraftResultEl, craftResult?.result.itemType || BLOCK.AIR, craftResult?.result.count || 0, true);
+    } else {
+      ui.inventoryCraftResultEl.innerHTML = "";
+    }
+
+    renderItemStack(ui.inventoryFurnaceInputEl, furnaceState?.inputType || BLOCK.AIR, furnaceState?.inputCount || 0, true, "Smeltable");
+    ui.inventoryFurnaceInputEl.dataset.furnaceSlot = "input";
+    renderItemStack(ui.inventoryFurnaceFuelEl, furnaceState?.fuelType || BLOCK.AIR, furnaceState?.fuelCount || 0, true, "Fuel");
+    ui.inventoryFurnaceFuelEl.dataset.furnaceSlot = "fuel";
+    renderItemStack(ui.inventoryFurnaceOutputEl, furnaceState?.outputType || BLOCK.AIR, furnaceState?.outputCount || 0, true, "Output");
+    ui.inventoryFurnaceOutputEl.dataset.furnaceSlot = "output";
+    ui.inventoryFurnaceBurnEl.style.height = `${Math.floor(getFurnaceBurnProgress(furnaceState) * 100)}%`;
+    ui.inventoryFurnaceProgressEl.style.width = `${Math.floor(getFurnaceCookProgress(furnaceState) * 100)}%`;
+
+    for (let index = MAIN_INVENTORY_START; index < INVENTORY_SLOTS; index += 1) {
+      const slot = document.createElement("div");
+      slot.className = "freecube2-slot";
+      slot.dataset.inventoryIndex = String(index);
+      renderSlotContents(slot, index, false);
+      ui.inventoryMainEl.appendChild(slot);
+    }
+
+    for (let index = 0; index < HOTBAR_SLOTS; index += 1) {
+      const slot = document.createElement("div");
+      slot.className = "freecube2-slot" + (index === player.selectedHotbarSlot ? " sel" : "");
+      slot.dataset.inventoryIndex = String(index);
+      renderSlotContents(slot, index, true);
+      ui.inventoryHotbarEl.appendChild(slot);
+    }
+
+    clearInventoryDragVisuals();
+    updateInventoryCursorVisual();
+  }
+
+  function setInventoryOpen(open, context = inventoryContext) {
+    ensureUI();
+    if (open && inventoryOpen && inventoryContext !== context) {
+      returnCraftItemsToInventory();
+    }
+    inventoryContext = context === "table" ? "table" : context === "furnace" ? "furnace" : "inventory";
+    if (inventoryContext !== "furnace") {
+      activeFurnaceKey = null;
+    }
+    inventoryOpen = !!open;
+    ui.inventoryEl.style.display = inventoryOpen ? "block" : "none";
+    ui.setHudVisible(mode === "playing" && hud.visible && !inventoryOpen);
+    if (inventoryOpen) {
+      ui.root.classList.add("menu-open");
+      input.pointerLockEnabled = false;
+      if (document.exitPointerLock) document.exitPointerLock();
+      renderInventoryUI();
+      updateInventoryCursorPosition();
+    } else {
+      returnCraftItemsToInventory();
+      if (inventoryCursor.type !== BLOCK.AIR && inventoryCursor.count > 0 && player) {
+        const left = addToInventory(inventoryCursor.type, inventoryCursor.count, false);
+        if (left > 0) {
+          const eye = player.getEyePosition();
+          spawnItemEntity(inventoryCursor.type, left, eye.x, eye.y - 0.35, eye.z, 0, 1.6, 0, 0.2);
+        }
+      }
+      inventoryCursor.type = BLOCK.AIR;
+      inventoryCursor.count = 0;
+      inventoryDrag = { pending: false, active: false, button: 0, origin: null, targets: [], targetKeys: new Set() };
+      clearInventoryDragVisuals();
+      updateInventoryCursorVisual();
+      inventoryContext = "inventory";
+      activeFurnaceKey = null;
+      setHotbarImages();
+      if (!ui.menuEl.classList.contains("show")) {
+        ui.root.classList.remove("menu-open");
+      }
+      if (mode === "playing") {
+        input.pointerLockEnabled = true;
+        input.requestPointerLock();
+      }
+    }
+  }
+
+  function moveCursorWithSlot(slotType, slotCount, setSlot) {
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotType === BLOCK.AIR || slotCount <= 0) return false;
+      inventoryCursor.type = slotType;
+      inventoryCursor.count = slotCount;
+      setSlot(BLOCK.AIR, 0);
+      return true;
+    }
+    if (slotType === BLOCK.AIR || slotCount <= 0) {
+      setSlot(inventoryCursor.type, inventoryCursor.count);
+      inventoryCursor.type = BLOCK.AIR;
+      inventoryCursor.count = 0;
+      return true;
+    }
+    const maxStack = getItemMaxStack(slotType);
+    if (slotType === inventoryCursor.type && slotCount < maxStack) {
+      const add = Math.min(maxStack - slotCount, inventoryCursor.count);
+      setSlot(slotType, slotCount + add);
+      inventoryCursor.count -= add;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+      return true;
+    }
+    const swapType = slotType;
+    const swapCount = slotCount;
+    setSlot(inventoryCursor.type, inventoryCursor.count);
+    inventoryCursor.type = swapType;
+    inventoryCursor.count = swapCount;
+    return true;
+  }
+
+  function moveStackIntoInventoryRange(itemType, count, start, end, reverse = false) {
+    if (!player || !itemType || itemType === BLOCK.AIR || count <= 0) {
+      return count;
+    }
+    let left = Math.max(0, Math.floor(count));
+    const step = reverse ? -1 : 1;
+    const from = reverse ? end - 1 : start;
+    const to = reverse ? start - 1 : end;
+    const maxStack = getItemMaxStack(itemType);
+
+    for (let index = from; index !== to && left > 0; index += step) {
+      if ((player.inventoryCounts[index] || 0) <= 0 || player.inventoryTypes[index] !== itemType) continue;
+      const slotCount = player.inventoryCounts[index] || 0;
+      if (slotCount >= maxStack) continue;
+      const add = Math.min(left, maxStack - slotCount);
+      player.inventoryCounts[index] = slotCount + add;
+      left -= add;
+    }
+
+    for (let index = from; index !== to && left > 0; index += step) {
+      if ((player.inventoryCounts[index] || 0) > 0) continue;
+      const add = Math.min(left, maxStack);
+      player.inventoryTypes[index] = itemType;
+      player.inventoryCounts[index] = add;
+      left -= add;
+    }
+
+    return left;
+  }
+
+  function moveStackIntoFurnaceSlot(slot, itemType, count) {
+    const state = getActiveFurnaceState(true);
+    if (!state || !itemType || itemType === BLOCK.AIR || count <= 0) return count;
+    if (slot === "input" && !isSmeltableItem(itemType)) return count;
+    if (slot === "fuel" && !isFuelItem(itemType)) return count;
+    const typeKey = slot === "input" ? "inputType" : "fuelType";
+    const countKey = slot === "input" ? "inputCount" : "fuelCount";
+    const slotType = state[typeKey] || BLOCK.AIR;
+    const slotCount = state[countKey] || 0;
+    if (slotCount > 0 && slotType !== itemType) return count;
+    const maxStack = getItemMaxStack(itemType);
+    const add = Math.min(count, maxStack - slotCount);
+    if (add <= 0) return count;
+    state[typeKey] = itemType;
+    state[countKey] = slotCount + add;
+    return count - add;
+  }
+
+  function moveStackIntoArmorSlot(itemType, count) {
+    const slotKey = getItemArmorSlot(itemType);
+    if (!slotKey || count <= 0) return count;
+    const armorIndex = ARMOR_SLOT_KEYS.indexOf(slotKey);
+    if (armorIndex < 0 || getArmorSlotCount(armorIndex) > 0) return count;
+    setArmorSlot(armorIndex, itemType, 1);
+    return count - 1;
+  }
+
+  function quickMoveInventorySlot(index) {
+    if (!player || index < 0 || index >= INVENTORY_SLOTS) return false;
+    const type = getInventorySlotType(index);
+    const count = getInventorySlotCount(index);
+    if (!type || type === BLOCK.AIR || count <= 0) return false;
+
+    let left = count;
+    if (inventoryContext === "furnace") {
+      if (isSmeltableItem(type)) {
+        left = moveStackIntoFurnaceSlot("input", type, left);
+      }
+      if (left > 0 && isFuelItem(type)) {
+        left = moveStackIntoFurnaceSlot("fuel", type, left);
+      }
+    }
+
+    if (left > 0) {
+      const armorLeft = moveStackIntoArmorSlot(type, left);
+      if (armorLeft !== left) {
+        left = armorLeft;
+      }
+    }
+
+    if (left > 0) {
+      if (index < HOTBAR_SLOTS) {
+        left = moveStackIntoInventoryRange(type, left, MAIN_INVENTORY_START, INVENTORY_SLOTS);
+      } else {
+        left = moveStackIntoInventoryRange(type, left, 0, HOTBAR_SLOTS, true);
+      }
+    }
+
+    if (left === count) return false;
+    setInventorySlot(index, type, left);
+    return true;
+  }
+
+  function quickMoveArmorSlot(index) {
+    const type = getArmorSlotType(index);
+    const count = getArmorSlotCount(index);
+    if (!type || type === BLOCK.AIR || count <= 0) return false;
+    const left = addToInventory(type, count, false);
+    if (left >= count) return false;
+    setArmorSlot(index, BLOCK.AIR, 0);
+    return true;
+  }
+
+  function getInventorySpaceForItem(itemType) {
+    if (!player || !itemType || itemType === BLOCK.AIR) return 0;
+    const maxStack = getItemMaxStack(itemType);
+    let space = 0;
+    for (let i = 0; i < INVENTORY_SLOTS; i += 1) {
+      const count = player.inventoryCounts[i] || 0;
+      if (count <= 0) {
+        space += maxStack;
+      } else if (player.inventoryTypes[i] === itemType) {
+        space += Math.max(0, maxStack - count);
+      }
+    }
+    return space;
+  }
+
+  function quickMoveCraftResult() {
+    let crafted = false;
+    while (true) {
+      const recipe = getCraftingResult();
+      if (!recipe) break;
+      const count = recipe.result.count;
+      if (getInventorySpaceForItem(recipe.result.itemType) < count) {
+        break;
+      }
+      addToInventory(recipe.result.itemType, count, false);
+      consumeCraftingIngredients(recipe);
+      crafted = true;
+    }
+    return crafted;
+  }
+
+  function quickMoveFurnaceOutput() {
+    const state = getActiveFurnaceState(false);
+    if (!state || (state.outputCount || 0) <= 0 || !state.outputType) return false;
+    const left = addToInventory(state.outputType, state.outputCount, false);
+    if (left >= (state.outputCount || 0)) return false;
+    state.outputCount = left;
+    if (left <= 0) {
+      state.outputType = BLOCK.AIR;
+    }
+    pruneFurnaceState(activeFurnaceKey);
+    return true;
+  }
+
+  function quickMoveFurnaceSlot(slot) {
+    const state = getActiveFurnaceState(false);
+    if (!state) return false;
+    const typeKey = slot === "input" ? "inputType" : "fuelType";
+    const countKey = slot === "input" ? "inputCount" : "fuelCount";
+    const type = state[typeKey] || BLOCK.AIR;
+    const count = state[countKey] || 0;
+    if (!type || type === BLOCK.AIR || count <= 0) return false;
+    const left = addToInventory(type, count, false);
+    if (left >= count) return false;
+    state[countKey] = left;
+    if (left <= 0) {
+      state[typeKey] = BLOCK.AIR;
+    }
+    pruneFurnaceState(activeFurnaceKey);
+    return true;
+  }
+
+  function handleInventorySlotClick(index, options = {}) {
+    if (!player || index < 0 || index >= INVENTORY_SLOTS) return;
+    if (options.shiftKey) {
+      if (!quickMoveInventorySlot(index)) return;
+      world.saveDirty = true;
+      setHotbarImages();
+      renderInventoryUI();
+      return;
+    }
+    const changed = moveCursorWithSlot(getInventorySlotType(index), getInventorySlotCount(index), (type, count) => setInventorySlot(index, type, count));
+    if (!changed) return;
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+  }
+
+  function handleArmorSlotClick(index, options = {}) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return;
+    if (options.shiftKey) {
+      if (!quickMoveArmorSlot(index)) return;
+      world.saveDirty = true;
+      setHotbarImages();
+      renderInventoryUI();
+      return;
+    }
+    const slotKey = ARMOR_SLOT_KEYS[index];
+    const slotType = getArmorSlotType(index);
+    const slotCount = getArmorSlotCount(index);
+
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotType === BLOCK.AIR || slotCount <= 0) return;
+      inventoryCursor.type = slotType;
+      inventoryCursor.count = slotCount;
+      setArmorSlot(index, BLOCK.AIR, 0);
+    } else {
+      if (getItemArmorSlot(inventoryCursor.type) !== slotKey) return;
+      const swapType = slotType;
+      const swapCount = slotCount;
+      setArmorSlot(index, inventoryCursor.type, 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+      if (swapType !== BLOCK.AIR && swapCount > 0) {
+        if (inventoryCursor.type === BLOCK.AIR) {
+          inventoryCursor.type = swapType;
+          inventoryCursor.count = swapCount;
+        } else {
+          const left = addToInventory(swapType, swapCount, false);
+          if (left > 0 && player) {
+            const eye = player.getEyePosition();
+            spawnItemEntity(swapType, left, eye.x, eye.y - 0.35, eye.z, 0, 1.4, 0, 0.2);
+          }
+        }
+      }
+    }
+
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+  }
+
+  function handleCraftSlotClick(index) {
+    const changed = moveCursorWithSlot(getCraftSlotType(index), getCraftSlotCount(index), (type, count) => setCraftSlot(index, type, count));
+    if (!changed) return;
+    world.saveDirty = true;
+    renderInventoryUI();
+  }
+
+  function handleCraftResultClick(options = {}) {
+    if (options.shiftKey) {
+      if (!quickMoveCraftResult()) return;
+      world.saveDirty = true;
+      setHotbarImages();
+      renderInventoryUI();
+      return;
+    }
+    const recipe = getCraftingResult();
+    if (!recipe) return;
+    const resultType = recipe.result.itemType;
+    const resultCount = recipe.result.count;
+    const maxStack = getItemMaxStack(resultType);
+    if (inventoryCursor.type !== BLOCK.AIR && inventoryCursor.type !== resultType) return;
+    if (inventoryCursor.type === resultType && inventoryCursor.count + resultCount > maxStack) return;
+    consumeCraftingIngredients(recipe);
+    inventoryCursor.type = resultType;
+    inventoryCursor.count = Math.min(maxStack, (inventoryCursor.count || 0) + resultCount);
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+  }
+
+  function handleFurnaceSlotClick(slot, options = {}) {
+    if (slot === "output") {
+      if (options.shiftKey) {
+        if (!quickMoveFurnaceOutput()) return;
+        world.saveDirty = true;
+        setHotbarImages();
+        renderInventoryUI();
+        return;
+      }
+      const slotValue = getFurnaceSlotValue("output");
+      if (slotValue.count <= 0 || slotValue.type === BLOCK.AIR) return;
+      if (inventoryCursor.type !== BLOCK.AIR && inventoryCursor.type !== slotValue.type) return;
+      const maxStack = getItemMaxStack(slotValue.type);
+      if (inventoryCursor.type === slotValue.type && inventoryCursor.count >= maxStack) return;
+      const add = Math.min(slotValue.count, maxStack - (inventoryCursor.type === slotValue.type ? inventoryCursor.count : 0));
+      if (add <= 0) return;
+      inventoryCursor.type = slotValue.type;
+      inventoryCursor.count = (inventoryCursor.count || 0) + add;
+      setFurnaceSlotValue("output", slotValue.type, slotValue.count - add);
+      world.saveDirty = true;
+      renderInventoryUI();
+      return;
+    }
+
+    if (options.shiftKey) {
+      if (!quickMoveFurnaceSlot(slot)) return;
+      world.saveDirty = true;
+      setHotbarImages();
+      renderInventoryUI();
+      return;
+    }
+
+    const slotValue = getFurnaceSlotValue(slot);
+    const canAccept = slot === "input" ? isSmeltableItem(inventoryCursor.type) : isFuelItem(inventoryCursor.type);
+    let changed = false;
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) return;
+      inventoryCursor.type = slotValue.type;
+      inventoryCursor.count = slotValue.count;
+      setFurnaceSlotValue(slot, BLOCK.AIR, 0);
+      changed = true;
+    } else if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) {
+      if (!canAccept) return;
+      setFurnaceSlotValue(slot, inventoryCursor.type, inventoryCursor.count);
+      inventoryCursor.type = BLOCK.AIR;
+      inventoryCursor.count = 0;
+      changed = true;
+    } else if (slotValue.type === inventoryCursor.type && slotValue.count < getItemMaxStack(slotValue.type)) {
+      const add = Math.min(getItemMaxStack(slotValue.type) - slotValue.count, inventoryCursor.count);
+      if (add <= 0) return;
+      setFurnaceSlotValue(slot, slotValue.type, slotValue.count + add);
+      inventoryCursor.count -= add;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+      changed = true;
+    } else if (canAccept) {
+      const swapType = slotValue.type;
+      const swapCount = slotValue.count;
+      setFurnaceSlotValue(slot, inventoryCursor.type, inventoryCursor.count);
+      inventoryCursor.type = swapType;
+      inventoryCursor.count = swapCount;
+      changed = true;
+    }
+    if (!changed) return;
+    world.saveDirty = true;
+    renderInventoryUI();
+  }
+
+  function handleInventorySlotRightClick(index) {
+    if (!player || index < 0 || index >= INVENTORY_SLOTS) return;
+    const slotType = getInventorySlotType(index);
+    const slotCount = getInventorySlotCount(index);
+
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotType === BLOCK.AIR || slotCount <= 0) return;
+      const take = Math.ceil(slotCount / 2);
+      inventoryCursor.type = slotType;
+      inventoryCursor.count = take;
+      setInventorySlot(index, slotType, slotCount - take);
+    } else if (slotType === BLOCK.AIR || slotCount <= 0) {
+      setInventorySlot(index, inventoryCursor.type, 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    } else if (slotType === inventoryCursor.type && slotCount < getItemMaxStack(slotType)) {
+      setInventorySlot(index, slotType, slotCount + 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    } else {
+      return;
+    }
+
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+  }
+
+  function handleCraftSlotRightClick(index) {
+    const slotType = getCraftSlotType(index);
+    const slotCount = getCraftSlotCount(index);
+
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotType === BLOCK.AIR || slotCount <= 0) return;
+      const take = Math.ceil(slotCount / 2);
+      inventoryCursor.type = slotType;
+      inventoryCursor.count = take;
+      setCraftSlot(index, slotType, slotCount - take);
+    } else if (slotType === BLOCK.AIR || slotCount <= 0) {
+      setCraftSlot(index, inventoryCursor.type, 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    } else if (slotType === inventoryCursor.type && slotCount < getItemMaxStack(slotType)) {
+      setCraftSlot(index, slotType, slotCount + 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    } else {
+      return;
+    }
+
+    world.saveDirty = true;
+    renderInventoryUI();
+  }
+
+  function handleFurnaceSlotRightClick(slot) {
+    const slotValue = getFurnaceSlotValue(slot);
+    if (slot === "output") {
+      if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) return;
+      if (inventoryCursor.type !== BLOCK.AIR && inventoryCursor.type !== slotValue.type) return;
+      const maxStack = getItemMaxStack(slotValue.type);
+      if (inventoryCursor.type === slotValue.type && inventoryCursor.count >= maxStack) return;
+      inventoryCursor.type = slotValue.type;
+      inventoryCursor.count = Math.min(maxStack, (inventoryCursor.count || 0) + 1);
+      setFurnaceSlotValue("output", slotValue.type, slotValue.count - 1);
+      world.saveDirty = true;
+      renderInventoryUI();
+      return;
+    }
+
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) return;
+      const take = Math.ceil(slotValue.count / 2);
+      inventoryCursor.type = slotValue.type;
+      inventoryCursor.count = take;
+      setFurnaceSlotValue(slot, slotValue.type, slotValue.count - take);
+    } else {
+      const canAccept = slot === "input" ? isSmeltableItem(inventoryCursor.type) : isFuelItem(inventoryCursor.type);
+      if (!canAccept) return;
+      if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) {
+        setFurnaceSlotValue(slot, inventoryCursor.type, 1);
+        inventoryCursor.count -= 1;
+      } else if (slotValue.type === inventoryCursor.type && slotValue.count < getItemMaxStack(slotValue.type)) {
+        setFurnaceSlotValue(slot, slotValue.type, slotValue.count + 1);
+        inventoryCursor.count -= 1;
+      } else {
+        return;
+      }
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    }
+
+    world.saveDirty = true;
+    renderInventoryUI();
+  }
+
+  function handleArmorSlotRightClick(index) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return;
+    const slotType = getArmorSlotType(index);
+    const slotCount = getArmorSlotCount(index);
+    const slotKey = ARMOR_SLOT_KEYS[index];
+
+    if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
+      if (slotType === BLOCK.AIR || slotCount <= 0) return;
+      inventoryCursor.type = slotType;
+      inventoryCursor.count = 1;
+      setArmorSlot(index, BLOCK.AIR, 0);
+    } else {
+      if (slotType !== BLOCK.AIR || getItemArmorSlot(inventoryCursor.type) !== slotKey) return;
+      setArmorSlot(index, inventoryCursor.type, 1);
+      inventoryCursor.count -= 1;
+      if (inventoryCursor.count <= 0) {
+        inventoryCursor.type = BLOCK.AIR;
+        inventoryCursor.count = 0;
+      }
+    }
+
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+  }
+
+  function getSlotDescriptorFromElement(target) {
+    const inventorySlot = target?.closest?.("[data-inventory-index]");
+    if (inventorySlot?.dataset.inventoryIndex) {
+      return { kind: "inventory", index: Number(inventorySlot.dataset.inventoryIndex) };
+    }
+    const craftSlot = target?.closest?.("[data-craft-index]");
+    if (craftSlot?.dataset.craftIndex) {
+      return { kind: "craft", index: Number(craftSlot.dataset.craftIndex) };
+    }
+    const armorSlot = target?.closest?.("[data-armor-index]");
+    if (armorSlot?.dataset.armorIndex) {
+      return { kind: "armor", index: Number(armorSlot.dataset.armorIndex) };
+    }
+    const furnaceSlot = target?.closest?.("[data-furnace-slot]");
+    if (furnaceSlot?.dataset.furnaceSlot) {
+      return { kind: "furnace", slot: furnaceSlot.dataset.furnaceSlot };
+    }
+    return null;
+  }
+
+  function slotDescriptorKey(desc) {
+    if (!desc) return "";
+    return desc.kind === "furnace" ? `${desc.kind}:${desc.slot}` : `${desc.kind}:${desc.index}`;
+  }
+
+  function getSlotDescriptorElement(desc) {
+    if (!ui || !desc) return null;
+    if (desc.kind === "inventory") return ui.root.querySelector(`[data-inventory-index="${desc.index}"]`);
+    if (desc.kind === "craft") return ui.root.querySelector(`[data-craft-index="${desc.index}"]`);
+    if (desc.kind === "armor") return ui.root.querySelector(`[data-armor-index="${desc.index}"]`);
+    if (desc.kind === "furnace") return ui.root.querySelector(`[data-furnace-slot="${desc.slot}"]`);
+    return null;
+  }
+
+  function getSlotDescriptorValue(desc) {
+    if (!desc) return { type: BLOCK.AIR, count: 0 };
+    if (desc.kind === "inventory") return { type: getInventorySlotType(desc.index), count: getInventorySlotCount(desc.index) };
+    if (desc.kind === "craft") return { type: getCraftSlotType(desc.index), count: getCraftSlotCount(desc.index) };
+    if (desc.kind === "armor") return { type: getArmorSlotType(desc.index), count: getArmorSlotCount(desc.index) };
+    if (desc.kind === "furnace") return getFurnaceSlotValue(desc.slot);
+    return { type: BLOCK.AIR, count: 0 };
+  }
+
+  function setSlotDescriptorValue(desc, type, count) {
+    if (!desc) return;
+    if (desc.kind === "inventory") setInventorySlot(desc.index, type, count);
+    else if (desc.kind === "craft") setCraftSlot(desc.index, type, count);
+    else if (desc.kind === "armor") setArmorSlot(desc.index, type, count);
+    else if (desc.kind === "furnace") setFurnaceSlotValue(desc.slot, type, count);
+  }
+
+  function canDescriptorAcceptItem(desc, itemType) {
+    if (!desc || !itemType || itemType === BLOCK.AIR) return false;
+    if (desc.kind === "inventory" || desc.kind === "craft") return true;
+    if (desc.kind === "armor") return getItemArmorSlot(itemType) === ARMOR_SLOT_KEYS[desc.index];
+    if (desc.kind === "furnace") {
+      if (desc.slot === "output") return false;
+      return desc.slot === "input" ? isSmeltableItem(itemType) : isFuelItem(itemType);
+    }
+    return false;
+  }
+
+  function applyDragDistribution() {
+    if (!inventoryDrag.active || inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) return false;
+    const descriptors = inventoryDrag.targets.filter((desc, index, arr) => arr.findIndex((candidate) => slotDescriptorKey(candidate) === slotDescriptorKey(desc)) === index);
+    const eligible = descriptors.filter((desc) => canDescriptorAcceptItem(desc, inventoryCursor.type)).map((desc) => {
+      const value = getSlotDescriptorValue(desc);
+      const sameType = value.type === inventoryCursor.type;
+      const empty = value.type === BLOCK.AIR || value.count <= 0;
+      if (!empty && !sameType) return null;
+      const maxStack = desc.kind === "armor" ? 1 : getItemMaxStack(inventoryCursor.type);
+      const current = empty ? 0 : value.count;
+      const capacity = Math.max(0, maxStack - current);
+      if (capacity <= 0) return null;
+      return { desc, current, capacity };
+    }).filter(Boolean);
+
+    if (eligible.length === 0) return false;
+
+    let changed = false;
+    if (inventoryDrag.button === 2) {
+      for (const entry of eligible) {
+        if (inventoryCursor.count <= 0) break;
+        const nextCount = entry.current + 1;
+        setSlotDescriptorValue(entry.desc, inventoryCursor.type, nextCount);
+        inventoryCursor.count -= 1;
+        changed = true;
+      }
+    } else {
+      let remaining = Math.min(inventoryCursor.count, eligible.reduce((sum, entry) => sum + entry.capacity, 0));
+      let remainingSlots = eligible.length;
+      for (const entry of eligible) {
+        if (remaining <= 0 || remainingSlots <= 0) break;
+        const ideal = Math.max(1, Math.ceil(remaining / remainingSlots));
+        const add = Math.min(entry.capacity, ideal);
+        if (add > 0) {
+          setSlotDescriptorValue(entry.desc, inventoryCursor.type, entry.current + add);
+          inventoryCursor.count -= add;
+          remaining -= add;
+          changed = true;
+        }
+        remainingSlots -= 1;
+      }
+    }
+
+    if (inventoryCursor.count <= 0) {
+      inventoryCursor.type = BLOCK.AIR;
+      inventoryCursor.count = 0;
+    }
+    return changed;
+  }
+
+  function resetInventoryDragState() {
+    inventoryDrag = { pending: false, active: false, button: 0, origin: null, targets: [], targetKeys: new Set() };
+    clearInventoryDragVisuals();
+  }
+
+  function beginInventoryDrag(desc, button) {
+    inventoryDrag.pending = true;
+    inventoryDrag.active = false;
+    inventoryDrag.button = button;
+    inventoryDrag.origin = desc;
+    inventoryDrag.targets = [];
+    inventoryDrag.targetKeys = new Set();
+    clearInventoryDragVisuals();
+  }
+
+  function includeDragTarget(desc) {
+    const key = slotDescriptorKey(desc);
+    if (!key || inventoryDrag.targetKeys.has(key)) return;
+    inventoryDrag.targetKeys.add(key);
+    inventoryDrag.targets.push(desc);
+    const el = getSlotDescriptorElement(desc);
+    if (el) el.classList.add("drag-target");
   }
 
   function isCreativeMode() {
     return settings.gameMode === GAME_MODE.CREATIVE;
   }
 
-  function getHotbarSlotType(index) {
+  function getHotbarSlotItemType(index) {
     if (!player) return BLOCK.AIR;
     if (isCreativeMode()) {
       return HOTBAR_BLOCKS[index] || BLOCK.AIR;
@@ -4786,9 +7203,14 @@ export default function FreeCube2Game(engine) {
     return player.hotbarTypes[index] || BLOCK.AIR;
   }
 
+  function getSelectedHeldItemType() {
+    if (!player) return BLOCK.AIR;
+    return getHotbarSlotItemType(player.selectedHotbarSlot);
+  }
+
   function getSelectedHeldBlockType() {
     if (!player) return BLOCK.AIR;
-    return getHotbarSlotType(player.selectedHotbarSlot);
+    return getPlacedBlockType(getSelectedHeldItemType());
   }
 
   function getSelectedHeldCount() {
@@ -4796,40 +7218,44 @@ export default function FreeCube2Game(engine) {
     return isCreativeMode() ? 999 : (player.hotbarCounts[player.selectedHotbarSlot] || 0);
   }
 
-  function addToInventory(blockType, count) {
-    if (!blockType || blockType === BLOCK.AIR) return count;
-    if (blockType === BLOCK.WATER || blockType === BLOCK.BEDROCK) return count;
+  function addToInventory(itemType, count, refreshUi = true) {
+    if (!itemType || itemType === BLOCK.AIR) return count;
+    if (itemType === BLOCK.WATER || itemType === BLOCK.BEDROCK) return count;
     let left = Math.max(0, Math.floor(count));
     if (left === 0) return 0;
 
-    const maxStack = 64;
+    const maxStack = getItemMaxStack(itemType);
     let changed = false;
 
     // First, stack onto existing slots.
-    for (let i = 0; i < HOTBAR_SLOTS && left > 0; i += 1) {
-      if (player.hotbarTypes[i] !== blockType) continue;
-      const c = player.hotbarCounts[i] || 0;
+    for (let i = 0; i < INVENTORY_SLOTS && left > 0; i += 1) {
+      if (player.inventoryTypes[i] !== itemType) continue;
+      const c = player.inventoryCounts[i] || 0;
       if (c >= maxStack) continue;
       const add = Math.min(left, maxStack - c);
-      player.hotbarCounts[i] = c + add;
+      player.inventoryCounts[i] = c + add;
       left -= add;
       changed = true;
     }
 
     // Then, fill empty slots.
-    for (let i = 0; i < HOTBAR_SLOTS && left > 0; i += 1) {
-      const c = player.hotbarCounts[i] || 0;
+    for (let i = 0; i < INVENTORY_SLOTS && left > 0; i += 1) {
+      const c = player.inventoryCounts[i] || 0;
       if (c > 0) continue;
       const add = Math.min(left, maxStack);
-      player.hotbarTypes[i] = blockType;
-      player.hotbarCounts[i] = add;
+      player.inventoryTypes[i] = itemType;
+      player.inventoryCounts[i] = add;
       left -= add;
       changed = true;
     }
 
     if (changed) {
-      setHotbarImages();
-      world.saveDirty = true;
+      if (refreshUi) {
+        setHotbarImages();
+      }
+      if (world) {
+        world.saveDirty = true;
+      }
     }
     return left;
   }
@@ -4850,11 +7276,11 @@ export default function FreeCube2Game(engine) {
     return true;
   }
 
-  function spawnItemEntity(blockType, count, x, y, z, vx = 0, vy = 3.8, vz = 0, pickupDelay = 0.55) {
+  function spawnItemEntity(itemType, count, x, y, z, vx = 0, vy = 3.8, vz = 0, pickupDelay = 0.55) {
     items.push({
       kind: "item",
-      blockType,
-      count: clamp(Math.floor(count) || 1, 1, 64),
+      itemType,
+      count: clamp(Math.floor(count) || 1, 1, getItemMaxStack(itemType)),
       x,
       y,
       z,
@@ -4868,7 +7294,7 @@ export default function FreeCube2Game(engine) {
 
   function dropSelectedItem() {
     if (isCreativeMode()) return;
-    const type = getSelectedHeldBlockType();
+    const type = getSelectedHeldItemType();
     const count = getSelectedHeldCount();
     if (!type || count <= 0) return;
     if (!consumeFromSelectedSlot(1)) return;
@@ -4878,6 +7304,90 @@ export default function FreeCube2Game(engine) {
     const y = eye.y + dir.y * 0.2;
     const z = eye.z + dir.z * 0.8;
     spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4, 0.55);
+  }
+
+  function getMobTargetAABB(mob) {
+    return {
+      minX: mob.x - mob.radius,
+      maxX: mob.x + mob.radius,
+      minY: mob.y,
+      maxY: mob.y + mob.height,
+      minZ: mob.z - mob.radius,
+      maxZ: mob.z + mob.radius
+    };
+  }
+
+  function getHeldAttackDamage(itemType = getSelectedHeldItemType()) {
+    if (isCreativeMode()) return 999;
+    switch (itemType) {
+      case ITEM.WOODEN_SWORD:
+        return 4;
+      case ITEM.WOODEN_AXE:
+        return 3;
+      case ITEM.WOODEN_PICKAXE:
+        return 2;
+      case ITEM.WOODEN_SHOVEL:
+        return 1.5;
+      default:
+        return 1;
+    }
+  }
+
+  function addXp(amount) {
+    if (!player) return;
+    let xp = Math.max(0, Number(amount) || 0);
+    if (xp <= 0) return;
+    player.xp += xp;
+    while (player.xp >= 1) {
+      player.xp -= 1;
+      player.xpLevel += 1;
+    }
+    if (world) {
+      world.saveDirty = true;
+    }
+    hud.last = null;
+  }
+
+  function findTargetMob(blockTarget = null) {
+    if (!player || !mobs || mobs.length === 0) return null;
+    const origin = player.getEyePosition();
+    const direction = player.getLookVector();
+    const maxDistance = clamp(blockTarget ? blockTarget.distance - 0.05 : MAX_REACH, 0, MAX_REACH);
+    if (maxDistance <= 0.01) return null;
+
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const mob of mobs) {
+      if (!mob || mob.health <= 0) continue;
+      const hit = rayIntersectAABB(origin, direction, bestDistance, getMobTargetAABB(mob));
+      if (hit === null) continue;
+      bestDistance = hit;
+      best = { mob, distance: hit };
+    }
+    return best;
+  }
+
+  function removeMob(mob) {
+    const index = mobs.indexOf(mob);
+    if (index >= 0) {
+      mobs.splice(index, 1);
+    }
+  }
+
+  function attackTargetMob() {
+    if (!currentEntityTarget?.mob || !player) return false;
+    const mob = currentEntityTarget.mob;
+    const killed = mob.takeDamage(getHeldAttackDamage(), player.x, player.z);
+    player.breakCooldown = Math.max(player.breakCooldown, isCreativeMode() ? 0.08 : 0.24);
+    if (killed) {
+      dropMobLoot(mob);
+      addXp(getMobDef(mob.type).hostile ? 0.35 : 0.18);
+      removeMob(mob);
+    }
+    if (world) {
+      world.saveDirty = true;
+    }
+    return true;
   }
 
   function updateItems(dt) {
@@ -4937,7 +7447,7 @@ export default function FreeCube2Game(engine) {
       const dz = item.z - player.z;
       const dist = Math.hypot(dx, dy, dz);
       if (dist < 1.25 && item.age > (item.pickupDelay ?? 0.55)) {
-        const left = addToInventory(item.blockType, item.count);
+        const left = addToInventory(item.itemType ?? item.blockType, item.count);
         if (left <= 0) {
           continue;
         }
@@ -4974,6 +7484,188 @@ export default function FreeCube2Game(engine) {
       }
     }
     items = next;
+  }
+
+  function dropMobLoot(mob) {
+    if (!mob || !player) return;
+
+    let itemType = BLOCK.AIR;
+    let count = 0;
+    switch (mob.type) {
+      case "sheep":
+        itemType = ITEM.RAW_MUTTON;
+        count = 1;
+        break;
+      case "chicken":
+        itemType = ITEM.RAW_CHICKEN;
+        count = 1;
+        break;
+      case "zombie":
+        itemType = ITEM.ROTTEN_FLESH;
+        count = 1;
+        break;
+      default:
+        return;
+    }
+
+    const seed = (world?.seed || 0) + Math.floor(mob.x * 17) + Math.floor(mob.z * 29);
+    const vx = (random3(Math.floor(mob.x * 3), Math.floor(mob.y * 5), Math.floor(mob.z * 7), seed + 11) - 0.5) * 2.4;
+    const vz = (random3(Math.floor(mob.z * 3), Math.floor(mob.y * 5), Math.floor(mob.x * 7), seed + 19) - 0.5) * 2.4;
+    spawnItemEntity(itemType, count, mob.x, mob.y + Math.min(0.9, mob.height * 0.45), mob.z, vx, 3.2, vz, 0.45);
+  }
+
+  function dropFurnaceContentsAt(x, y, z) {
+    const key = packBlockPositionKey(x, y, z);
+    const state = getFurnaceStateByKey(key, false);
+    if (!state) return;
+
+    const stacks = [
+      { type: state.inputType || BLOCK.AIR, count: state.inputCount || 0, ox: -0.13, oz: -0.04 },
+      { type: state.fuelType || BLOCK.AIR, count: state.fuelCount || 0, ox: 0.12, oz: -0.02 },
+      { type: state.outputType || BLOCK.AIR, count: state.outputCount || 0, ox: 0.02, oz: 0.11 }
+    ];
+
+    for (const stack of stacks) {
+      if (!stack.type || stack.type === BLOCK.AIR || stack.count <= 0) continue;
+      spawnItemEntity(
+        stack.type,
+        stack.count,
+        x + 0.5 + stack.ox,
+        y + 0.62,
+        z + 0.5 + stack.oz,
+        stack.ox * 5.2,
+        2.9,
+        stack.oz * 5.2,
+        0.35
+      );
+    }
+
+    furnaceStates.delete(key);
+    if (activeFurnaceKey === key) {
+      activeFurnaceKey = null;
+      if (inventoryContext === "furnace") {
+        inventoryContext = "inventory";
+      }
+    }
+    if (world) {
+      world.saveDirty = true;
+    }
+  }
+
+  function canFurnaceSmelt(state) {
+    if (!state) return false;
+    const inputType = (state.inputCount || 0) > 0 ? (state.inputType || BLOCK.AIR) : BLOCK.AIR;
+    if (!inputType || inputType === BLOCK.AIR) return false;
+
+    const resultType = getSmeltingResult(inputType);
+    if (!resultType || resultType === BLOCK.AIR) return false;
+
+    const outputType = (state.outputCount || 0) > 0 ? (state.outputType || BLOCK.AIR) : BLOCK.AIR;
+    const outputCount = state.outputCount || 0;
+    if (outputType !== BLOCK.AIR && outputType !== resultType) return false;
+
+    return outputCount < getItemMaxStack(resultType);
+  }
+
+  function updateFurnaces(dt) {
+    if (!furnaceStates || furnaceStates.size === 0) {
+      if (inventoryOpen && inventoryContext === "furnace") {
+        renderInventoryUI();
+      }
+      return;
+    }
+
+    let changed = false;
+    const staleKeys = [];
+
+    for (const [key, state] of furnaceStates.entries()) {
+      if (!state) {
+        staleKeys.push(key);
+        continue;
+      }
+
+      const [x, y, z] = key.split("|").map(Number);
+      if (world.getBlock(x, y, z) !== BLOCK.FURNACE) {
+        staleKeys.push(key);
+        continue;
+      }
+
+      trimFurnaceSlot("inputType", "inputCount", state);
+      trimFurnaceSlot("fuelType", "fuelCount", state);
+      trimFurnaceSlot("outputType", "outputCount", state);
+
+      const wasBurning = (state.burnTime || 0) > 0;
+      if (wasBurning) {
+        state.burnTime = Math.max(0, (state.burnTime || 0) - dt);
+        changed = true;
+      }
+
+      if ((state.burnTime || 0) <= 0 && canFurnaceSmelt(state) && (state.fuelCount || 0) > 0 && isFuelItem(state.fuelType || BLOCK.AIR)) {
+        state.burnTimeTotal = getFurnaceFuelTime(state.fuelType || BLOCK.AIR);
+        state.burnTime = state.burnTimeTotal;
+        state.fuelCount = Math.max(0, (state.fuelCount || 0) - 1);
+        if ((state.fuelCount || 0) <= 0) {
+          state.fuelType = BLOCK.AIR;
+          state.fuelCount = 0;
+        }
+        changed = true;
+      }
+
+      if ((state.burnTime || 0) > 0 && canFurnaceSmelt(state)) {
+        state.cookTime = Math.max(0, (state.cookTime || 0) + dt);
+        changed = true;
+
+        while ((state.cookTime || 0) >= FURNACE_SMELT_TIME && canFurnaceSmelt(state)) {
+          state.cookTime -= FURNACE_SMELT_TIME;
+          const resultType = getSmeltingResult(state.inputType || BLOCK.AIR);
+          if (!resultType || resultType === BLOCK.AIR) {
+            state.cookTime = 0;
+            break;
+          }
+
+          state.inputCount = Math.max(0, (state.inputCount || 0) - 1);
+          if ((state.inputCount || 0) <= 0) {
+            state.inputType = BLOCK.AIR;
+            state.inputCount = 0;
+          }
+
+          if ((state.outputCount || 0) <= 0 || (state.outputType || BLOCK.AIR) === BLOCK.AIR) {
+            state.outputType = resultType;
+            state.outputCount = 1;
+          } else {
+            state.outputCount += 1;
+          }
+          changed = true;
+        }
+      } else if ((state.cookTime || 0) > 0) {
+        state.cookTime = Math.max(0, (state.cookTime || 0) - dt * 2.5);
+        if ((state.cookTime || 0) < 0.0001) {
+          state.cookTime = 0;
+        }
+        changed = true;
+      }
+
+      trimFurnaceSlot("inputType", "inputCount", state);
+      trimFurnaceSlot("fuelType", "fuelCount", state);
+      trimFurnaceSlot("outputType", "outputCount", state);
+
+      if (isFurnaceEmpty(state)) {
+        staleKeys.push(key);
+      }
+    }
+
+    for (const key of staleKeys) {
+      furnaceStates.delete(key);
+      changed = true;
+    }
+
+    if (inventoryOpen && inventoryContext === "furnace") {
+      renderInventoryUI();
+    }
+
+    if (changed && world) {
+      world.saveDirty = true;
+    }
   }
 
   function pushChatLine(text, cls = "") {
@@ -5044,8 +7736,10 @@ export default function FreeCube2Game(engine) {
       const dist = 6 + random2(tries, tries * 13, world.seed + 1212) * 10;
       const x = base.x + Math.sin(angle) * dist;
       const z = base.z + Math.cos(angle) * dist;
-      const col = world.terrain.describeColumn(Math.floor(x), Math.floor(z));
-      const y = col.height + 1.001;
+      const spawn = world.findSpawn(Math.floor(x), Math.floor(z));
+      const y = findWalkableY(world, x, z, spawn.y + 1, mob.height > 1.2 ? 2 : 1);
+      if (!Number.isFinite(y)) continue;
+      if (world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === BLOCK.WATER) continue;
       if (!entityWouldCollide(world, x, y, z, mob.radius, mob.height)) {
         mob.setPosition(x, y, z);
         mobs.push(mob);
@@ -5074,28 +7768,70 @@ export default function FreeCube2Game(engine) {
     let hostiles = 0;
     let passives = 0;
     for (const m of mobs) {
-      if (m.type === "zombie") hostiles += 1;
+      if (getMobDef(m.type).hostile) hostiles += 1;
       else passives += 1;
     }
 
     if (isNight()) {
       if (hostiles < 10) {
-        spawnMobNearPlayer("zombie");
+        const hostileType = HOSTILE_MOB_TYPES[Math.floor(random3(Math.floor(player.x), Math.floor(worldTime * 10), Math.floor(player.z), world.seed + 809) * HOSTILE_MOB_TYPES.length)] || "zombie";
+        spawnMobNearPlayer(hostileType);
         if (hostiles < 6 && random2(Math.floor(player.x), Math.floor(player.z), world.seed + 811) > 0.6) {
-          spawnMobNearPlayer("zombie");
+          spawnMobNearPlayer(hostileType);
         }
       }
     } else {
       if (passives < 8) {
-        spawnMobNearPlayer("sheep");
+        const passiveType = PASSIVE_MOB_TYPES[Math.floor(random3(Math.floor(player.x), Math.floor(worldTime * 7), Math.floor(player.z), world.seed + 913) * PASSIVE_MOB_TYPES.length)] || "sheep";
+        spawnMobNearPlayer(passiveType);
       }
       // Despawn far hostiles during the day.
       mobs = mobs.filter((m) => {
-        if (m.type !== "zombie") return true;
+        if (!getMobDef(m.type).hostile) return true;
         const dx = m.x - player.x;
         const dz = m.z - player.z;
         return dx * dx + dz * dz < 46 * 46;
       });
+    }
+  }
+
+  function logMobRenderDiagnostics(reason = "runtime") {
+    if (!player) return;
+    const texturesKnown = !!(entityTextures?.ready || entityTextures?.failed);
+    const modelsKnown = !!(objModels?.ready || objModels?.failed);
+    const summary = {};
+    for (const mob of mobs) {
+      summary[mob.type] = (summary[mob.type] || 0) + 1;
+    }
+    console.log(`[MobRender:${reason}]`, {
+      renderer: useWebGL ? "WebGL2" : "Canvas",
+      modelsEnabled: settings.mobModels !== false,
+      texturesKnown,
+      modelsKnown,
+      activeMobs: summary,
+      itemEntities: items.length
+    });
+    for (const type of ENTITY_TEXTURE_NAMES) {
+      const hasTexture = !!entityTextures?.getImage(type);
+      const hasBillboard = !!entityTextures?.getBillboardImage(type);
+      const hasModel = !!objModels?.hasModel(type);
+      if (texturesKnown && !hasTexture) {
+        const key = `missing-texture:${type}`;
+        if (!mobRenderWarnings.has(key)) {
+          mobRenderWarnings.add(key);
+          console.warn(`[MobRender] Missing texture for ${type}; renderer will fall back or skip 3D for that mob.`);
+        }
+      }
+      if ((type === "zombie" || hasModel) && settings.mobModels !== false && (texturesKnown || hasBillboard || hasTexture || modelsKnown)) {
+        const renderMode = type === "zombie"
+          ? (hasTexture ? "3d-zombie" : hasBillboard ? "billboard-fallback" : texturesKnown ? "missing" : "loading-assets")
+          : hasModel && hasTexture ? "obj-model" : hasBillboard ? "billboard-fallback" : (texturesKnown || modelsKnown) ? "missing" : "loading-assets";
+        const key = `mode:${type}:${renderMode}:${useWebGL ? "webgl" : "canvas"}`;
+        if (!mobRenderWarnings.has(key)) {
+          mobRenderWarnings.add(key);
+          console.log(`[MobRender] ${type}: ${renderMode}`);
+        }
+      }
     }
   }
 
@@ -5105,7 +7841,7 @@ export default function FreeCube2Game(engine) {
     const args = parts;
 
     if (!cmd || cmd === "help") {
-      pushChatLine("Commands: /help, /gm <survival|creative>, /tp x y z, /rd <2-6>, /summon <zombie> [count], /boss <name> <0-1>, /boss off, /clear", "sys");
+      pushChatLine("Commands: /help, /give <item> [count], /gm <survival|creative>, /tp x y z, /rd <2-6>, /summon <mob> [count], /boss <name> <0-1>, /boss off, /sysinfo, /clear", "sys");
       return;
     }
 
@@ -5119,6 +7855,7 @@ export default function FreeCube2Game(engine) {
       const modeArg = (args[0] || "").toLowerCase();
       settings.gameMode = modeArg.startsWith("c") ? GAME_MODE.CREATIVE : GAME_MODE.SURVIVAL;
       setSettingsUI();
+      setHotbarImages();
       world.saveDirty = true;
       pushChatLine(`Game mode: ${settings.gameMode}`, "sys");
       return;
@@ -5132,6 +7869,23 @@ export default function FreeCube2Game(engine) {
       if (canvasRenderer) canvasRenderer.setRenderDistance(rd);
       world.saveDirty = true;
       pushChatLine(`Render distance set to ${rd}`, "sys");
+      return;
+    }
+
+    if (cmd === "give") {
+      const itemType = resolveItemTypeByName(args[0]);
+      const count = clamp(Number(args[1]) || 1, 1, 64);
+      if (!itemType || itemType === BLOCK.AIR) {
+        pushChatLine("Usage: /give <item> [count]", "err");
+        return;
+      }
+      const left = addToInventory(itemType, count);
+      const received = count - left;
+      if (received > 0) {
+        pushChatLine(`Given ${received} ${getItemName(itemType)}.`, "sys");
+      } else {
+        pushChatLine("Inventory full.", "err");
+      }
       return;
     }
 
@@ -5175,10 +7929,12 @@ export default function FreeCube2Game(engine) {
         time: worldTime.toFixed(1),
         mobs: mobs.length,
         items: items.length,
-        chunks: world?.chunks?.size
+        chunks: world?.chunks?.size,
+        furnaces: furnaceStates.size
       };
       console.log("SYSINFO", info);
-      pushChatLine(`SYSINFO: ${info.renderer}, mobs=${info.mobs}, items=${info.items}, chunks=${info.chunks}`, "sys");
+      logMobRenderDiagnostics("sysinfo");
+      pushChatLine(`SYSINFO: ${info.renderer}, mobs=${info.mobs}, items=${info.items}, chunks=${info.chunks}, furnaces=${info.furnaces}`, "sys");
       return;
     }
 
@@ -5232,7 +7988,10 @@ export default function FreeCube2Game(engine) {
     if (!player) return;
     if (settings.gameMode === GAME_MODE.CREATIVE) return;
     if (player.hurtCooldown > 0) return;
-    const dmg = Math.max(0, Number(amount) || 0);
+    const base = Math.max(0, Number(amount) || 0);
+    const armorPoints = player.getArmorPoints();
+    const reduction = clamp(armorPoints * 0.04, 0, 0.8);
+    const dmg = Math.max(0, Math.ceil(base * (1 - reduction)));
     if (dmg <= 0) return;
     player.health = Math.max(0, player.health - dmg);
     player.hurtCooldown = 0.45;
@@ -5277,11 +8036,7 @@ export default function FreeCube2Game(engine) {
     }
 
     // Hunger drains slowly when sprinting.
-    const moving =
-      input &&
-      input.locked &&
-      ((input.isDown("w") || input.isDown("W") || input.isDown("a") || input.isDown("A") || input.isDown("s") || input.isDown("S") || input.isDown("d") || input.isDown("D")));
-    const sprinting = !!(moving && input && input.locked && input.isDown("Shift"));
+    const sprinting = !!player.isSprinting;
     if (sprinting) {
       player.hunger = Math.max(0, player.hunger - dt * 0.55);
     }
@@ -5330,6 +8085,21 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function renderArmor(el, value) {
+    const icons = 10;
+    const full = clamp(Math.floor(value / 2), 0, icons);
+    const hasHalf = value % 2 === 1 && full < icons;
+    el.innerHTML = "";
+    for (let i = 0; i < icons; i += 1) {
+      const d = document.createElement("div");
+      d.className = "fc-armor-icon";
+      if (i < full) d.classList.add("full");
+      else if (i === full && hasHalf) d.classList.add("half");
+      else d.classList.add("empty");
+      el.appendChild(d);
+    }
+  }
+
   function renderHunger(el, value, max) {
     const foods = 10;
     const full = clamp(Math.floor(value / 2), 0, foods);
@@ -5353,7 +8123,7 @@ export default function FreeCube2Game(engine) {
       return;
     }
 
-    ui.setHudVisible(mode === "playing");
+    ui.setHudVisible(mode === "playing" && !inventoryOpen);
 
     hud.timer += dt;
     if (hud.timer < 0.1) {
@@ -5370,11 +8140,12 @@ export default function FreeCube2Game(engine) {
     hud.timer = 0;
 
     if (!player) return;
-    const snap = `${player.health}|${player.hunger}|${player.xpLevel}|${player.xp}|${settings.gameMode}|${mode}|${boss.active}|${boss.health}|${boss.name}`;
+    const snap = `${player.getArmorPoints()}|${player.health}|${player.hunger}|${player.xpLevel}|${player.xp}|${settings.gameMode}|${mode}|${boss.active}|${boss.health}|${boss.name}`;
     if (hud.last === snap) return;
     hud.last = snap;
 
     if (mode === "playing") {
+      renderArmor(ui.armorEl, player.getArmorPoints());
       renderHearts(ui.heartsEl, Math.round(player.health), player.maxHealth);
       renderHunger(ui.hungerEl, Math.round(player.hunger), player.maxHunger);
       ui.xpFill.style.width = `${Math.floor(clamp(player.xp, 0, 1) * 100)}%`;
@@ -5473,12 +8244,8 @@ export default function FreeCube2Game(engine) {
       atlas.settings = settings;
     }
     setHotbarImages();
-    if (useWebGL && atlas && glRenderer) {
-      atlas.build()
-        .then(() => {
-          invalidateAllChunkMeshes();
-        })
-        .catch((error) => console.warn("Texture pack rebuild failed:", error.message));
+    if (useWebGL && glRenderer) {
+      invalidateAllChunkMeshes();
     } else if (canvasRenderer) {
       canvasRenderer.setSettings(settings);
     }
@@ -5492,6 +8259,7 @@ export default function FreeCube2Game(engine) {
       version: GAME_VERSION,
       seed: world.seed,
       modifiedChunks: serializeModifiedChunks(world.modifiedChunks),
+      furnaces: serializeFurnaceStates(furnaceStates),
       player: player.serialize(),
       settings
     };
@@ -5508,7 +8276,8 @@ export default function FreeCube2Game(engine) {
     world = new World(seed);
     world.modifiedChunks = deserializeModifiedChunks(save?.modifiedChunks || {});
     world.loadedFromStorage = !!save;
-    settings = { ...DEFAULT_SETTINGS, ...(save?.settings || {}) };
+    furnaceStates = deserializeFurnaceStates(save?.furnaces || {});
+    settings = { ...DEFAULT_SETTINGS, ...settings, ...(save?.settings || {}) };
     settings.renderDistanceChunks = clamp(settings.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 6);
     settings.mouseSensitivity = clamp(settings.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity, 0.0012, 0.006);
     settings.fovDegrees = clamp(Math.round(settings.fovDegrees || DEFAULT_SETTINGS.fovDegrees), 55, 95);
@@ -5532,6 +8301,7 @@ export default function FreeCube2Game(engine) {
       player.restore(save.player);
     }
     player.ensureSafePosition(world);
+    activeFurnaceKey = null;
     setBossBar(false);
   }
 
@@ -5552,6 +8322,7 @@ export default function FreeCube2Game(engine) {
       glRenderer.settings = settings;
       glRenderer.textureLibrary = textures;
       glRenderer.entityTextures = entityTextures;
+      glRenderer.objModelLibrary = objModels;
       glRenderer.setRenderDistance(settings.renderDistanceChunks);
       glRenderer.chunkMeshes.clear();
       glRenderer.meshQueue = [];
@@ -5582,9 +8353,23 @@ export default function FreeCube2Game(engine) {
     mining.progress = 0;
     input.pointerLockEnabled = false;
     currentTarget = null;
+    currentEntityTarget = null;
+    inventoryOpen = false;
+    inventoryContext = "inventory";
+    inventoryCursor.type = BLOCK.AIR;
+    inventoryCursor.count = 0;
+    activeFurnaceKey = null;
+    inventoryCraftTypes.fill(0);
+    inventoryCraftCounts.fill(0);
+    tableCraftTypes.fill(0);
+    tableCraftCounts.fill(0);
+    resetInventoryDragState();
+    mobRenderWarnings.clear();
+    lastMobRenderSummaryAt = 0;
     saveTimer = 0;
     loadingStartChunk = { x: Math.floor(player.x / CHUNK_SIZE), z: Math.floor(player.z / CHUNK_SIZE) };
     ensureActiveRenderer();
+    logMobRenderDiagnostics("world-start");
 
     setHotbarImages();
     setSettingsUI();
@@ -5592,6 +8377,7 @@ export default function FreeCube2Game(engine) {
     ensureUI();
     ui.showScreen("loading");
     ui.setHudVisible(false);
+    ui.inventoryEl.style.display = "none";
     closeChat(false);
   }
 
@@ -5604,9 +8390,22 @@ export default function FreeCube2Game(engine) {
     items = [];
     mining.key = null;
     mining.progress = 0;
+    currentTarget = null;
+    currentEntityTarget = null;
+    inventoryOpen = false;
+    inventoryContext = "inventory";
+    inventoryCursor.type = BLOCK.AIR;
+    inventoryCursor.count = 0;
+    activeFurnaceKey = null;
+    inventoryCraftTypes.fill(0);
+    inventoryCraftCounts.fill(0);
+    tableCraftTypes.fill(0);
+    tableCraftCounts.fill(0);
+    resetInventoryDragState();
     ensureUI();
     ui.showScreen("title");
     ui.setHudVisible(false);
+    ui.inventoryEl.style.display = "none";
     closeChat(false);
     if (document.exitPointerLock) {
       document.exitPointerLock();
@@ -5632,6 +8431,9 @@ export default function FreeCube2Game(engine) {
     if (currentTarget.type === BLOCK.BEDROCK || currentTarget.type === BLOCK.WATER) return false;
     if (world.setBlock(currentTarget.x, currentTarget.y, currentTarget.z, BLOCK.AIR)) {
       if (!isCreativeMode()) {
+        if (currentTarget.type === BLOCK.FURNACE) {
+          dropFurnaceContentsAt(currentTarget.x, currentTarget.y, currentTarget.z);
+        }
         const jx = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 2.2;
         const jz = (random3(currentTarget.z, currentTarget.y, currentTarget.x, world.seed + 2002) - 0.5) * 2.2;
         spawnItemEntity(
@@ -5661,6 +8463,13 @@ export default function FreeCube2Game(engine) {
 
   function updateMining(dt) {
     if (!input.locked || performance.now() < input.actionUnlockAt) {
+      mining.key = null;
+      mining.progress = 0;
+      setMiningProgress(0);
+      return;
+    }
+
+    if (currentEntityTarget) {
       mining.key = null;
       mining.progress = 0;
       setMiningProgress(0);
@@ -5699,7 +8508,8 @@ export default function FreeCube2Game(engine) {
       mining.type = currentTarget.type;
     }
 
-    const time = getBreakTime(mining.type);
+    const toolMultiplier = getToolBreakMultiplier(getSelectedHeldItemType(), mining.type);
+    const time = getBreakTime(mining.type) / Math.max(1, toolMultiplier);
     mining.progress += dt / time;
     setMiningProgress(mining.progress);
 
@@ -5732,6 +8542,28 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function consumeHeldFood() {
+    const itemType = getSelectedHeldItemType();
+    const food = getItemFoodValue(itemType);
+    if (!itemType || food <= 0 || isCreativeMode()) return false;
+    if (!player || player.hunger >= player.maxHunger) return false;
+    if (!consumeFromSelectedSlot(1)) return false;
+    player.hunger = Math.min(player.maxHunger, player.hunger + food);
+    player.regenTimer = 0;
+    world.saveDirty = true;
+    setHotbarImages();
+    renderInventoryUI();
+    return true;
+  }
+
+  function openFurnaceAtTarget(target) {
+    if (!target || target.type !== BLOCK.FURNACE) return false;
+    activeFurnaceKey = packBlockPositionKey(target.x, target.y, target.z);
+    getActiveFurnaceState(true);
+    setInventoryOpen(true, "furnace");
+    return true;
+  }
+
   function updateInteractions() {
     if (!input.locked || performance.now() < input.actionUnlockAt) return;
     if (input.consumeMousePress(1) && currentTarget) {
@@ -5751,7 +8583,27 @@ export default function FreeCube2Game(engine) {
         }
       }
     }
+    if (input.consumeMousePress(2)) {
+      if (currentTarget?.type === BLOCK.CRAFTING_TABLE) {
+        setInventoryOpen(true, "table");
+        return;
+      }
+      if (currentTarget?.type === BLOCK.FURNACE && openFurnaceAtTarget(currentTarget)) {
+        return;
+      }
+      if (consumeHeldFood()) {
+        return;
+      }
+    }
     if (input.buttonsDown[2]) tryPlaceBlock();
+  }
+
+  function updateCombat() {
+    if (!input.locked || performance.now() < input.actionUnlockAt) return;
+    if (!currentEntityTarget?.mob) return;
+    if (input.consumeMousePress(0)) {
+      attackTargetMob();
+    }
   }
 
   function updateLoading(dt) {
@@ -5815,6 +8667,9 @@ export default function FreeCube2Game(engine) {
     const instantaneous = dt > 0 ? 1 / dt : 0;
     fpsSmoothed = fpsSmoothed ? lerp(fpsSmoothed, instantaneous, 0.08) : instantaneous;
     fpsTimer += dt;
+    if (ui) {
+      ui.fpsEl.style.display = settings.showFps === false ? "none" : "block";
+    }
     if (fpsTimer >= 0.2) {
       fps = fpsSmoothed;
       ensureUI();
@@ -5843,7 +8698,94 @@ export default function FreeCube2Game(engine) {
       event.stopPropagation();
     });
 
+    window.addEventListener("mousemove", () => {
+      updateInventoryCursorPosition();
+    });
+
+    ui.root.addEventListener("mousedown", (event) => {
+      if (!inventoryOpen || inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) return;
+      if (event.button !== 0 && event.button !== 2) return;
+      const desc = getSlotDescriptorFromElement(event.target);
+      if (!desc || (desc.kind === "furnace" && desc.slot === "output")) return;
+      beginInventoryDrag(desc, event.button);
+    });
+
+    ui.root.addEventListener("mouseover", (event) => {
+      if (!inventoryOpen || !inventoryDrag.pending) return;
+      const buttonMask = inventoryDrag.button === 2 ? 2 : 1;
+      if (!(event.buttons & buttonMask)) return;
+      const desc = getSlotDescriptorFromElement(event.target);
+      if (!desc) return;
+      const originKey = slotDescriptorKey(inventoryDrag.origin);
+      const key = slotDescriptorKey(desc);
+      if (!inventoryDrag.active) {
+        if (!originKey || key === originKey) return;
+        inventoryDrag.active = true;
+        suppressInventoryClick = true;
+        includeDragTarget(inventoryDrag.origin);
+      }
+      includeDragTarget(desc);
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (!inventoryOpen) {
+        resetInventoryDragState();
+        return;
+      }
+      if (inventoryDrag.active) {
+        const changed = applyDragDistribution();
+        resetInventoryDragState();
+        suppressInventoryClick = true;
+        setTimeout(() => {
+          suppressInventoryClick = false;
+        }, 0);
+        if (changed) {
+          world.saveDirty = true;
+          setHotbarImages();
+          renderInventoryUI();
+        } else {
+          updateInventoryCursorVisual();
+        }
+        return;
+      }
+      if (inventoryDrag.pending) {
+        resetInventoryDragState();
+      }
+    });
+
     ui.root.addEventListener("click", (event) => {
+      if (inventoryOpen && suppressInventoryClick) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressInventoryClick = false;
+        return;
+      }
+      const inventorySlot = event.target.closest("[data-inventory-index]");
+      const armorSlot = event.target.closest("[data-armor-index]");
+      const craftSlot = event.target.closest("[data-craft-index]");
+      const craftOutput = event.target.closest("[data-craft-output]");
+      const furnaceSlot = event.target.closest("[data-furnace-slot]");
+      if (inventoryOpen && inventorySlot?.dataset.inventoryIndex) {
+        handleInventorySlotClick(Number(inventorySlot.dataset.inventoryIndex), { shiftKey: event.shiftKey });
+        return;
+      }
+      if (inventoryOpen && armorSlot?.dataset.armorIndex) {
+        handleArmorSlotClick(Number(armorSlot.dataset.armorIndex), { shiftKey: event.shiftKey });
+        return;
+      }
+      if (inventoryOpen && craftSlot?.dataset.craftIndex) {
+        handleCraftSlotClick(Number(craftSlot.dataset.craftIndex));
+        return;
+      }
+      if (inventoryOpen && craftOutput?.dataset.craftOutput) {
+        handleCraftResultClick({ shiftKey: event.shiftKey });
+        return;
+      }
+      if (inventoryOpen && furnaceSlot?.dataset.furnaceSlot) {
+        handleFurnaceSlotClick(furnaceSlot.dataset.furnaceSlot, { shiftKey: event.shiftKey });
+        return;
+      }
+
       const worldRow = event.target.closest(".fc-world");
       if (worldRow?.dataset.worldId) {
         selectedWorldId = worldRow.dataset.worldId;
@@ -5910,12 +8852,37 @@ export default function FreeCube2Game(engine) {
       }
     });
 
+    ui.root.addEventListener("contextmenu", (event) => {
+      if (!inventoryOpen) return;
+      if (suppressInventoryClick) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressInventoryClick = false;
+        return;
+      }
+      const inventorySlot = event.target.closest("[data-inventory-index]");
+      const armorSlot = event.target.closest("[data-armor-index]");
+      const craftSlot = event.target.closest("[data-craft-index]");
+      const furnaceSlot = event.target.closest("[data-furnace-slot]");
+      if (!inventorySlot && !armorSlot && !craftSlot && !furnaceSlot) return;
+      event.preventDefault();
+      if (inventorySlot?.dataset.inventoryIndex) {
+        handleInventorySlotRightClick(Number(inventorySlot.dataset.inventoryIndex));
+      } else if (armorSlot?.dataset.armorIndex) {
+        handleArmorSlotRightClick(Number(armorSlot.dataset.armorIndex));
+      } else if (craftSlot?.dataset.craftIndex) {
+        handleCraftSlotRightClick(Number(craftSlot.dataset.craftIndex));
+      } else if (furnaceSlot?.dataset.furnaceSlot) {
+        handleFurnaceSlotRightClick(furnaceSlot.dataset.furnaceSlot);
+      }
+    });
+
     ui.rdSlider.addEventListener("input", () => {
       settings.renderDistanceChunks = clamp(Number(ui.rdSlider.value), 2, 6);
       ui.rdLabel.textContent = String(settings.renderDistanceChunks);
       if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
       if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
-      if (world) world.saveDirty = true;
+      markWorldDirty();
     });
 
     ui.msSlider.addEventListener("input", () => {
@@ -5949,6 +8916,7 @@ export default function FreeCube2Game(engine) {
 
     ui.mobModelsCheck.addEventListener("change", () => {
       settings.mobModels = !!ui.mobModelsCheck.checked;
+      logMobRenderDiagnostics("toggle");
       markWorldDirty();
     });
 
@@ -5983,6 +8951,8 @@ export default function FreeCube2Game(engine) {
       textures.startLoading();
       entityTextures = new EntityTextureLibrary(engine);
       entityTextures.startLoading();
+      objModels = new ObjModelLibrary(engine);
+      objModels.startLoading();
 
       useWebGL = setupWebGL();
       if (useWebGL) {
@@ -5999,7 +8969,7 @@ export default function FreeCube2Game(engine) {
       // Hotbar thumbnails depend on PNG textures; refresh once they're loaded.
       textures.readyPromise?.then(() => setHotbarImages());
 
-      window.FreeCube2 = { engine, store, textures, entityTextures };
+      window.FreeCube2 = { engine, store, textures, entityTextures, objModels };
       console.log("FreeCube2 boot:", {
         version: GAME_VERSION,
         renderer: useWebGL ? "WebGL2" : "Canvas",
@@ -6032,6 +9002,10 @@ export default function FreeCube2Game(engine) {
       if (input.consumePress("Escape")) {
         if (chatOpen) {
           closeChat(true);
+          return;
+        }
+        if (inventoryOpen) {
+          setInventoryOpen(false);
           return;
         }
         if (mode === "playing") {
@@ -6083,6 +9057,7 @@ export default function FreeCube2Game(engine) {
 
       if (mode === "paused") {
         input.consumeLook();
+        player.isSprinting = false;
         if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
         setMiningProgress(0);
         updatePlayerVitals(dt);
@@ -6091,21 +9066,41 @@ export default function FreeCube2Game(engine) {
       }
 
       // playing
-      if (!chatOpen && (input.consumePress("t") || input.consumePress("T"))) {
+      if (!chatOpen && !inventoryOpen && (input.consumePress("t") || input.consumePress("T"))) {
         openChat("");
         return;
       }
-      if (!chatOpen && (input.consumePress("/") || input.consumePress("?"))) {
+      if (!chatOpen && !inventoryOpen && (input.consumePress("/") || input.consumePress("?"))) {
         openChat("/");
+        return;
+      }
+      if (!chatOpen && input.consumePress("e", "E")) {
+        setInventoryOpen(!inventoryOpen);
         return;
       }
 
       if (chatOpen) {
         input.consumeLook();
+        player.isSprinting = false;
         if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
         setMiningProgress(0);
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
+        updateFurnaces(dt);
+        updatePlayerVitals(dt);
+        saveWorld(false);
+        return;
+      }
+
+      if (inventoryOpen) {
+        input.consumeLook();
+        player.isSprinting = false;
+        if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
+        setMiningProgress(0);
+        player.breakCooldown = Math.max(0, player.breakCooldown - dt);
+        player.placeCooldown = Math.max(0, player.placeCooldown - dt);
+        updateInventoryCursorPosition();
+        updateFurnaces(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
         return;
@@ -6126,6 +9121,7 @@ export default function FreeCube2Game(engine) {
         }
       } else {
         input.consumeLook();
+        player.isSprinting = false;
       }
 
       player.ensureSafePosition(world);
@@ -6137,11 +9133,15 @@ export default function FreeCube2Game(engine) {
         glRenderer.updateCamera();
       }
 
-      currentTarget = input.locked ? world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH) : null;
+      const blockTarget = input.locked ? world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH) : null;
+      currentEntityTarget = input.locked ? findTargetMob(blockTarget) : null;
+      currentTarget = currentEntityTarget ? null : blockTarget;
       if (useWebGL && glRenderer) glRenderer.setTargetBlock(currentTarget);
+      updateCombat();
       updateMining(dt);
       updateInteractions();
       updateItems(dt);
+      updateFurnaces(dt);
       updateSpawning(dt);
 
       // Mobs update + render feed.
@@ -6150,9 +9150,23 @@ export default function FreeCube2Game(engine) {
         const dx = mob.x - player.x;
         const dz = mob.z - player.z;
         const dist = Math.hypot(dx, dz);
-        if (mob.type === "zombie" && dist < 1.15 && mob.attackCooldown <= 0) {
-          mob.attackCooldown = 0.9;
-          applyDamage(2, "");
+        const def = getMobDef(mob.type);
+        const withinHeight = player.y < mob.y + mob.height && player.y + PLAYER_HEIGHT > mob.y;
+        const minDist = PLAYER_RADIUS + mob.radius;
+        if (withinHeight && dist < minDist) {
+          const nx = dist > 0.001 ? dx / dist : Math.sin(player.yaw || 0);
+          const nz = dist > 0.001 ? dz / dist : Math.cos(player.yaw || 0);
+          const push = minDist - dist + 0.001;
+          const nextX = mob.x + nx * push;
+          const nextZ = mob.z + nz * push;
+          if (!entityWouldCollide(world, nextX, mob.y, nextZ, mob.radius, mob.height)) {
+            mob.x = nextX;
+            mob.z = nextZ;
+          }
+        }
+        if (def.hostile && withinHeight && dist < (def.attackReach || 1.15) && mob.attackCooldown <= 0) {
+          mob.attackCooldown = mob.type === "spider" ? 0.75 : mob.type === "creeper" ? 1.05 : 0.9;
+          applyDamage(def.attackDamage || 2, "");
         }
       }
       if (useWebGL && glRenderer) {
@@ -6161,6 +9175,11 @@ export default function FreeCube2Game(engine) {
       if (canvasRenderer) {
         canvasRenderer.mobs = mobs;
         canvasRenderer.items = items;
+      }
+
+      if (performance.now() - lastMobRenderSummaryAt > 12000) {
+        logMobRenderDiagnostics("periodic");
+        lastMobRenderSummaryAt = performance.now();
       }
 
       saveWorld(false);
