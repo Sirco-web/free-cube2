@@ -142,22 +142,46 @@ const __engine = (() => {
       this.keys = new Set();
       this.mouse = {x:0,y:0,down:false,dx:0,dy:0,wheel:0};
       this.onKeyDown = null; // Callback for key down events
-      
-      window.addEventListener('keydown', e=>{
+
+      this.reset = this.reset.bind(this);
+      this._onWindowKeyDown = e=>{
         this.keys.add(e.key);
         if(this.onKeyDown) this.onKeyDown(e.key);
-      });
-      window.addEventListener('keyup', e=>this.keys.delete(e.key));
-      canvas.addEventListener('mousemove', e=>{
+      };
+      this._onWindowKeyUp = e=>this.keys.delete(e.key);
+      this._onMouseMove = e=>{
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) * (canvas.width/rect.width);
         const y = (e.clientY - rect.top) * (canvas.height/rect.height);
         this.mouse.dx = x - this.mouse.x; this.mouse.dy = y - this.mouse.y;
         this.mouse.x = x; this.mouse.y = y;
-      });
-      canvas.addEventListener('mousedown', ()=>this.mouse.down=true);
-      canvas.addEventListener('mouseup', ()=>this.mouse.down=false);
-      canvas.addEventListener('wheel', e=>{ this.mouse.wheel = e.deltaY; });
+      };
+      this._onMouseDown = ()=>this.mouse.down=true;
+      this._onMouseUp = ()=>{
+        this.mouse.down = false;
+        this.mouse.dx = 0;
+        this.mouse.dy = 0;
+      };
+      this._onWheel = e=>{ this.mouse.wheel = e.deltaY; };
+      this._onVisibilityChange = ()=>{ if(document.hidden) this.reset(); };
+
+      window.addEventListener('keydown', this._onWindowKeyDown);
+      window.addEventListener('keyup', this._onWindowKeyUp);
+      canvas.addEventListener('mousemove', this._onMouseMove);
+      canvas.addEventListener('mousedown', this._onMouseDown);
+      window.addEventListener('mouseup', this._onMouseUp);
+      window.addEventListener('pointerup', this._onMouseUp);
+      window.addEventListener('blur', this.reset);
+      document.addEventListener('visibilitychange', this._onVisibilityChange);
+      canvas.addEventListener('mouseleave', this._onMouseUp);
+      canvas.addEventListener('wheel', this._onWheel);
+    }
+    reset(){
+      this.keys.clear();
+      this.mouse.down = false;
+      this.mouse.dx = 0;
+      this.mouse.dy = 0;
+      this.mouse.wheel = 0;
     }
     isDown(key){ return this.keys.has(key) }
     consumeWheel(){ const w=this.mouse.wheel; this.mouse.wheel=0; return w; }
