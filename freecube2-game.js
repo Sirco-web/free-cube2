@@ -19,15 +19,17 @@ const DEFAULT_SETTINGS = {
   showFps: true,
   viewBobbing: true,
   texturePack: "gigantopack32",
-  mobModels: true
+  mobModels: true,
+  playerSkinPreset: "freecube",
+  playerSkinDataUrl: ""
 };
 
 const LOADING_CHUNK_GEN_LIMIT = 4;
-const LOADING_CHUNK_MESH_LIMIT = 3;
-const LOADING_CHUNK_MESH_BUDGET_MS = 5;
+const LOADING_CHUNK_MESH_LIMIT = 4;
+const LOADING_CHUNK_MESH_BUDGET_MS = 7;
 const PLAY_CHUNK_GEN_LIMIT = 1;
-const PLAY_CHUNK_MESH_LIMIT = 1;
-const PLAY_CHUNK_MESH_BUDGET_MS = 1.25;
+const PLAY_CHUNK_MESH_LIMIT = 2;
+const PLAY_CHUNK_MESH_BUDGET_MS = 2.25;
 const AUTOSAVE_INTERVAL_SECONDS = 8;
 
 const GAME_MODE = {
@@ -1295,6 +1297,7 @@ const MOB_DEFS = {
     maxHealth: 20,
     speed: 2.2,
     hostile: true,
+    burnsInSunlight: true,
     aggroRange: 14,
     attackDamage: 2,
     attackReach: 1.2,
@@ -1333,9 +1336,11 @@ const MOB_DEFS = {
     speed: 1.85,
     hostile: true,
     aggroRange: 13,
-    attackDamage: 3,
-    attackReach: 1.3,
-    meleeDamage: 4,
+    attackDamage: 0,
+    attackReach: 0,
+    meleeDamage: 0,
+    fuseTime: 1.2,
+    explosionRadius: 3.6,
     modelHeight: 1.7,
     yawOffset: Math.PI
   },
@@ -1349,6 +1354,9 @@ const MOB_DEFS = {
     attackDamage: 2,
     attackReach: 1.5,
     meleeDamage: 3,
+    leapSpeed: 5.25,
+    leapVertical: 6.35,
+    leapCooldown: 2.15,
     modelHeight: 0.95,
     yawOffset: Math.PI
   },
@@ -1870,7 +1878,80 @@ const MOB_LOOT_TABLES = {
   ]
 };
 
-let defaultPlayerSkinCanvas = null;
+const PLAYER_SKIN_PRESETS = {
+  freecube: {
+    label: "FreeCube",
+    skin: "#e3c7aa",
+    skinShade: "#cfae90",
+    hair: "#352316",
+    hairShade: "#21150c",
+    shirt: "#22c6d8",
+    shirtShade: "#148998",
+    shirtAccent: "#0d5f69",
+    pants: "#39d3e2",
+    pantsShade: "#2293a3",
+    shoes: "#f0f0f0",
+    belt: "#2c241d",
+    eye: "#4e3827",
+    mouth: "#5c3f28"
+  },
+  steve: {
+    label: "Steve",
+    skin: "#c79d7b",
+    skinShade: "#a87b5c",
+    hair: "#4c331d",
+    hairShade: "#2e1c0d",
+    shirt: "#6d93d6",
+    shirtShade: "#47669b",
+    shirtAccent: "#9bb8ea",
+    pants: "#4f6ead",
+    pantsShade: "#314772",
+    shoes: "#4b4f59",
+    belt: "#5e4a34",
+    eye: "#264f7f",
+    mouth: "#6a4632"
+  },
+  alex: {
+    label: "Alex",
+    skin: "#d5ab88",
+    skinShade: "#b98a68",
+    hair: "#cf7c3b",
+    hairShade: "#8e4b1f",
+    shirt: "#71b36a",
+    shirtShade: "#4f8348",
+    shirtAccent: "#8ad681",
+    pants: "#7a5738",
+    pantsShade: "#593e28",
+    shoes: "#3f2e22",
+    belt: "#8c6b43",
+    eye: "#3a6f45",
+    mouth: "#6f4a2d"
+  },
+  zombie: {
+    label: "Zombie",
+    skin: "#69aa68",
+    skinShade: "#4c7f49",
+    hair: "#315632",
+    hairShade: "#213b22",
+    shirt: "#58a5d3",
+    shirtShade: "#34719b",
+    shirtAccent: "#7bc4ea",
+    pants: "#6c4fa3",
+    pantsShade: "#48336d",
+    shoes: "#46394e",
+    belt: "#263126",
+    eye: "#1a1f1a",
+    mouth: "#1c271a"
+  }
+};
+
+const playerSkinCanvasCache = new Map();
+let customPlayerSkinCache = {
+  dataUrl: "",
+  canvas: null,
+  loading: false,
+  failed: false
+};
 
 function fillCanvasRects(ctx, color, rects) {
   ctx.fillStyle = color;
@@ -1880,10 +1961,24 @@ function fillCanvasRects(ctx, color, rects) {
   }
 }
 
-function getDefaultPlayerSkinCanvas() {
-  if (defaultPlayerSkinCanvas) {
-    return defaultPlayerSkinCanvas;
-  }
+function buildPlayerSkinCanvas(paletteOverrides = {}) {
+  const palette = {
+    skin: "#e3c7aa",
+    skinShade: "#cfae90",
+    hair: "#352316",
+    hairShade: "#21150c",
+    shirt: "#22c6d8",
+    shirtShade: "#148998",
+    shirtAccent: "#0d5f69",
+    pants: "#39d3e2",
+    pantsShade: "#2293a3",
+    shoes: "#f0f0f0",
+    belt: "#2c241d",
+    eyeWhite: "#ffffff",
+    eye: "#5c3f28",
+    mouth: "#5c3f28",
+    ...paletteOverrides
+  };
   const canvas = document.createElement("canvas");
   canvas.width = 64;
   canvas.height = 64;
@@ -1891,18 +1986,7 @@ function getDefaultPlayerSkinCanvas() {
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const skin = "#e3c7aa";
-  const skinShade = "#cfae90";
-  const hair = "#352316";
-  const hairShade = "#21150c";
-  const shirt = "#22c6d8";
-  const shirtShade = "#148998";
-  const pants = "#39d3e2";
-  const pantsShade = "#2293a3";
-  const shoes = "#f0f0f0";
-  const belt = "#2c241d";
-
-  fillCanvasRects(ctx, skin, [
+  fillCanvasRects(ctx, palette.skin, [
     [8, 8, 8, 8],
     [20, 20, 8, 12],
     [44, 20, 4, 12],
@@ -1910,65 +1994,213 @@ function getDefaultPlayerSkinCanvas() {
     [4, 20, 4, 12],
     [20, 52, 4, 12]
   ]);
-  fillCanvasRects(ctx, skinShade, [
+  fillCanvasRects(ctx, palette.skinShade, [
     [20, 30, 8, 2],
     [44, 30, 4, 2],
     [36, 62, 4, 2],
     [4, 30, 4, 2],
     [20, 62, 4, 2]
   ]);
-  fillCanvasRects(ctx, hair, [
-    [8, 8, 8, 2],
-    [8, 10, 2, 3],
-    [14, 10, 2, 3],
-    [9, 12, 6, 1],
-    [40, 8, 8, 2],
-    [40, 10, 2, 3],
-    [46, 10, 2, 3],
-    [41, 12, 6, 1]
+  if (palette.hair) {
+    fillCanvasRects(ctx, palette.hair, [
+      [8, 8, 8, 2],
+      [8, 10, 2, 3],
+      [14, 10, 2, 3],
+      [9, 11, 6, 2],
+      [40, 8, 8, 2],
+      [40, 10, 2, 3],
+      [46, 10, 2, 3],
+      [41, 11, 6, 2]
+    ]);
+  }
+  if (palette.hairShade) {
+    fillCanvasRects(ctx, palette.hairShade, [
+      [10, 10, 4, 1],
+      [42, 10, 4, 1]
+    ]);
+  }
+  fillCanvasRects(ctx, palette.eyeWhite, [
+    [9, 12, 2, 1],
+    [12, 12, 2, 1]
   ]);
-  fillCanvasRects(ctx, hairShade, [
-    [10, 10, 4, 1],
-    [42, 10, 4, 1]
-  ]);
-  fillCanvasRects(ctx, "#ffffff", [
+  fillCanvasRects(ctx, palette.eye, [
     [10, 12, 1, 1],
     [13, 12, 1, 1]
   ]);
-  fillCanvasRects(ctx, "#5c3f28", [
-    [10, 12, 1, 1],
-    [13, 12, 1, 1],
+  fillCanvasRects(ctx, palette.mouth, [
     [11, 14, 2, 1]
   ]);
-  fillCanvasRects(ctx, shirt, [
+  fillCanvasRects(ctx, palette.shirt, [
     [20, 20, 8, 10],
     [44, 20, 4, 4],
     [36, 52, 4, 4]
   ]);
-  fillCanvasRects(ctx, shirtShade, [
+  fillCanvasRects(ctx, palette.shirtShade, [
     [20, 20, 8, 2],
     [20, 28, 8, 2],
     [44, 20, 4, 2],
     [36, 52, 4, 2]
   ]);
-  fillCanvasRects(ctx, pants, [
+  if (palette.shirtAccent) {
+    fillCanvasRects(ctx, palette.shirtAccent, [
+      [20, 23, 2, 4],
+      [26, 23, 2, 4],
+      [22, 23, 4, 1]
+    ]);
+  }
+  fillCanvasRects(ctx, palette.pants, [
     [4, 20, 4, 10],
     [20, 52, 4, 10]
   ]);
-  fillCanvasRects(ctx, pantsShade, [
+  fillCanvasRects(ctx, palette.pantsShade, [
     [4, 20, 4, 2],
     [20, 52, 4, 2]
   ]);
-  fillCanvasRects(ctx, shoes, [
+  fillCanvasRects(ctx, palette.shoes, [
     [4, 30, 4, 2],
     [20, 62, 4, 2]
   ]);
-  fillCanvasRects(ctx, belt, [
+  fillCanvasRects(ctx, palette.belt, [
     [20, 30, 8, 2]
   ]);
 
-  defaultPlayerSkinCanvas = canvas;
   return canvas;
+}
+
+function isValidPlayerSkinPreset(preset) {
+  return preset === "custom" || Object.prototype.hasOwnProperty.call(PLAYER_SKIN_PRESETS, preset);
+}
+
+function getPresetPlayerSkinCanvas(preset = DEFAULT_SETTINGS.playerSkinPreset) {
+  const resolvedPreset = Object.prototype.hasOwnProperty.call(PLAYER_SKIN_PRESETS, preset) ? preset : DEFAULT_SETTINGS.playerSkinPreset;
+  if (!playerSkinCanvasCache.has(resolvedPreset)) {
+    playerSkinCanvasCache.set(resolvedPreset, buildPlayerSkinCanvas(PLAYER_SKIN_PRESETS[resolvedPreset]));
+  }
+  return playerSkinCanvasCache.get(resolvedPreset);
+}
+
+function getDefaultPlayerSkinCanvas() {
+  return getPresetPlayerSkinCanvas(DEFAULT_SETTINGS.playerSkinPreset);
+}
+
+function normalizeImportedPlayerSkinCanvas(image) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.drawImage(image, 0, 0);
+  if (image.width === 64 && image.height === 32) {
+    // Classic 64x32 skins don't have the second leg/arm textures in the bottom half.
+    // Duplicate the visible front faces so the preview still renders cleanly.
+    ctx.drawImage(canvas, 4, 20, 4, 12, 20, 52, 4, 12);
+    ctx.drawImage(canvas, 44, 20, 4, 12, 36, 52, 4, 12);
+  }
+  return canvas;
+}
+
+function triggerPlayerSkinRefresh() {
+  if (!ui) return;
+  setSettingsUI();
+  if (inventoryOpen) {
+    renderInventoryUI();
+  }
+}
+
+function queueCustomPlayerSkinLoad(dataUrl) {
+  if (!dataUrl || customPlayerSkinCache.loading) return;
+  customPlayerSkinCache.loading = true;
+  const image = new Image();
+  image.onload = () => {
+    if (!((image.width === 64 && image.height === 64) || (image.width === 64 && image.height === 32))) {
+      console.warn("Unsupported player skin size:", image.width, image.height);
+      if (customPlayerSkinCache.dataUrl === dataUrl) {
+        customPlayerSkinCache.canvas = null;
+        customPlayerSkinCache.failed = true;
+      }
+      customPlayerSkinCache.loading = false;
+      triggerPlayerSkinRefresh();
+      return;
+    }
+    customPlayerSkinCache = {
+      dataUrl,
+      canvas: normalizeImportedPlayerSkinCanvas(image),
+      loading: false,
+      failed: false
+    };
+    triggerPlayerSkinRefresh();
+  };
+  image.onerror = () => {
+    console.warn("Failed to load custom player skin.");
+    if (customPlayerSkinCache.dataUrl === dataUrl) {
+      customPlayerSkinCache.canvas = null;
+      customPlayerSkinCache.loading = false;
+      customPlayerSkinCache.failed = true;
+    } else {
+      customPlayerSkinCache.loading = false;
+    }
+    triggerPlayerSkinRefresh();
+  };
+  image.src = dataUrl;
+}
+
+function getCustomPlayerSkinCanvas(dataUrl) {
+  if (!dataUrl) return null;
+  if (customPlayerSkinCache.dataUrl !== dataUrl) {
+    customPlayerSkinCache = {
+      dataUrl,
+      canvas: null,
+      loading: false,
+      failed: false
+    };
+  }
+  if (!customPlayerSkinCache.canvas && !customPlayerSkinCache.loading && !customPlayerSkinCache.failed) {
+    queueCustomPlayerSkinLoad(dataUrl);
+  }
+  return customPlayerSkinCache.canvas;
+}
+
+function getSelectedPlayerSkinCanvas(settingsState = DEFAULT_SETTINGS) {
+  const preset = isValidPlayerSkinPreset(settingsState?.playerSkinPreset) ? settingsState.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
+  if (preset === "custom") {
+    return getCustomPlayerSkinCanvas(settingsState?.playerSkinDataUrl) || getPresetPlayerSkinCanvas(DEFAULT_SETTINGS.playerSkinPreset);
+  }
+  return getPresetPlayerSkinCanvas(preset);
+}
+
+function getSelectedPlayerSkinLabel(settingsState = DEFAULT_SETTINGS) {
+  const preset = isValidPlayerSkinPreset(settingsState?.playerSkinPreset) ? settingsState.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
+  if (preset === "custom") {
+    return settingsState?.playerSkinDataUrl ? "Custom" : PLAYER_SKIN_PRESETS[DEFAULT_SETTINGS.playerSkinPreset].label;
+  }
+  return PLAYER_SKIN_PRESETS[preset]?.label || PLAYER_SKIN_PRESETS[DEFAULT_SETTINGS.playerSkinPreset].label;
+}
+
+function readPlayerSkinFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("Choose a PNG skin first."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("That skin file could not be read."));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const image = new Image();
+      image.onload = () => {
+        if (!((image.width === 64 && image.height === 64) || (image.width === 64 && image.height === 32))) {
+          reject(new Error("Skin must be 64x64 or 64x32."));
+          return;
+        }
+        const canvas = normalizeImportedPlayerSkinCanvas(image);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      image.onerror = () => reject(new Error("That PNG skin could not be loaded."));
+      image.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function getArmorPreviewColor(itemType) {
@@ -1988,11 +2220,11 @@ function getArmorPreviewColor(itemType) {
   }
 }
 
-function renderPlayerPreviewCanvas(canvas, armorItems = {}) {
+function renderPlayerPreviewCanvas(canvas, armorItems = {}, skinOverride = null) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const skin = getDefaultPlayerSkinCanvas();
+  const skin = skinOverride || getDefaultPlayerSkinCanvas();
 
   canvas.width = 96;
   canvas.height = 176;
@@ -2181,9 +2413,30 @@ class TerrainGenerator {
     this.cavesXY = new FractalNoise(seed + 173, 3, 0.52, 2.06);
     this.cavesYZ = new FractalNoise(seed + 197, 3, 0.54, 2.14);
     this.caveWarp = new FractalNoise(seed + 223, 2, 0.5, 2);
+    this.heightCache = new Map();
+    this.columnCache = new Map();
+  }
+
+  _columnKey(x, z) {
+    return `${x},${z}`;
+  }
+
+  _trimCaches() {
+    if (this.heightCache.size > 32768) {
+      this.heightCache.clear();
+    }
+    if (this.columnCache.size > 16384) {
+      this.columnCache.clear();
+    }
   }
 
   sampleHeight(x, z) {
+    const key = this._columnKey(x, z);
+    const cached = this.heightCache.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const continental = this.continents.fractal(x * 0.0038, z * 0.0038) * 0.5 + 0.5;
     const hills = this.hills.fractal(x * 0.012, z * 0.012);
     const detail = this.details.fractal(x * 0.038, z * 0.038);
@@ -2203,10 +2456,19 @@ class TerrainGenerator {
     }
     height -= river > 0.62 ? (river - 0.62) * 20 : 0;
 
-    return clamp(Math.round(height), 6, WORLD_HEIGHT - 8);
+    const result = clamp(Math.round(height), 6, WORLD_HEIGHT - 8);
+    this._trimCaches();
+    this.heightCache.set(key, result);
+    return result;
   }
 
   describeColumn(x, z) {
+    const key = this._columnKey(x, z);
+    const cached = this.columnCache.get(key);
+    if (cached) {
+      return cached;
+    }
+
     const height = this.sampleHeight(x, z);
     const moisture = this.moisture.fractal(x * 0.006, z * 0.006) * 0.5 + 0.5;
     const temperature = this.temperature.fractal(x * 0.0055, z * 0.0055) * 0.5 + 0.5;
@@ -2249,7 +2511,7 @@ class TerrainGenerator {
       topDepth = 4;
     }
 
-    return {
+    const result = {
       height,
       moisture,
       temperature,
@@ -2261,6 +2523,9 @@ class TerrainGenerator {
       filler,
       topDepth
     };
+    this._trimCaches();
+    this.columnCache.set(key, result);
+    return result;
   }
 
   shouldPlaceTree(x, z, column) {
@@ -2293,12 +2558,12 @@ class TerrainGenerator {
   }
 
   shouldCarveCave(x, y, z, surfaceY) {
-    if (y < 6 || y >= surfaceY - 4) {
+    if (y < 11 || y >= surfaceY - 5) {
       return false;
     }
 
-    const depth = clamp((surfaceY - y) / 26, 0, 1);
-    if (depth < 0.18) {
+    const depth = clamp((surfaceY - y) / 34, 0, 1);
+    if (depth < 0.24) {
       return false;
     }
 
@@ -2316,8 +2581,8 @@ class TerrainGenerator {
       Math.abs(this.cavesXZ.fractal(sampleX * 1.9 + 17.3, sampleZ * 1.9 - 11.4)) * 0.6 +
       Math.abs(this.cavesXY.fractal(sampleX * 1.7 - 8.1, sampleY * 1.7 + 3.7)) * 0.4;
 
-    const threshold = 0.14 + depth * 0.11 + (y < SEA_LEVEL - 8 ? 0.035 : 0);
-    return density < threshold || tunnel < threshold * 0.78;
+    const threshold = 0.102 + depth * 0.074 + (y < SEA_LEVEL - 14 ? 0.012 : 0);
+    return (density < threshold && tunnel < threshold * 0.94) || tunnel < threshold * 0.54;
   }
 }
 
@@ -2374,6 +2639,8 @@ class Chunk {
         for (let y = 0; y < WORLD_HEIGHT; y += 1) {
           let type = BLOCK.AIR;
           if (y === 0) {
+            type = BLOCK.BEDROCK;
+          } else if (y <= 4 && random3(worldX, y, worldZ, this.world.seed + 4041) > y * 0.22) {
             type = BLOCK.BEDROCK;
           } else if (y < surfaceY - topDepth) {
             type = BLOCK.STONE;
@@ -3147,6 +3414,8 @@ class Player {
     this.fallDistance = 0;
     this.pendingFallDamage = 0;
     this.isSprinting = false;
+    this.sprintToggled = false;
+    this.isCrouching = false;
   }
 
   initializeInventory() {
@@ -3171,7 +3440,7 @@ class Player {
   getEyePosition() {
     return {
       x: this.x,
-      y: this.y + PLAYER_EYE_HEIGHT,
+      y: this.y + PLAYER_EYE_HEIGHT - (this.isCrouching ? 0.18 : 0),
       z: this.z
     };
   }
@@ -3260,6 +3529,23 @@ class Player {
     this.vz = 0;
   }
 
+  hasGroundSupport(world, x = this.x, z = this.z) {
+    const supportY = Math.floor(this.y - 0.08);
+    const inset = PLAYER_RADIUS - 0.05;
+    const samples = [
+      [x - inset, z - inset],
+      [x + inset, z - inset],
+      [x - inset, z + inset],
+      [x + inset, z + inset]
+    ];
+    for (const [sampleX, sampleZ] of samples) {
+      if (isCollidable(world.getBlock(Math.floor(sampleX), supportY, Math.floor(sampleZ)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   applyLook(deltaX, deltaY, settings = DEFAULT_SETTINGS) {
     const sensitivity = settings.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity;
     const invertY = settings.invertY ? -1 : 1;
@@ -3323,9 +3609,14 @@ class Player {
     this.breakCooldown = Math.max(0, this.breakCooldown - dt);
     this.placeCooldown = Math.max(0, this.placeCooldown - dt);
 
+    if (input.consumePress("r", "R")) {
+      this.sprintToggled = !this.sprintToggled;
+    }
+
     const startedInWater = this.inWater;
     this.inWater = this.isInWater(world);
     const startY = this.y;
+    const wasOnGround = this.onGround;
 
     const forward = (input.isDown("w") || input.isDown("W") ? 1 : 0) - (input.isDown("s") || input.isDown("S") ? 1 : 0);
     // Strafe should match Minecraft: A = left, D = right.
@@ -3344,13 +3635,32 @@ class Player {
       moveX /= length;
       moveZ /= length;
     }
-    const wantsSprint = !this.inWater && this.hunger > 0 && length > 0 && input.isDown("Shift");
+    this.isCrouching = !this.inWater && input.isDown("Shift");
+    if (this.isCrouching) {
+      this.sprintToggled = false;
+    }
+
+    const wantsSprint = !this.inWater && !this.isCrouching && this.hunger > 0 && length > 0 && forward > 0 && this.sprintToggled;
     this.isSprinting = wantsSprint;
 
-    const speed = this.inWater ? 2.8 : wantsSprint ? 6.9 : 4.6;
+    const speed = this.inWater ? 2.8 : this.isCrouching ? 1.75 : wantsSprint ? 6.9 : 4.6;
 
-    const targetVX = moveX * speed;
-    const targetVZ = moveZ * speed;
+    let targetVX = moveX * speed;
+    let targetVZ = moveZ * speed;
+    if (this.isCrouching && wasOnGround && length > 0) {
+      const aheadX = this.x + targetVX * dt * 2.2;
+      const aheadZ = this.z + targetVZ * dt * 2.2;
+      if (!this.hasGroundSupport(world, aheadX, this.z)) {
+        targetVX = 0;
+      }
+      if (!this.hasGroundSupport(world, this.x, aheadZ)) {
+        targetVZ = 0;
+      }
+      if (!this.hasGroundSupport(world, aheadX, aheadZ)) {
+        targetVX = 0;
+        targetVZ = 0;
+      }
+    }
     const accel = this.inWater ? 7.5 : this.onGround ? 16 : 5;
     const blend = clamp(accel * dt, 0, 1);
 
@@ -3459,6 +3769,7 @@ class Player {
       armorCounts: Array.from(this.armorCounts),
       hotbarTypes: Array.from(this.hotbarTypes),
       hotbarCounts: Array.from(this.hotbarCounts),
+      sprintToggled: this.sprintToggled,
       health: this.health,
       hunger: this.hunger,
       xp: this.xp,
@@ -3507,6 +3818,9 @@ class Player {
       this.hunger = clamp(Number(data.hunger) || 20, 0, this.maxHunger);
       this.xp = clamp(Number(data.xp) || 0, 0, 1);
       this.xpLevel = Math.max(0, Math.floor(Number(data.xpLevel) || 0));
+      this.sprintToggled = !!data.sprintToggled;
+      this.isCrouching = false;
+      this.isSprinting = false;
       return true;
     }
 
@@ -3654,6 +3968,9 @@ class Mob {
     this.turnBias = Math.random() < 0.5 ? -1 : 1;
     this.turnCooldown = 0;
     this.sunBurnTimer = 0;
+    this.fuseTimer = 0;
+    this.spiderLeapCooldown = 0;
+    this.provokedTimer = 0;
   }
 
   get radius() {
@@ -3703,6 +4020,7 @@ class Mob {
     }
     this.health = Math.max(0, this.health - dmg);
     this.hurtTimer = 0.3;
+    this.provokedTimer = Math.max(this.provokedTimer, 8);
     this.fleeTimer = getMobDef(this.type).hostile ? 0 : 2.8;
     const dx = this.x - sourceX;
     const dz = this.z - sourceZ;
@@ -3712,6 +4030,9 @@ class Mob {
     this.vy = Math.max(this.vy, 4.8);
     this.goalX = null;
     this.goalZ = null;
+    if (this.type === "creeper") {
+      this.fuseTimer = 0;
+    }
     return this.health <= 0;
   }
 
@@ -3777,7 +4098,7 @@ class Mob {
     }
   }
 
-  update(dt, world, player) {
+  update(dt, world, player, cycle = null) {
     const def = getMobDef(this.type);
     this.age += dt;
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
@@ -3787,6 +4108,8 @@ class Mob {
     this.hurtTimer = Math.max(0, this.hurtTimer - dt);
     this.jumpCooldown = Math.max(0, this.jumpCooldown - dt);
     this.turnCooldown = Math.max(0, this.turnCooldown - dt);
+    this.spiderLeapCooldown = Math.max(0, this.spiderLeapCooldown - dt);
+    this.provokedTimer = Math.max(0, this.provokedTimer - dt);
 
     const dxp = player.x - this.x;
     const dzp = player.z - this.z;
@@ -3795,19 +4118,33 @@ class Mob {
       ? Math.hypot((this.homeX || 0) - this.x, (this.homeZ || 0) - this.z)
       : Infinity;
     const isHostile = !!def.hostile;
-    const shouldFlee = !isHostile && (this.fleeTimer > 0 || dist < (def.scareRange || 0));
+    const isSpider = this.type === "spider";
+    const isCreeper = this.type === "creeper";
+    const activeHostile = isHostile && !(isSpider && cycle && !cycle.isNight && this.provokedTimer <= 0);
+    const shouldFlee = !activeHostile && (this.fleeTimer > 0 || dist < (def.scareRange || 0));
     let targetX = this.goalX;
     let targetZ = this.goalZ;
     let desiredSpeed = 0;
     let preferredYaw = this.yaw;
+    let keepFuseLit = false;
 
-    if (isHostile && dist < def.aggroRange) {
+    if (isCreeper && activeHostile && dist < def.aggroRange) {
+      targetX = player.x;
+      targetZ = player.z;
+      preferredYaw = Math.atan2(dxp, dzp);
+      desiredSpeed = dist > 2.35 ? def.speed * 0.94 : 0;
+      this.goalTimer = Math.max(this.goalTimer, 0.25);
+      if (dist < (def.explosionRadius || 3.6) - 0.15) {
+        this.fuseTimer = Math.min(def.fuseTime || 1.2, this.fuseTimer + dt);
+        keepFuseLit = true;
+      }
+    } else if (activeHostile && dist < def.aggroRange) {
       targetX = player.x;
       targetZ = player.z;
       desiredSpeed = def.speed;
       preferredYaw = Math.atan2(dxp, dzp);
       this.goalTimer = Math.max(this.goalTimer, 0.2);
-    } else if (!isHostile && Number.isFinite(this.homeX) && Number.isFinite(this.homeZ) && distHome > 10) {
+    } else if (!activeHostile && Number.isFinite(this.homeX) && Number.isFinite(this.homeZ) && distHome > 10) {
       targetX = this.homeX;
       targetZ = this.homeZ;
       desiredSpeed = def.speed * 0.96;
@@ -3837,11 +4174,16 @@ class Mob {
       desiredSpeed = this.grazeTimer > 0 ? 0 : def.speed * 0.9;
     }
 
+    if (!keepFuseLit) {
+      this.fuseTimer = Math.max(0, this.fuseTimer - dt * 1.85);
+    }
+
     if (Number.isFinite(targetX) && Number.isFinite(targetZ)) {
       preferredYaw = Math.atan2(targetX - this.x, targetZ - this.z);
     }
 
-    this.yaw = lerpAngle(this.yaw, preferredYaw, clamp(dt * 3.8, 0, 1));
+    const turnSpeed = activeHostile ? 4.1 : this.type === "villager" ? 2.6 : 3.1;
+    this.yaw = lerpAngle(this.yaw, preferredYaw, clamp(dt * turnSpeed, 0, 1));
 
     let moveX = Math.sin(this.yaw) * desiredSpeed;
     let moveZ = Math.cos(this.yaw) * desiredSpeed;
@@ -3850,7 +4192,7 @@ class Mob {
       if (blockState === "obstacle" && this.onGround && this.jumpCooldown <= 0) {
         this.vy = Math.max(this.vy, 6.1);
         this.jumpCooldown = 0.6;
-      } else if (!isHostile || blockState === "ledge") {
+      } else if (!activeHostile || blockState === "ledge") {
         if (this.turnCooldown <= 0) {
           this.turnBias *= -1;
           this.turnCooldown = 0.85;
@@ -3877,12 +4219,18 @@ class Mob {
       this.vz = lerp(this.vz, 0, clamp(dt * 10, 0, 1));
     }
 
-    // Gravity.
+    if (isSpider && activeHostile && this.onGround && this.spiderLeapCooldown <= 0 && !blockState && dist > 1.7 && dist < 4.9 && this.attackCooldown <= 0) {
+      const leapNorm = dist || 1;
+      this.vx = (dxp / leapNorm) * (def.leapSpeed || 5.25);
+      this.vz = (dzp / leapNorm) * (def.leapSpeed || 5.25);
+      this.vy = Math.max(this.vy, def.leapVertical || 6.35);
+      this.spiderLeapCooldown = def.leapCooldown || 2.15;
+    }
+
     this.vy -= 22 * dt;
     this.vy = Math.max(this.vy, -28);
     this.onGround = false;
 
-    // Integrate + collide.
     this.x += this.vx * dt;
     this.resolveAxis(world, "x", this.vx * dt);
 
@@ -5117,6 +5465,8 @@ class WebGLVoxelRenderer {
     this.chunkMeshes = new Map(); // chunkKey -> { opaque, transparent }
     this.chunkGenQueue = [];
     this.meshQueue = [];
+    this.chunkGenQueuedKeys = new Set();
+    this.meshQueuedKeys = new Set();
     this.proj = mat4Identity();
     this.view = mat4Identity();
     this.fov = Math.PI / 3;
@@ -5203,26 +5553,73 @@ class WebGLVoxelRenderer {
     return dx * dx + dz * dz <= r * r;
   }
 
+  _takeNearest(queue, keySet, playerChunkX, playerChunkZ) {
+    if (queue.length === 0) {
+      return null;
+    }
+
+    let bestIndex = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < queue.length; index += 1) {
+      const entry = queue[index];
+      const dx = entry.chunkX - playerChunkX;
+      const dz = entry.chunkZ - playerChunkZ;
+      const score = Math.max(Math.abs(dx), Math.abs(dz)) + Math.hypot(dx, dz) * 0.001;
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = index;
+        if (score <= 0) {
+          break;
+        }
+      }
+    }
+
+    const [entry] = queue.splice(bestIndex, 1);
+    if (entry) {
+      keySet.delete(entry.key);
+    }
+    return entry || null;
+  }
+
   queueChunk(chunkX, chunkZ) {
     const key = packChunkKey(chunkX, chunkZ);
-    if (this.meshQueue.some((entry) => entry.key === key)) {
+    if (this.meshQueuedKeys.has(key)) {
       return;
     }
+    this.meshQueuedKeys.add(key);
     this.meshQueue.push({ key, chunkX, chunkZ });
   }
 
   queueChunkGeneration(chunkX, chunkZ) {
     const key = packChunkKey(chunkX, chunkZ);
-    if (this.chunkGenQueue.some((entry) => entry.key === key)) {
+    if (this.chunkGenQueuedKeys.has(key)) {
       return;
     }
+    this.chunkGenQueuedKeys.add(key);
     this.chunkGenQueue.push({ key, chunkX, chunkZ });
   }
 
   updateQueue(limit = 1, budgetMs = 4) {
     const start = performance.now();
+    const playerChunkX = Math.floor(this.player.x / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(this.player.z / CHUNK_SIZE);
     for (let i = 0; i < limit && this.meshQueue.length > 0; i += 1) {
-      const next = this.meshQueue.shift();
+      const next = this._takeNearest(this.meshQueue, this.meshQueuedKeys, playerChunkX, playerChunkZ);
+      if (!next) {
+        break;
+      }
+      const dx = next.chunkX - playerChunkX;
+      const dz = next.chunkZ - playerChunkZ;
+      if (!this._withinDistance(dx, dz)) {
+        continue;
+      }
+      const chunk = this.world.peekChunk(next.chunkX, next.chunkZ);
+      if (!chunk) {
+        continue;
+      }
+      if (!chunk.meshDirty && this.chunkMeshes.has(next.key)) {
+        continue;
+      }
       this.rebuildChunk(next.chunkX, next.chunkZ);
       if (performance.now() - start >= budgetMs) {
         break;
@@ -5269,7 +5666,10 @@ class WebGLVoxelRenderer {
     }
 
     for (let i = 0; i < generateLimit && this.chunkGenQueue.length > 0; i += 1) {
-      const next = this.chunkGenQueue.shift();
+      const next = this._takeNearest(this.chunkGenQueue, this.chunkGenQueuedKeys, playerChunkX, playerChunkZ);
+      if (!next) {
+        break;
+      }
       const dx = next.chunkX - playerChunkX;
       const dz = next.chunkZ - playerChunkZ;
       if (!this._withinDistance(dx, dz)) continue;
@@ -5293,6 +5693,13 @@ class WebGLVoxelRenderer {
       const dz = entry.chunkZ - playerChunkZ;
       return this._withinDistance(dx, dz);
     });
+    this.chunkGenQueuedKeys = new Set(this.chunkGenQueue.map((entry) => entry.key));
+    this.meshQueue = this.meshQueue.filter((entry) => {
+      const dx = entry.chunkX - playerChunkX;
+      const dz = entry.chunkZ - playerChunkZ;
+      return this._withinDistance(dx, dz) && this.world.chunks.has(entry.key);
+    });
+    this.meshQueuedKeys = new Set(this.meshQueue.map((entry) => entry.key));
   }
 
   updateCamera() {
@@ -6382,6 +6789,10 @@ export default function FreeCube2Game(engine) {
         .fc-pack-name{font:900 16px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
         .fc-pack-desc{font:13px/1.2 ui-monospace,Menlo,Consolas,monospace;color:rgba(230,230,230,0.92)}
         .fc-pack-empty{display:grid;place-items:center;min-height:84px;padding:12px;background:rgba(0,0,0,0.35);border:2px solid #000;color:rgba(210,210,210,0.8);font:13px/1.2 ui-monospace,Menlo,Consolas,monospace}
+        .fc-skin-shell{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+        .fc-skin-preview{width:152px;min-height:192px;padding:12px;background:#1a1a1a;border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+        .fc-skin-controls{display:flex;flex-direction:column;gap:8px;flex:1 1 240px}
+        .fc-skin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px}
         @media (max-width: 760px){
           #freecube2-panel{width:min(96vw,96vw);min-height:calc(100dvh - 12px);padding:6px 0}
           .fc-title{font-size:clamp(42px,12vw,64px);letter-spacing:2px}
@@ -6552,6 +6963,27 @@ export default function FreeCube2Game(engine) {
                 <button id="fc-resource-packs-btn" class="fc-btn" data-action="open-resource-packs-screen">Resource Packs...</button>
                 <div id="fc-resource-pack-current" class="fc-small" style="margin-top:8px">Current: Default</div>
               </div>
+              <div class="fc-field">
+                <label>Player Skin</label>
+                <div class="fc-skin-shell">
+                  <div id="fc-skin-preview" class="fc-skin-preview"></div>
+                  <div class="fc-skin-controls">
+                    <div id="fc-skin-current" class="fc-small">Current: FreeCube</div>
+                    <div class="fc-skin-grid">
+                      <button class="fc-btn small" data-action="skin-freecube">FreeCube</button>
+                      <button class="fc-btn small" data-action="skin-steve">Steve</button>
+                      <button class="fc-btn small" data-action="skin-alex">Alex</button>
+                      <button class="fc-btn small" data-action="skin-zombie">Zombie</button>
+                    </div>
+                    <div class="fc-row" style="margin-top:2px">
+                      <button class="fc-btn half" data-action="skin-import">Import PNG Skin</button>
+                      <button class="fc-btn half" data-action="skin-reset">Reset Skin</button>
+                    </div>
+                    <div class="fc-small">Sprint key: R. Sneak/Crouch key: Shift.</div>
+                  </div>
+                </div>
+                <input id="fc-skin-file" type="file" accept="image/png" style="display:none" />
+              </div>
               <div class="fc-field fc-check">
                 <input id="fc-mob-models" type="checkbox" />
                 <label for="fc-mob-models">3D mob models</label>
@@ -6692,6 +7124,9 @@ export default function FreeCube2Game(engine) {
     const pack32Check = root.querySelector("#fc-pack32");
     const resourcePacksBtn = root.querySelector("#fc-resource-packs-btn");
     const resourcePackCurrentEl = root.querySelector("#fc-resource-pack-current");
+    const skinPreviewEl = root.querySelector("#fc-skin-preview");
+    const skinCurrentEl = root.querySelector("#fc-skin-current");
+    const skinFileInput = root.querySelector("#fc-skin-file");
     const mobModelsCheck = root.querySelector("#fc-mob-models");
     const invCheck = root.querySelector("#fc-inv");
     const gmCheck = root.querySelector("#fc-gm");
@@ -6786,6 +7221,9 @@ export default function FreeCube2Game(engine) {
       pack32Check,
       resourcePacksBtn,
       resourcePackCurrentEl,
+      skinPreviewEl,
+      skinCurrentEl,
+      skinFileInput,
       mobModelsCheck,
       invCheck,
       gmCheck,
@@ -7189,9 +7627,18 @@ export default function FreeCube2Game(engine) {
       chest: getArmorSlotType(1),
       legs: getArmorSlotType(2),
       feet: getArmorSlotType(3)
-    });
+    }, getSelectedPlayerSkinCanvas(settings));
     ui.inventoryPreviewEl.innerHTML = "";
     ui.inventoryPreviewEl.appendChild(canvas);
+  }
+
+  function renderSettingsSkinPreview() {
+    if (!ui?.skinPreviewEl) return;
+    const canvas = document.createElement("canvas");
+    canvas.className = "fc-inv-player-canvas";
+    renderPlayerPreviewCanvas(canvas, {}, getSelectedPlayerSkinCanvas(settings));
+    ui.skinPreviewEl.innerHTML = "";
+    ui.skinPreviewEl.appendChild(canvas);
   }
 
   function renderInventoryUI() {
@@ -9131,6 +9578,8 @@ export default function FreeCube2Game(engine) {
     ui.viewBobCheck.checked = settings.viewBobbing !== false;
     ui.pack32Check.checked = settings.texturePack !== "default";
     ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack).name}`;
+    ui.skinCurrentEl.textContent = `Current: ${getSelectedPlayerSkinLabel(settings)}`;
+    renderSettingsSkinPreview();
     ui.mobModelsCheck.checked = settings.mobModels !== false;
     ui.invCheck.checked = !!settings.invertY;
     ui.gmCheck.checked = settings.gameMode === GAME_MODE.CREATIVE;
@@ -9293,9 +9742,17 @@ export default function FreeCube2Game(engine) {
     settings.showFps = settings.showFps !== false;
     settings.viewBobbing = settings.viewBobbing !== false;
     settings.texturePack = settings.texturePack === "default" ? "default" : DEFAULT_SETTINGS.texturePack;
+    settings.playerSkinPreset = isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
+    settings.playerSkinDataUrl = typeof settings.playerSkinDataUrl === "string" ? settings.playerSkinDataUrl : "";
+    if (settings.playerSkinPreset === "custom" && !settings.playerSkinDataUrl) {
+      settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+    }
     settings.mobModels = settings.mobModels !== false;
     settings.invertY = !!settings.invertY;
     settings.gameMode = settings.gameMode === GAME_MODE.CREATIVE ? GAME_MODE.CREATIVE : GAME_MODE.SURVIVAL;
+    if (settings.playerSkinPreset === "custom") {
+      getCustomPlayerSkinCanvas(settings.playerSkinDataUrl);
+    }
     if (textures) {
       textures.settings = settings;
     }
@@ -9886,6 +10343,24 @@ export default function FreeCube2Game(engine) {
         setSettingsUI();
       } else if (action === "open-resource-packs") {
         alert("Built-in packs are available here already. Custom pack folders are not wired in yet.");
+      } else if (action === "skin-import") {
+        ui.skinFileInput.value = "";
+        ui.skinFileInput.click();
+      } else if (action === "skin-reset") {
+        settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+        settings.playerSkinDataUrl = "";
+        customPlayerSkinCache = { dataUrl: "", canvas: null, loading: false, failed: false };
+        markWorldDirty();
+        setSettingsUI();
+        if (inventoryOpen) renderInventoryUI();
+      } else if (action === "skin-freecube" || action === "skin-steve" || action === "skin-alex" || action === "skin-zombie") {
+        const preset = action.replace("skin-", "");
+        settings.playerSkinPreset = preset;
+        settings.playerSkinDataUrl = "";
+        customPlayerSkinCache = { dataUrl: "", canvas: null, loading: false, failed: false };
+        markWorldDirty();
+        setSettingsUI();
+        if (inventoryOpen) renderInventoryUI();
       } else if (action === "back-settings") {
         ui.showScreen(mode === "paused" ? "pause" : "title");
       } else if (action === "play-world") {
@@ -9948,6 +10423,32 @@ export default function FreeCube2Game(engine) {
         alert(`Import failed: ${error.message}`);
       } finally {
         ui.importWorldFileInput.value = "";
+      }
+    });
+
+    ui.skinFileInput.addEventListener("change", async () => {
+      const file = ui.skinFileInput.files?.[0];
+      if (!file) {
+        return;
+      }
+      try {
+        const dataUrl = await readPlayerSkinFile(file);
+        settings.playerSkinPreset = "custom";
+        settings.playerSkinDataUrl = dataUrl;
+        customPlayerSkinCache = {
+          dataUrl,
+          canvas: null,
+          loading: false,
+          failed: false
+        };
+        getCustomPlayerSkinCanvas(dataUrl);
+        markWorldDirty();
+        setSettingsUI();
+        if (inventoryOpen) renderInventoryUI();
+      } catch (error) {
+        alert(`Skin import failed: ${error.message}`);
+      } finally {
+        ui.skinFileInput.value = "";
       }
     });
 
@@ -10093,6 +10594,7 @@ export default function FreeCube2Game(engine) {
         input.resetState?.(true);
         if (player) {
           player.isSprinting = false;
+          player.isCrouching = false;
         }
         setMiningProgress(0);
         saveWorld(false);
@@ -10169,6 +10671,7 @@ export default function FreeCube2Game(engine) {
       if (mode === "paused") {
         input.consumeLook();
         player.isSprinting = false;
+        player.isCrouching = false;
         if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
         setMiningProgress(0);
         updatePlayerVitals(dt);
@@ -10193,6 +10696,7 @@ export default function FreeCube2Game(engine) {
       if (chatOpen) {
         input.consumeLook();
         player.isSprinting = false;
+        player.isCrouching = false;
         if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
         setMiningProgress(0);
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
@@ -10206,6 +10710,7 @@ export default function FreeCube2Game(engine) {
       if (inventoryOpen) {
         input.consumeLook();
         player.isSprinting = false;
+        player.isCrouching = false;
         if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
         setMiningProgress(0);
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
@@ -10233,6 +10738,7 @@ export default function FreeCube2Game(engine) {
       } else {
         input.consumeLook();
         player.isSprinting = false;
+        player.isCrouching = false;
       }
 
       player.ensureSafePosition(world);
@@ -10260,14 +10766,35 @@ export default function FreeCube2Game(engine) {
       const nextMobs = [];
       let removedMob = false;
       for (const mob of mobs) {
-        mob.update(dt, world, player);
+        mob.update(dt, world, player, cycle);
         if (mob.health <= 0) {
           removedMob = true;
           continue;
         }
 
         const def = getMobDef(mob.type);
-        if (!cycle.isNight && def.hostile && isMobInSunlight(mob)) {
+        const activeHostile = !!def.hostile && !(mob.type === "spider" && !cycle.isNight && (mob.provokedTimer || 0) <= 0);
+
+        if (mob.type === "creeper" && activeHostile && (mob.fuseTimer || 0) >= (def.fuseTime || 1.2)) {
+          const blastRadius = def.explosionRadius || 3.6;
+          const dxBlast = player.x - mob.x;
+          const dyBlast = (player.y + PLAYER_HEIGHT * 0.45) - (mob.y + mob.height * 0.45);
+          const dzBlast = player.z - mob.z;
+          const blastDist = Math.hypot(dxBlast, dyBlast, dzBlast);
+          if (blastDist < blastRadius) {
+            const blastScale = 1 - blastDist / blastRadius;
+            const blastNorm = Math.hypot(dxBlast, dzBlast) || 1;
+            player.vx += (dxBlast / blastNorm) * 5.2 * blastScale;
+            player.vz += (dzBlast / blastNorm) * 5.2 * blastScale;
+            player.vy = Math.max(player.vy, 4.6 * blastScale);
+            applyDamage(Math.max(2, Math.ceil(11 * blastScale)), "");
+          }
+          removedMob = true;
+          world.saveDirty = true;
+          continue;
+        }
+
+        if (!cycle.isNight && def.burnsInSunlight && isMobInSunlight(mob)) {
           mob.sunBurnTimer += dt;
           if (mob.sunBurnTimer >= 0.85) {
             mob.sunBurnTimer = 0;
@@ -10299,8 +10826,8 @@ export default function FreeCube2Game(engine) {
             mob.z = nextZ;
           }
         }
-        if (def.hostile && withinHeight && dist < (def.attackReach || 1.15) && mob.attackCooldown <= 0) {
-          mob.attackCooldown = mob.type === "spider" ? 0.75 : mob.type === "creeper" ? 1.05 : 0.9;
+        if (activeHostile && mob.type !== "creeper" && withinHeight && dist < (def.attackReach || 1.15) && mob.attackCooldown <= 0) {
+          mob.attackCooldown = mob.type === "spider" ? 0.75 : 0.9;
           applyDamage(def.attackDamage || 2, "");
         }
         nextMobs.push(mob);
