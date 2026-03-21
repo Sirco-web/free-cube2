@@ -18,7 +18,7 @@ const DEFAULT_SETTINGS = {
   showFps: true,
   viewBobbing: true,
   texturePack: "gigantopack32",
-  mobModels: false
+  mobModels: true
 };
 
 const GAME_MODE = {
@@ -991,6 +991,101 @@ const OBJ_ENTITY_MODEL_PATHS = {
   wolf: "assets/entity/models/wolf.obj"
 };
 
+const MOB_DEFS = {
+  zombie: {
+    radius: 0.34,
+    height: 1.8,
+    maxHealth: 20,
+    speed: 2.2,
+    hostile: true,
+    aggroRange: 14,
+    attackDamage: 2,
+    attackReach: 1.2,
+    meleeDamage: 4,
+    modelHeight: 1.8,
+    yawOffset: Math.PI
+  },
+  sheep: {
+    radius: 0.42,
+    height: 1.35,
+    maxHealth: 8,
+    speed: 1.05,
+    hostile: false,
+    scareRange: 7,
+    meleeDamage: 1,
+    modelHeight: 1.35,
+    yawOffset: Math.PI,
+    shellScale: 1.08,
+    shellTint: [1, 1, 1, 0.38]
+  },
+  chicken: {
+    radius: 0.26,
+    height: 0.9,
+    maxHealth: 4,
+    speed: 1.15,
+    hostile: false,
+    scareRange: 6,
+    meleeDamage: 1,
+    modelHeight: 0.9,
+    yawOffset: Math.PI
+  },
+  creeper: {
+    radius: 0.36,
+    height: 1.7,
+    maxHealth: 20,
+    speed: 1.85,
+    hostile: true,
+    aggroRange: 13,
+    attackDamage: 3,
+    attackReach: 1.3,
+    meleeDamage: 4,
+    modelHeight: 1.7,
+    yawOffset: Math.PI
+  },
+  spider: {
+    radius: 0.72,
+    height: 0.95,
+    maxHealth: 16,
+    speed: 2.15,
+    hostile: true,
+    aggroRange: 14,
+    attackDamage: 2,
+    attackReach: 1.5,
+    meleeDamage: 3,
+    modelHeight: 0.95,
+    yawOffset: Math.PI
+  },
+  villager: {
+    radius: 0.34,
+    height: 1.8,
+    maxHealth: 20,
+    speed: 1.05,
+    hostile: false,
+    scareRange: 8,
+    meleeDamage: 1,
+    modelHeight: 1.8,
+    yawOffset: Math.PI
+  },
+  wolf: {
+    radius: 0.4,
+    height: 1.0,
+    maxHealth: 8,
+    speed: 1.55,
+    hostile: false,
+    scareRange: 6,
+    meleeDamage: 2,
+    modelHeight: 1.0,
+    yawOffset: Math.PI
+  }
+};
+
+const PASSIVE_MOB_TYPES = ["sheep", "chicken", "villager", "wolf"];
+const HOSTILE_MOB_TYPES = ["zombie", "creeper", "spider"];
+
+function getMobDef(type) {
+  return MOB_DEFS[type] || MOB_DEFS.sheep;
+}
+
 class TextureLibrary {
   constructor(engine) {
     this.engine = engine;
@@ -1205,9 +1300,33 @@ function parseObjModel(text) {
     }
   }
 
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (const pos of positions) {
+    if (!pos) continue;
+    minX = Math.min(minX, pos[0]);
+    minY = Math.min(minY, pos[1]);
+    minZ = Math.min(minZ, pos[2]);
+    maxX = Math.max(maxX, pos[0]);
+    maxY = Math.max(maxY, pos[1]);
+    maxZ = Math.max(maxZ, pos[2]);
+  }
+
   return {
     vertices: new Float32Array(vertices),
-    indices: new Uint32Array(indices)
+    indices: new Uint32Array(indices),
+    bounds: {
+      minX: Number.isFinite(minX) ? minX : -0.5,
+      minY: Number.isFinite(minY) ? minY : 0,
+      minZ: Number.isFinite(minZ) ? minZ : -0.5,
+      maxX: Number.isFinite(maxX) ? maxX : 0.5,
+      maxY: Number.isFinite(maxY) ? maxY : 1,
+      maxZ: Number.isFinite(maxZ) ? maxZ : 0.5
+    }
   };
 }
 
@@ -2658,6 +2777,72 @@ function entityWouldCollide(world, x, y, z, radius, height) {
   return false;
 }
 
+function findWalkableY(world, x, z, hintY = SEA_LEVEL + 4, clearance = 2) {
+  const blockX = Math.floor(x);
+  const blockZ = Math.floor(z);
+  const startY = clamp(Math.floor(hintY) + 3, 1, WORLD_HEIGHT - 3);
+  const endY = Math.max(1, startY - 14);
+
+  const canStandAt = (groundY) => {
+    if (!isCollidable(world.getBlock(blockX, groundY, blockZ))) return false;
+    for (let i = 1; i <= clearance; i += 1) {
+      if (isCollidable(world.getBlock(blockX, groundY + i, blockZ))) return false;
+    }
+    return true;
+  };
+
+  for (let y = startY; y >= endY; y -= 1) {
+    if (canStandAt(y)) {
+      return y + 1.001;
+    }
+  }
+
+  for (let y = WORLD_HEIGHT - 3; y >= 1; y -= 1) {
+    if (canStandAt(y)) {
+      return y + 1.001;
+    }
+  }
+  return null;
+}
+
+function rayIntersectAABB(origin, direction, maxDistance, aabb) {
+  let tMin = 0;
+  let tMax = maxDistance;
+  const axes = [
+    ["x", "minX", "maxX"],
+    ["y", "minY", "maxY"],
+    ["z", "minZ", "maxZ"]
+  ];
+
+  for (const [axis, minKey, maxKey] of axes) {
+    const d = direction[axis];
+    const o = origin[axis];
+    const min = aabb[minKey];
+    const max = aabb[maxKey];
+    if (Math.abs(d) < 1e-6) {
+      if (o < min || o > max) {
+        return null;
+      }
+      continue;
+    }
+    const inv = 1 / d;
+    let t0 = (min - o) * inv;
+    let t1 = (max - o) * inv;
+    if (t0 > t1) {
+      const swap = t0;
+      t0 = t1;
+      t1 = swap;
+    }
+    tMin = Math.max(tMin, t0);
+    tMax = Math.min(tMax, t1);
+    if (tMax < tMin) {
+      return null;
+    }
+  }
+
+  return tMin >= 0 && tMin <= maxDistance ? tMin : null;
+}
+
 class Mob {
   constructor(type = "zombie") {
     this.type = type;
@@ -2669,18 +2854,28 @@ class Mob {
     this.vz = 0;
     this.yaw = 0;
     this.onGround = false;
-    this.wanderTimer = 0;
-    this.wanderYaw = 0;
+    this.goalX = null;
+    this.goalZ = null;
+    this.goalTimer = 0;
+    this.grazeTimer = 0;
+    this.fleeTimer = 0;
+    this.jumpCooldown = 0;
     this.attackCooldown = 0;
+    this.hurtTimer = 0;
+    this.stuckTimer = 0;
+    this.lastX = 0;
+    this.lastZ = 0;
+    this.maxHealth = getMobDef(type).maxHealth;
+    this.health = this.maxHealth;
     this.age = 0;
   }
 
   get radius() {
-    return 0.32;
+    return getMobDef(this.type).radius;
   }
 
   get height() {
-    return 1.8;
+    return getMobDef(this.type).height;
   }
 
   setPosition(x, y, z) {
@@ -2690,6 +2885,70 @@ class Mob {
     this.vx = 0;
     this.vy = 0;
     this.vz = 0;
+    this.lastX = x;
+    this.lastZ = z;
+  }
+
+  chooseGoal(world, minDistance = 2.5, maxDistance = 8, preferredYaw = Math.random() * Math.PI * 2) {
+    for (let tries = 0; tries < 14; tries += 1) {
+      const angle = preferredYaw + (Math.random() - 0.5) * Math.PI * 1.2;
+      const dist = minDistance + Math.random() * (maxDistance - minDistance);
+      const targetX = this.x + Math.sin(angle) * dist;
+      const targetZ = this.z + Math.cos(angle) * dist;
+      const targetY = findWalkableY(world, targetX, targetZ, this.y + 1, this.height > 1.2 ? 2 : 1);
+      if (!Number.isFinite(targetY)) continue;
+      if (Math.abs(targetY - this.y) > 2.4) continue;
+      if (entityWouldCollide(world, targetX, targetY, targetZ, this.radius, this.height)) continue;
+      this.goalX = targetX;
+      this.goalZ = targetZ;
+      this.goalTimer = 1.6 + Math.random() * 3.4;
+      return true;
+    }
+    this.goalX = this.x;
+    this.goalZ = this.z;
+    this.goalTimer = 1;
+    return false;
+  }
+
+  takeDamage(amount, sourceX = this.x, sourceZ = this.z) {
+    const dmg = Math.max(0, Number(amount) || 0);
+    if (dmg <= 0 || this.hurtTimer > 0.08) {
+      return false;
+    }
+    this.health = Math.max(0, this.health - dmg);
+    this.hurtTimer = 0.3;
+    this.fleeTimer = getMobDef(this.type).hostile ? 0 : 2.8;
+    const dx = this.x - sourceX;
+    const dz = this.z - sourceZ;
+    const len = Math.hypot(dx, dz) || 1;
+    this.vx += (dx / len) * 3.2;
+    this.vz += (dz / len) * 3.2;
+    this.vy = Math.max(this.vy, 4.8);
+    this.goalX = null;
+    this.goalZ = null;
+    return this.health <= 0;
+  }
+
+  _forwardBlocked(world, moveX, moveZ) {
+    const len = Math.hypot(moveX, moveZ);
+    if (len < 0.001) return "";
+    const dirX = moveX / len;
+    const dirZ = moveZ / len;
+    const probeX = this.x + dirX * (this.radius + 0.22);
+    const probeZ = this.z + dirZ * (this.radius + 0.22);
+    const footY = Math.floor(this.y + 0.05);
+    const headY = Math.floor(this.y + Math.min(this.height - 0.2, 1.1));
+    const frontFeet = world.getBlock(Math.floor(probeX), footY, Math.floor(probeZ));
+    const frontHead = world.getBlock(Math.floor(probeX), headY, Math.floor(probeZ));
+    const standY = findWalkableY(world, probeX, probeZ, this.y + 0.8, this.height > 1.2 ? 2 : 1);
+    const dropTooFar = standY !== null && standY < this.y - 1.15;
+    if (isCollidable(frontFeet) || isCollidable(frontHead)) {
+      return "obstacle";
+    }
+    if (dropTooFar || standY === null) {
+      return "ledge";
+    }
+    return "";
   }
 
   resolveAxis(world, axis, delta) {
@@ -2733,33 +2992,81 @@ class Mob {
   }
 
   update(dt, world, player) {
+    const def = getMobDef(this.type);
     this.age += dt;
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
-    this.wanderTimer -= dt;
-    if (this.wanderTimer <= 0) {
-      const rx = Math.floor(this.x);
-      const rz = Math.floor(this.z);
-      this.wanderTimer = 1.2 + random3(rx, Math.floor(this.y), rz, world.seed + 900) * 2.2;
-      this.wanderYaw = random2(rx, rz, world.seed + 901) * Math.PI * 2;
-    }
+    this.goalTimer -= dt;
+    this.grazeTimer = Math.max(0, this.grazeTimer - dt);
+    this.fleeTimer = Math.max(0, this.fleeTimer - dt);
+    this.hurtTimer = Math.max(0, this.hurtTimer - dt);
+    this.jumpCooldown = Math.max(0, this.jumpCooldown - dt);
 
-    // Mild bias toward the player if close, just to feel alive.
     const dxp = player.x - this.x;
     const dzp = player.z - this.z;
     const dist = Math.hypot(dxp, dzp);
-    const chase = this.type === "zombie" && dist < 12 ? 0.55 : 0;
-    const targetYaw = chase > 0 ? Math.atan2(dxp, dzp) : this.wanderYaw;
-    this.yaw = lerpAngle(this.yaw, targetYaw, clamp(dt * 3, 0, 1));
+    const isHostile = !!def.hostile;
+    const shouldFlee = !isHostile && (this.fleeTimer > 0 || dist < (def.scareRange || 0));
+    let targetX = this.goalX;
+    let targetZ = this.goalZ;
+    let desiredSpeed = 0;
+    let preferredYaw = this.yaw;
 
-    const speed = chase > 0 ? 2.2 : this.type === "sheep" ? 1.05 : 1.35;
-    const sin = Math.sin(this.yaw);
-    const cos = Math.cos(this.yaw);
-    const mvx = sin * speed;
-    const mvz = cos * speed;
+    if (isHostile && dist < def.aggroRange) {
+      targetX = player.x;
+      targetZ = player.z;
+      desiredSpeed = def.speed;
+      preferredYaw = Math.atan2(dxp, dzp);
+      this.goalTimer = Math.max(this.goalTimer, 0.2);
+    } else if (shouldFlee) {
+      const awayX = this.x - dxp;
+      const awayZ = this.z - dzp;
+      preferredYaw = Math.atan2(awayX, awayZ);
+      if (!Number.isFinite(targetX) || !Number.isFinite(targetZ) || this.goalTimer <= 0) {
+        this.chooseGoal(world, 5, 10, preferredYaw);
+        targetX = this.goalX;
+        targetZ = this.goalZ;
+      }
+      desiredSpeed = def.speed * 1.15;
+    } else {
+      const reached = Number.isFinite(targetX) && Number.isFinite(targetZ) && Math.hypot(targetX - this.x, targetZ - this.z) < 0.9;
+      if (!Number.isFinite(targetX) || !Number.isFinite(targetZ) || this.goalTimer <= 0 || reached) {
+        this.chooseGoal(world, 1.8, 7.5, this.yaw + (Math.random() - 0.5) * Math.PI);
+        targetX = this.goalX;
+        targetZ = this.goalZ;
+        this.grazeTimer = Math.random() < 0.28 ? 0.6 + Math.random() * 1.6 : 0;
+      }
+      desiredSpeed = this.grazeTimer > 0 ? 0 : def.speed * 0.9;
+    }
 
-    const accel = this.onGround ? 10 : 3;
-    this.vx = lerp(this.vx, mvx, clamp(accel * dt, 0, 1));
-    this.vz = lerp(this.vz, mvz, clamp(accel * dt, 0, 1));
+    if (Number.isFinite(targetX) && Number.isFinite(targetZ)) {
+      preferredYaw = Math.atan2(targetX - this.x, targetZ - this.z);
+    }
+
+    this.yaw = lerpAngle(this.yaw, preferredYaw, clamp(dt * 5, 0, 1));
+
+    let moveX = Math.sin(this.yaw) * desiredSpeed;
+    let moveZ = Math.cos(this.yaw) * desiredSpeed;
+    const blockState = this._forwardBlocked(world, moveX, moveZ);
+    if (blockState) {
+      if (blockState === "obstacle" && this.onGround && this.jumpCooldown <= 0) {
+        this.vy = Math.max(this.vy, 6.1);
+        this.jumpCooldown = 0.6;
+      } else if (!isHostile || blockState === "ledge") {
+        this.chooseGoal(world, 2.2, 6.5, this.yaw + (Math.random() < 0.5 ? -1 : 1) * (0.9 + Math.random() * 0.8));
+      } else {
+        this.yaw += (Math.random() < 0.5 ? -1 : 1) * 0.8;
+      }
+      moveX *= 0.3;
+      moveZ *= 0.3;
+    }
+
+    const accel = this.onGround ? 11 : 4;
+    this.vx = lerp(this.vx, moveX, clamp(accel * dt, 0, 1));
+    this.vz = lerp(this.vz, moveZ, clamp(accel * dt, 0, 1));
+    if (desiredSpeed <= 0.001 && this.onGround) {
+      this.vx = lerp(this.vx, 0, clamp(dt * 10, 0, 1));
+      this.vz = lerp(this.vz, 0, clamp(dt * 10, 0, 1));
+    }
 
     // Gravity.
     this.vy -= 22 * dt;
@@ -2776,13 +3083,18 @@ class Mob {
     this.y += this.vy * dt;
     this.resolveAxis(world, "y", this.vy * dt);
 
-    // Small step-up attempt if we're blocked and grounded.
-    if (this.onGround && (Math.abs(this.vx) + Math.abs(this.vz)) > 0.2) {
-      const tryY = this.y + 0.35;
-      if (!entityWouldCollide(world, this.x, tryY, this.z, this.radius, this.height)) {
-        this.y = tryY;
+    const moved = Math.hypot(this.x - this.lastX, this.z - this.lastZ);
+    if (desiredSpeed > 0.2 && moved < 0.02) {
+      this.stuckTimer += dt;
+      if (this.stuckTimer > 0.75) {
+        this.chooseGoal(world, 2.2, 6.8, this.yaw + (Math.random() < 0.5 ? -1 : 1) * 1.2);
+        this.stuckTimer = 0;
       }
+    } else {
+      this.stuckTimer = 0;
     }
+    this.lastX = this.x;
+    this.lastZ = this.z;
 
     if (this.y < -40) {
       const spawn = world.findSpawn(Math.floor(player.x), Math.floor(player.z));
@@ -4209,8 +4521,8 @@ class WebGLVoxelRenderer {
       item.record.transparent.draw();
     }
 
-    this._objEntities.draw(this.proj, this.view, this.entities || []);
     if (this.settings?.mobModels !== false) {
+      this._objEntities.draw(this.proj, this.view, this.entities || []);
       this._zombie.draw(this.proj, this.view, this.entities || []);
     }
     this._entities.draw(this.proj, this.view, this.entities || []);
@@ -4398,7 +4710,7 @@ class WebGLVoxelRenderer {
         const isItem = Number.isFinite(e.itemType ?? e.blockType);
         const isZombie = !isItem && e.type === "zombie";
         const hasObjModel = !isItem && this.objModelLibrary?.hasModel(e.type);
-        if (hasObjModel) {
+        if (hasObjModel && this.settings?.mobModels !== false) {
           continue;
         }
         if (isZombie && this.settings?.mobModels !== false) {
@@ -4785,14 +5097,23 @@ class WebGLVoxelRenderer {
       uniform mat4 uView;
       uniform vec3 uPos;
       uniform float uYaw;
+      uniform float uScale;
+      uniform vec2 uCenterXZ;
+      uniform float uMinY;
+      uniform float uYOffset;
       out vec2 vUV;
       void main(){
         float s = sin(uYaw);
         float c = cos(uYaw);
+        vec3 local = vec3(
+          (aPos.x - uCenterXZ.x) * uScale,
+          (aPos.y - uMinY) * uScale + uYOffset,
+          (aPos.z - uCenterXZ.y) * uScale
+        );
         vec3 p = vec3(
-          aPos.x * c - aPos.z * s,
-          aPos.y,
-          aPos.x * s + aPos.z * c
+          local.x * c - local.z * s,
+          local.y,
+          local.x * s + local.z * c
         ) + uPos;
         gl_Position = uProj * uView * vec4(p, 1.0);
         vUV = aUV;
@@ -4801,10 +5122,11 @@ class WebGLVoxelRenderer {
       precision highp float;
       precision highp sampler2D;
       uniform sampler2D uTex;
+      uniform vec4 uColor;
       in vec2 vUV;
       out vec4 outColor;
       void main(){
-        vec4 col = texture(uTex, vUV);
+        vec4 col = texture(uTex, vUV) * uColor;
         if (col.a < 0.12) discard;
         outColor = col;
       }`
@@ -4814,7 +5136,12 @@ class WebGLVoxelRenderer {
     const uView = gl.getUniformLocation(program, "uView");
     const uPos = gl.getUniformLocation(program, "uPos");
     const uYaw = gl.getUniformLocation(program, "uYaw");
+    const uScale = gl.getUniformLocation(program, "uScale");
+    const uCenterXZ = gl.getUniformLocation(program, "uCenterXZ");
+    const uMinY = gl.getUniformLocation(program, "uMinY");
+    const uYOffset = gl.getUniformLocation(program, "uYOffset");
     const uTex = gl.getUniformLocation(program, "uTex");
+    const uColor = gl.getUniformLocation(program, "uColor");
 
     const buffers = new Map();
 
@@ -4840,9 +5167,26 @@ class WebGLVoxelRenderer {
       gl.enableVertexAttribArray(1);
       gl.vertexAttribPointer(1, 2, gl.FLOAT, false, stride, 3 * 4);
       gl.bindVertexArray(null);
-      const record = { vao, vbo, ibo, indexCount: model.indices.length };
+      const record = { vao, vbo, ibo, indexCount: model.indices.length, bounds: model.bounds };
       buffers.set(type, record);
       return record;
+    };
+
+    const drawModel = (buffer, tex, entity, scaleMul = 1, color = [1, 1, 1, 1], yOffset = 0) => {
+      const def = getMobDef(entity.type);
+      const bounds = buffer.bounds || { minX: -0.5, minY: 0, minZ: -0.5, maxX: 0.5, maxY: 1, maxZ: 0.5 };
+      const modelHeight = Math.max(0.01, bounds.maxY - bounds.minY);
+      const scale = ((def.modelHeight || def.height || 1) / modelHeight) * scaleMul;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform3f(uPos, entity.x, entity.y, entity.z);
+      gl.uniform1f(uYaw, (entity.yaw || 0) + (def.yawOffset || 0));
+      gl.uniform1f(uScale, scale);
+      gl.uniform2f(uCenterXZ, (bounds.minX + bounds.maxX) * 0.5, (bounds.minZ + bounds.maxZ) * 0.5);
+      gl.uniform1f(uMinY, bounds.minY);
+      gl.uniform1f(uYOffset, yOffset);
+      gl.uniform4f(uColor, color[0], color[1], color[2], color[3]);
+      gl.bindVertexArray(buffer.vao);
+      gl.drawElements(gl.TRIANGLES, buffer.indexCount, gl.UNSIGNED_INT, 0);
     };
 
     const draw = (proj, view, entities) => {
@@ -4852,7 +5196,6 @@ class WebGLVoxelRenderer {
       gl.uniformMatrix4fv(uView, false, view);
       gl.activeTexture(gl.TEXTURE0);
       gl.uniform1i(uTex, 0);
-      gl.disable(gl.BLEND);
       gl.depthMask(true);
 
       for (const e of entities) {
@@ -4863,11 +5206,21 @@ class WebGLVoxelRenderer {
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const buffer = getBuffer(e.type);
         if (!buffer || !tex) continue;
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.uniform3f(uPos, e.x, e.y, e.z);
-        gl.uniform1f(uYaw, (e.yaw || 0) + Math.PI);
-        gl.bindVertexArray(buffer.vao);
-        gl.drawElements(gl.TRIANGLES, buffer.indexCount, gl.UNSIGNED_INT, 0);
+        const def = getMobDef(e.type);
+        const walkFactor = clamp(Math.hypot(e.vx || 0, e.vz || 0) / Math.max(0.1, def.speed || 1), 0, 1);
+        const bob = Math.sin((e.age || 0) * 8) * 0.02 * walkFactor;
+        const hurtTint = e.hurtTimer > 0 ? [1, 0.74, 0.74, 1] : [1, 1, 1, 1];
+
+        drawModel(buffer, tex, e, 1, hurtTint, bob);
+
+        if (e.type === "sheep" && def.shellScale) {
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          gl.depthMask(false);
+          drawModel(buffer, tex, e, def.shellScale, def.shellTint || [1, 1, 1, 0.42], bob + 0.01);
+          gl.depthMask(true);
+          gl.disable(gl.BLEND);
+        }
       }
 
       gl.bindVertexArray(null);
@@ -4925,6 +5278,7 @@ export default function FreeCube2Game(engine) {
   let fpsTimer = 0;
   let fpsSmoothed = 0;
   let currentTarget = null;
+  let currentEntityTarget = null;
   let inventoryCursor = { type: BLOCK.AIR, count: 0 };
   let inventoryContext = "inventory";
   let inventoryCraftTypes = new Uint8Array(CRAFT_GRID_SMALL);
@@ -5238,7 +5592,7 @@ export default function FreeCube2Game(engine) {
               </div>
               <div class="fc-field fc-check">
                 <input id="fc-mob-models" type="checkbox" />
-                <label for="fc-mob-models">3D zombie model (experimental)</label>
+                <label for="fc-mob-models">3D mob models</label>
               </div>
               <div class="fc-field fc-check">
                 <input id="fc-inv" type="checkbox" />
@@ -6096,6 +6450,89 @@ export default function FreeCube2Game(engine) {
     spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4, 0.55);
   }
 
+  function getMobTargetAABB(mob) {
+    return {
+      minX: mob.x - mob.radius,
+      maxX: mob.x + mob.radius,
+      minY: mob.y,
+      maxY: mob.y + mob.height,
+      minZ: mob.z - mob.radius,
+      maxZ: mob.z + mob.radius
+    };
+  }
+
+  function getHeldAttackDamage(itemType = getSelectedHeldItemType()) {
+    if (isCreativeMode()) return 999;
+    switch (itemType) {
+      case ITEM.WOODEN_SWORD:
+        return 4;
+      case ITEM.WOODEN_AXE:
+        return 3;
+      case ITEM.WOODEN_PICKAXE:
+        return 2;
+      case ITEM.WOODEN_SHOVEL:
+        return 1.5;
+      default:
+        return 1;
+    }
+  }
+
+  function addXp(amount) {
+    if (!player) return;
+    let xp = Math.max(0, Number(amount) || 0);
+    if (xp <= 0) return;
+    player.xp += xp;
+    while (player.xp >= 1) {
+      player.xp -= 1;
+      player.xpLevel += 1;
+    }
+    if (world) {
+      world.saveDirty = true;
+    }
+    hud.last = null;
+  }
+
+  function findTargetMob(blockTarget = null) {
+    if (!player || !mobs || mobs.length === 0) return null;
+    const origin = player.getEyePosition();
+    const direction = player.getLookVector();
+    const maxDistance = clamp(blockTarget ? blockTarget.distance - 0.05 : MAX_REACH, 0, MAX_REACH);
+    if (maxDistance <= 0.01) return null;
+
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const mob of mobs) {
+      if (!mob || mob.health <= 0) continue;
+      const hit = rayIntersectAABB(origin, direction, bestDistance, getMobTargetAABB(mob));
+      if (hit === null) continue;
+      bestDistance = hit;
+      best = { mob, distance: hit };
+    }
+    return best;
+  }
+
+  function removeMob(mob) {
+    const index = mobs.indexOf(mob);
+    if (index >= 0) {
+      mobs.splice(index, 1);
+    }
+  }
+
+  function attackTargetMob() {
+    if (!currentEntityTarget?.mob || !player) return false;
+    const mob = currentEntityTarget.mob;
+    const killed = mob.takeDamage(getHeldAttackDamage(), player.x, player.z);
+    player.breakCooldown = Math.max(player.breakCooldown, isCreativeMode() ? 0.08 : 0.24);
+    if (killed) {
+      addXp(getMobDef(mob.type).hostile ? 0.35 : 0.18);
+      removeMob(mob);
+    }
+    if (world) {
+      world.saveDirty = true;
+    }
+    return true;
+  }
+
   function updateItems(dt) {
     if (!items || items.length === 0) return;
     const gravity = 18;
@@ -6260,8 +6697,10 @@ export default function FreeCube2Game(engine) {
       const dist = 6 + random2(tries, tries * 13, world.seed + 1212) * 10;
       const x = base.x + Math.sin(angle) * dist;
       const z = base.z + Math.cos(angle) * dist;
-      const col = world.terrain.describeColumn(Math.floor(x), Math.floor(z));
-      const y = col.height + 1.001;
+      const spawn = world.findSpawn(Math.floor(x), Math.floor(z));
+      const y = findWalkableY(world, x, z, spawn.y + 1, mob.height > 1.2 ? 2 : 1);
+      if (!Number.isFinite(y)) continue;
+      if (world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === BLOCK.WATER) continue;
       if (!entityWouldCollide(world, x, y, z, mob.radius, mob.height)) {
         mob.setPosition(x, y, z);
         mobs.push(mob);
@@ -6290,24 +6729,26 @@ export default function FreeCube2Game(engine) {
     let hostiles = 0;
     let passives = 0;
     for (const m of mobs) {
-      if (m.type === "zombie") hostiles += 1;
+      if (getMobDef(m.type).hostile) hostiles += 1;
       else passives += 1;
     }
 
     if (isNight()) {
       if (hostiles < 10) {
-        spawnMobNearPlayer("zombie");
+        const hostileType = HOSTILE_MOB_TYPES[Math.floor(random3(Math.floor(player.x), Math.floor(worldTime * 10), Math.floor(player.z), world.seed + 809) * HOSTILE_MOB_TYPES.length)] || "zombie";
+        spawnMobNearPlayer(hostileType);
         if (hostiles < 6 && random2(Math.floor(player.x), Math.floor(player.z), world.seed + 811) > 0.6) {
-          spawnMobNearPlayer("zombie");
+          spawnMobNearPlayer(hostileType);
         }
       }
     } else {
       if (passives < 8) {
-        spawnMobNearPlayer("sheep");
+        const passiveType = PASSIVE_MOB_TYPES[Math.floor(random3(Math.floor(player.x), Math.floor(worldTime * 7), Math.floor(player.z), world.seed + 913) * PASSIVE_MOB_TYPES.length)] || "sheep";
+        spawnMobNearPlayer(passiveType);
       }
       // Despawn far hostiles during the day.
       mobs = mobs.filter((m) => {
-        if (m.type !== "zombie") return true;
+        if (!getMobDef(m.type).hostile) return true;
         const dx = m.x - player.x;
         const dz = m.z - player.z;
         return dx * dx + dz * dz < 46 * 46;
@@ -6321,7 +6762,7 @@ export default function FreeCube2Game(engine) {
     const args = parts;
 
     if (!cmd || cmd === "help") {
-      pushChatLine("Commands: /help, /give <item> [count], /gm <survival|creative>, /tp x y z, /rd <2-6>, /summon <zombie> [count], /boss <name> <0-1>, /boss off, /clear", "sys");
+      pushChatLine("Commands: /help, /give <item> [count], /gm <survival|creative>, /tp x y z, /rd <2-6>, /summon <mob> [count], /boss <name> <0-1>, /boss off, /clear", "sys");
       return;
     }
 
@@ -6828,6 +7269,7 @@ export default function FreeCube2Game(engine) {
     mining.progress = 0;
     input.pointerLockEnabled = false;
     currentTarget = null;
+    currentEntityTarget = null;
     inventoryOpen = false;
     inventoryContext = "inventory";
     inventoryCursor.type = BLOCK.AIR;
@@ -6859,6 +7301,8 @@ export default function FreeCube2Game(engine) {
     items = [];
     mining.key = null;
     mining.progress = 0;
+    currentTarget = null;
+    currentEntityTarget = null;
     inventoryOpen = false;
     inventoryContext = "inventory";
     inventoryCursor.type = BLOCK.AIR;
@@ -6925,6 +7369,13 @@ export default function FreeCube2Game(engine) {
 
   function updateMining(dt) {
     if (!input.locked || performance.now() < input.actionUnlockAt) {
+      mining.key = null;
+      mining.progress = 0;
+      setMiningProgress(0);
+      return;
+    }
+
+    if (currentEntityTarget) {
       mining.key = null;
       mining.progress = 0;
       setMiningProgress(0);
@@ -7021,6 +7472,14 @@ export default function FreeCube2Game(engine) {
       return;
     }
     if (input.buttonsDown[2]) tryPlaceBlock();
+  }
+
+  function updateCombat() {
+    if (!input.locked || performance.now() < input.actionUnlockAt) return;
+    if (!currentEntityTarget?.mob) return;
+    if (input.consumeMousePress(0)) {
+      attackTargetMob();
+    }
   }
 
   function updateLoading(dt) {
@@ -7476,8 +7935,11 @@ export default function FreeCube2Game(engine) {
         glRenderer.updateCamera();
       }
 
-      currentTarget = input.locked ? world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH) : null;
+      const blockTarget = input.locked ? world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH) : null;
+      currentEntityTarget = input.locked ? findTargetMob(blockTarget) : null;
+      currentTarget = currentEntityTarget ? null : blockTarget;
       if (useWebGL && glRenderer) glRenderer.setTargetBlock(currentTarget);
+      updateCombat();
       updateMining(dt);
       updateInteractions();
       updateItems(dt);
@@ -7489,9 +7951,23 @@ export default function FreeCube2Game(engine) {
         const dx = mob.x - player.x;
         const dz = mob.z - player.z;
         const dist = Math.hypot(dx, dz);
-        if (mob.type === "zombie" && dist < 1.15 && mob.attackCooldown <= 0) {
-          mob.attackCooldown = 0.9;
-          applyDamage(2, "");
+        const def = getMobDef(mob.type);
+        const withinHeight = player.y < mob.y + mob.height && player.y + PLAYER_HEIGHT > mob.y;
+        const minDist = PLAYER_RADIUS + mob.radius;
+        if (withinHeight && dist < minDist) {
+          const nx = dist > 0.001 ? dx / dist : Math.sin(player.yaw || 0);
+          const nz = dist > 0.001 ? dz / dist : Math.cos(player.yaw || 0);
+          const push = minDist - dist + 0.001;
+          const nextX = mob.x + nx * push;
+          const nextZ = mob.z + nz * push;
+          if (!entityWouldCollide(world, nextX, mob.y, nextZ, mob.radius, mob.height)) {
+            mob.x = nextX;
+            mob.z = nextZ;
+          }
+        }
+        if (def.hostile && withinHeight && dist < (def.attackReach || 1.15) && mob.attackCooldown <= 0) {
+          mob.attackCooldown = mob.type === "spider" ? 0.75 : mob.type === "creeper" ? 1.05 : 0.9;
+          applyDamage(def.attackDamage || 2, "");
         }
       }
       if (useWebGL && glRenderer) {
