@@ -1,4 +1,4 @@
-const GAME_VERSION = "5.0.0";
+const GAME_VERSION = "5.6.2";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
 const WORLD_SEED = 124578;
@@ -22,10 +22,13 @@ const DEFAULT_SETTINGS = {
   graphicsMode: "fast",
   chunkLagFix: true,
   fullscreen: false,
+  masterVolume: 1,
+  musicVolume: 0.65,
   texturePack: "default",
   mobModels: true,
-  playerSkinPreset: "hoodie",
-  playerSkinDataUrl: ""
+  playerSkinPreset: "steve_large",
+  playerSkinDataUrl: "",
+  customResourcePacks: []
 };
 
 const LOADING_CHUNK_GEN_LIMIT = 4;
@@ -603,6 +606,7 @@ const ITEM = {
   WOODEN_AXE: 34,
   WOODEN_SHOVEL: 35,
   WOODEN_SWORD: 36,
+  WOODEN_HOE: 37,
   LEATHER_HELMET: 40,
   LEATHER_CHESTPLATE: 41,
   LEATHER_LEGGINGS: 42,
@@ -619,7 +623,19 @@ const ITEM = {
   COAL: 53,
   DIAMOND: 54,
   EMERALD: 55,
-  REDSTONE_DUST: 56
+  REDSTONE_DUST: 56,
+  IRON_INGOT: 57,
+  GOLD_INGOT: 58,
+  IRON_PICKAXE: 59,
+  IRON_AXE: 60,
+  IRON_SHOVEL: 61,
+  IRON_SWORD: 62,
+  IRON_HOE: 63,
+  DIAMOND_PICKAXE: 64,
+  DIAMOND_AXE: 65,
+  DIAMOND_SHOVEL: 66,
+  DIAMOND_SWORD: 67,
+  DIAMOND_HOE: 68
 };
 
 const BLOCK_BREAK_TIME = {
@@ -654,11 +670,13 @@ function getToolBreakMultiplier(itemType, blockType) {
   if (!tool) {
     return 1;
   }
+  const tier = clamp(Number(getItemInfo(itemType)?.tier) || 1, 1, 3);
+  const tierBoost = tier === 3 ? 1.75 : tier === 2 ? 1.35 : 1;
   if (tool === "shovel" && (blockType === BLOCK.DIRT || blockType === BLOCK.GRASS || blockType === BLOCK.SAND)) {
-    return 2.4;
+    return 2.4 * tierBoost;
   }
   if (tool === "axe" && (blockType === BLOCK.WOOD || blockType === BLOCK.PLANKS || blockType === BLOCK.CRAFTING_TABLE)) {
-    return 2.2;
+    return 2.2 * tierBoost;
   }
   if (
     tool === "pickaxe" &&
@@ -674,10 +692,10 @@ function getToolBreakMultiplier(itemType, blockType) {
       blockType === BLOCK.EMERALD_ORE
     )
   ) {
-    return 2.6;
+    return 2.6 * tierBoost;
   }
   if (tool === "sword" && blockType === BLOCK.LEAVES) {
-    return 2;
+    return 2 * tierBoost;
   }
   return 1;
 }
@@ -1113,11 +1131,60 @@ const RESOURCE_PACK_META = {
   }
 };
 
+const CUSTOM_RESOURCE_PACK_PREFIX = "custom:";
+
 const ARMOR_SLOT_KEYS = ["head", "chest", "legs", "feet"];
 const ARMOR_SLOT_LABELS = ["Helmet", "Chestplate", "Leggings", "Boots"];
 
 function svgDataUrl(svg) {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function normalizeAssetPath(path) {
+  if (typeof path !== "string" || !path) {
+    return path;
+  }
+  if (/^(data:|blob:|https?:|\.\/|\.\.\/)/i.test(path)) {
+    return path;
+  }
+  return `./${path.replace(/^\/+/, "")}`;
+}
+
+function isCustomResourcePackId(packName) {
+  return typeof packName === "string" && packName.startsWith(CUSTOM_RESOURCE_PACK_PREFIX);
+}
+
+function getCustomResourcePacks(settingsState = DEFAULT_SETTINGS) {
+  return Array.isArray(settingsState?.customResourcePacks)
+    ? settingsState.customResourcePacks.filter((pack) => pack && typeof pack === "object" && typeof pack.id === "string")
+    : [];
+}
+
+function getCustomResourcePack(settingsState = DEFAULT_SETTINGS, packId = settingsState?.texturePack) {
+  if (!isCustomResourcePackId(packId)) {
+    return null;
+  }
+  return getCustomResourcePacks(settingsState).find((pack) => pack.id === packId) || null;
+}
+
+function getAvailableResourcePackNames(settingsState = DEFAULT_SETTINGS) {
+  const packNames = new Set(Object.keys(RESOURCE_PACK_META));
+  for (const pack of getCustomResourcePacks(settingsState)) {
+    packNames.add(pack.id);
+  }
+  return Array.from(packNames);
+}
+
+function resolveResourcePackAsset(path, settingsState = DEFAULT_SETTINGS) {
+  const normalized = normalizeAssetPath(path);
+  const customPack = getCustomResourcePack(settingsState);
+  if (customPack?.assets && typeof customPack.assets === "object") {
+    const override = customPack.assets[normalized];
+    if (typeof override === "string" && override) {
+      return override;
+    }
+  }
+  return normalized;
 }
 
 const ITEM_TEXTURE_SOURCES = {
@@ -1135,6 +1202,7 @@ const ITEM_TEXTURE_SOURCES = {
   [ITEM.WOODEN_AXE]: "PNG/Items/axe_bronze.png",
   [ITEM.WOODEN_SHOVEL]: "PNG/Items/shovel_bronze.png",
   [ITEM.WOODEN_SWORD]: "PNG/Items/sword_bronze.png",
+  [ITEM.WOODEN_HOE]: "PNG/Items/hoe_bronze.png",
   [ITEM.LEATHER_HELMET]: svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
       <rect width="16" height="16" fill="none"/>
@@ -1261,6 +1329,18 @@ const ITEM_TEXTURE_SOURCES = {
   [ITEM.COAL]: "PNG/Items/ore_coal.png",
   [ITEM.DIAMOND]: "PNG/Items/ore_diamond.png",
   [ITEM.EMERALD]: "PNG/Items/ore_emerald.png",
+  [ITEM.IRON_INGOT]: "PNG/Items/ore_iron.png",
+  [ITEM.GOLD_INGOT]: "PNG/Items/ore_gold.png",
+  [ITEM.IRON_PICKAXE]: "PNG/Items/pick_iron.png",
+  [ITEM.IRON_AXE]: "PNG/Items/axe_iron.png",
+  [ITEM.IRON_SHOVEL]: "PNG/Items/shovel_iron.png",
+  [ITEM.IRON_SWORD]: "PNG/Items/sword_iron.png",
+  [ITEM.IRON_HOE]: "PNG/Items/hoe_iron.png",
+  [ITEM.DIAMOND_PICKAXE]: "PNG/Items/pick_diamond.png",
+  [ITEM.DIAMOND_AXE]: "PNG/Items/axe_diamond.png",
+  [ITEM.DIAMOND_SHOVEL]: "PNG/Items/shovel_diamond.png",
+  [ITEM.DIAMOND_SWORD]: "PNG/Items/sword_diamond.png",
+  [ITEM.DIAMOND_HOE]: "PNG/Items/hoe_diamond.png",
   [ITEM.REDSTONE_DUST]: svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
       <rect width="16" height="16" fill="none"/>
@@ -1282,6 +1362,7 @@ const ITEM_INFO = {
   [ITEM.WOODEN_AXE]: { name: "Wooden Axe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_AXE], tool: "axe" },
   [ITEM.WOODEN_SHOVEL]: { name: "Wooden Shovel", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_SHOVEL], tool: "shovel" },
   [ITEM.WOODEN_SWORD]: { name: "Wooden Sword", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_SWORD], tool: "sword" },
+  [ITEM.WOODEN_HOE]: { name: "Wooden Hoe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.WOODEN_HOE], tool: "hoe", tier: 1 },
   [ITEM.LEATHER_HELMET]: { name: "Leather Helmet", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_HELMET], armorSlot: "head", armor: 1 },
   [ITEM.LEATHER_CHESTPLATE]: { name: "Leather Chestplate", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_CHESTPLATE], armorSlot: "chest", armor: 3 },
   [ITEM.LEATHER_LEGGINGS]: { name: "Leather Leggings", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.LEATHER_LEGGINGS], armorSlot: "legs", armor: 2 },
@@ -1298,11 +1379,23 @@ const ITEM_INFO = {
   [ITEM.COAL]: { name: "Coal", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.COAL] },
   [ITEM.DIAMOND]: { name: "Diamond", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND] },
   [ITEM.EMERALD]: { name: "Emerald", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.EMERALD] },
+  [ITEM.IRON_INGOT]: { name: "Iron Ingot", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_INGOT] },
+  [ITEM.GOLD_INGOT]: { name: "Gold Ingot", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.GOLD_INGOT] },
+  [ITEM.IRON_PICKAXE]: { name: "Iron Pickaxe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_PICKAXE], tool: "pickaxe", tier: 2 },
+  [ITEM.IRON_AXE]: { name: "Iron Axe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_AXE], tool: "axe", tier: 2 },
+  [ITEM.IRON_SHOVEL]: { name: "Iron Shovel", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_SHOVEL], tool: "shovel", tier: 2 },
+  [ITEM.IRON_SWORD]: { name: "Iron Sword", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_SWORD], tool: "sword", tier: 2 },
+  [ITEM.IRON_HOE]: { name: "Iron Hoe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.IRON_HOE], tool: "hoe", tier: 2 },
+  [ITEM.DIAMOND_PICKAXE]: { name: "Diamond Pickaxe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND_PICKAXE], tool: "pickaxe", tier: 3 },
+  [ITEM.DIAMOND_AXE]: { name: "Diamond Axe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND_AXE], tool: "axe", tier: 3 },
+  [ITEM.DIAMOND_SHOVEL]: { name: "Diamond Shovel", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND_SHOVEL], tool: "shovel", tier: 3 },
+  [ITEM.DIAMOND_SWORD]: { name: "Diamond Sword", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND_SWORD], tool: "sword", tier: 3 },
+  [ITEM.DIAMOND_HOE]: { name: "Diamond Hoe", maxStack: 1, texture: ITEM_TEXTURE_SOURCES[ITEM.DIAMOND_HOE], tool: "hoe", tier: 3 },
   [ITEM.REDSTONE_DUST]: { name: "Redstone Dust", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.REDSTONE_DUST] }
 };
 
 function getAllItemTexturePaths() {
-  return Object.values(ITEM_TEXTURE_SOURCES);
+  return Object.values(ITEM_TEXTURE_SOURCES).map((path) => normalizeAssetPath(path));
 }
 
 function getItemInfo(itemType) {
@@ -1437,6 +1530,19 @@ function resolveItemTypeByName(name) {
     wooden_axe: ITEM.WOODEN_AXE,
     wooden_shovel: ITEM.WOODEN_SHOVEL,
     wooden_sword: ITEM.WOODEN_SWORD,
+    wooden_hoe: ITEM.WOODEN_HOE,
+    iron_ingot: ITEM.IRON_INGOT,
+    gold_ingot: ITEM.GOLD_INGOT,
+    iron_pickaxe: ITEM.IRON_PICKAXE,
+    iron_axe: ITEM.IRON_AXE,
+    iron_shovel: ITEM.IRON_SHOVEL,
+    iron_sword: ITEM.IRON_SWORD,
+    iron_hoe: ITEM.IRON_HOE,
+    diamond_pickaxe: ITEM.DIAMOND_PICKAXE,
+    diamond_axe: ITEM.DIAMOND_AXE,
+    diamond_shovel: ITEM.DIAMOND_SHOVEL,
+    diamond_sword: ITEM.DIAMOND_SWORD,
+    diamond_hoe: ITEM.DIAMOND_HOE,
     leather_helmet: ITEM.LEATHER_HELMET,
     leather_chestplate: ITEM.LEATHER_CHESTPLATE,
     leather_leggings: ITEM.LEATHER_LEGGINGS,
@@ -1470,27 +1576,36 @@ function getBlockTexturePath(blockType, faceId, settingsState = DEFAULT_SETTINGS
   if (!entry) {
     return null;
   }
-  return faceId === "top" ? entry.top : faceId === "bottom" ? entry.bottom : entry.side;
+  const rawPath = faceId === "top" ? entry.top : faceId === "bottom" ? entry.bottom : entry.side;
+  return resolveResourcePackAsset(rawPath, settingsState);
 }
 
 function getAllBlockTexturePaths() {
   const paths = new Set();
   for (const entry of Object.values(BLOCK_TEXTURE_PATHS)) {
     for (const path of Object.values(entry || {})) {
-      if (path) paths.add(path);
+      if (path) paths.add(normalizeAssetPath(path));
     }
   }
   for (const pack of Object.values(TEXTURE_PACKS)) {
     for (const entry of Object.values(pack || {})) {
       for (const path of Object.values(entry || {})) {
-        if (path) paths.add(path);
+        if (path) paths.add(normalizeAssetPath(path));
       }
     }
   }
   return Array.from(paths);
 }
 
-function getResourcePackMeta(packName) {
+function getResourcePackMeta(packName, settingsState = DEFAULT_SETTINGS) {
+  const customPack = getCustomResourcePack(settingsState, packName);
+  if (customPack) {
+    return {
+      name: customPack.name || "Custom Pack",
+      description: customPack.description || "Imported custom textures, sounds, and mob assets.",
+      iconBlock: customPack.iconBlock || BLOCK.GRASS
+    };
+  }
   return RESOURCE_PACK_META[packName] || {
     name: packName === "default" ? "Default" : String(packName || "Unknown Pack"),
     description: "Built-in resource pack.",
@@ -1498,15 +1613,28 @@ function getResourcePackMeta(packName) {
   };
 }
 
-const ENTITY_TEXTURE_CATALOG_PATH = "assets/entity/externalTextures.json";
+const ENTITY_TEXTURE_CATALOG_PATH = normalizeAssetPath("assets/entity/externalTextures.json");
 const ENTITY_TEXTURE_NAMES = new Set(["sheep", "zombie", "creeper", "spider", "villager", "chicken", "wolf"]);
+const ENTITY_TEXTURE_FILE_PATHS = Object.fromEntries(
+  Array.from(ENTITY_TEXTURE_NAMES).map((name) => [name, normalizeAssetPath(`assets/entity/textures/${name}.png`)])
+);
 const OBJ_ENTITY_MODEL_PATHS = {
-  sheep: "assets/entity/models/sheep.obj",
-  chicken: "assets/entity/models/chicken.obj",
-  creeper: "assets/entity/models/creeper.obj",
-  spider: "assets/entity/models/spider.obj",
-  villager: "assets/entity/models/villager.obj",
-  wolf: "assets/entity/models/wolf.obj"
+  sheep: normalizeAssetPath("assets/entity/models/sheep.obj"),
+  chicken: normalizeAssetPath("assets/entity/models/chicken.obj"),
+  creeper: normalizeAssetPath("assets/entity/models/creeper.obj"),
+  spider: normalizeAssetPath("assets/entity/models/spider.obj"),
+  villager: normalizeAssetPath("assets/entity/models/villager.obj"),
+  wolf: normalizeAssetPath("assets/entity/models/wolf.obj")
+};
+
+const MUSIC_TRACKS = {
+  title: normalizeAssetPath("Wav/music/welcome.wav"),
+  pause: normalizeAssetPath("Wav/music/pausescreen.mp3"),
+  gameplay: {
+    cave: normalizeAssetPath("Wav/music/caves.mp3"),
+    village: normalizeAssetPath("Wav/music/village.mp3"),
+    forest: normalizeAssetPath("Wav/music/Forest_Ambience.mp3")
+  }
 };
 
 const MOB_DEFS = {
@@ -1707,6 +1835,7 @@ class TextureLibrary {
   constructor(engine) {
     this.engine = engine;
     this.images = new Map();
+    this.pending = new Set();
     this.settings = { ...DEFAULT_SETTINGS };
     this.loadStarted = false;
     this.ready = false;
@@ -1753,8 +1882,26 @@ class TextureLibrary {
     return this.readyPromise;
   }
 
+  ensureImage(path) {
+    if (!path || this.images.has(path) || this.pending.has(path)) {
+      return;
+    }
+    this.pending.add(path);
+    this.engine.resources.loadImage(path)
+      .then((image) => {
+        this.images.set(path, image);
+      })
+      .catch((error) => {
+        console.warn(`Texture load failed for ${path}: ${error.message}`);
+      })
+      .finally(() => {
+        this.pending.delete(path);
+      });
+  }
+
   getBlockFaceTexture(blockType, faceId, settingsState = this.settings) {
     const path = getBlockTexturePath(blockType, faceId, settingsState);
+    this.ensureImage(path);
     return this.images.get(path) || null;
   }
 
@@ -1766,7 +1913,9 @@ class TextureLibrary {
     if (info.blockType) {
       return this.getBlockFaceTexture(info.blockType, "top", settingsState);
     }
-    return this.images.get(info.texture) || null;
+    const path = resolveResourcePackAsset(info.texture, settingsState);
+    this.ensureImage(path);
+    return this.images.get(path) || null;
   }
 }
 
@@ -1776,6 +1925,8 @@ class EntityTextureLibrary {
     this.images = new Map();
     this.billboardImages = new Map();
     this.glTextures = new Map();
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.pendingLoads = new Set();
     this.ready = false;
     this.failed = false;
     this.readyPromise = null;
@@ -1818,6 +1969,27 @@ class EntityTextureLibrary {
   }
 
   getImage(type) {
+    const overridePath = resolveResourcePackAsset(ENTITY_TEXTURE_FILE_PATHS[type], this.settings);
+    if (
+      overridePath &&
+      overridePath !== ENTITY_TEXTURE_FILE_PATHS[type] &&
+      !this.images.has(type) &&
+      !this.pendingLoads.has(type)
+    ) {
+      this.pendingLoads.add(type);
+      this.engine.resources.loadImage(overridePath)
+        .then((image) => {
+          this.images.set(type, image);
+          this.billboardImages.delete(type);
+          this.glTextures.delete(type);
+        })
+        .catch((error) => {
+          console.warn(`Entity texture override failed for ${type}: ${error.message}`);
+        })
+        .finally(() => {
+          this.pendingLoads.delete(type);
+        });
+    }
     return this.images.get(type) || null;
   }
 
@@ -2076,6 +2248,99 @@ const CRAFTING_RECIPES = [
       [ITEM.STICK]
     ],
     result: { itemType: ITEM.WOODEN_SWORD, count: 1 }
+  },
+  {
+    pattern: [
+      [BLOCK.PLANKS, BLOCK.PLANKS],
+      [0, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.WOODEN_HOE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.IRON_INGOT, ITEM.IRON_INGOT, ITEM.IRON_INGOT],
+      [0, ITEM.STICK, 0],
+      [0, ITEM.STICK, 0]
+    ],
+    result: { itemType: ITEM.IRON_PICKAXE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.IRON_INGOT, ITEM.IRON_INGOT],
+      [ITEM.IRON_INGOT, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.IRON_AXE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.IRON_INGOT],
+      [ITEM.STICK],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.IRON_SHOVEL, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.IRON_INGOT],
+      [ITEM.IRON_INGOT],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.IRON_SWORD, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.IRON_INGOT, ITEM.IRON_INGOT],
+      [0, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.IRON_HOE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.DIAMOND, ITEM.DIAMOND, ITEM.DIAMOND],
+      [0, ITEM.STICK, 0],
+      [0, ITEM.STICK, 0]
+    ],
+    result: { itemType: ITEM.DIAMOND_PICKAXE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.DIAMOND, ITEM.DIAMOND],
+      [ITEM.DIAMOND, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.DIAMOND_AXE, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.DIAMOND],
+      [ITEM.STICK],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.DIAMOND_SHOVEL, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.DIAMOND],
+      [ITEM.DIAMOND],
+      [ITEM.STICK]
+    ],
+    result: { itemType: ITEM.DIAMOND_SWORD, count: 1 }
+  },
+  {
+    pattern: [
+      [ITEM.DIAMOND, ITEM.DIAMOND],
+      [0, ITEM.STICK],
+      [0, ITEM.STICK]
+    ],
+    mirrored: true,
+    result: { itemType: ITEM.DIAMOND_HOE, count: 1 }
   }
 ];
 
@@ -2090,7 +2355,9 @@ const FURNACE_SMELT_TIME = 5.5;
 
 const SMELTING_RECIPES = {
   [ITEM.RAW_CHICKEN]: ITEM.COOKED_CHICKEN,
-  [ITEM.RAW_MUTTON]: ITEM.COOKED_MUTTON
+  [ITEM.RAW_MUTTON]: ITEM.COOKED_MUTTON,
+  [BLOCK.IRON_ORE]: ITEM.IRON_INGOT,
+  [BLOCK.GOLD_ORE]: ITEM.GOLD_INGOT
 };
 
 const MOB_LOOT_TABLES = {
@@ -2106,6 +2373,11 @@ const MOB_LOOT_TABLES = {
 };
 
 const PLAYER_SKIN_PRESETS = {
+  steve_large: {
+    label: "Steve",
+    source: normalizeAssetPath("PNG/skins/steve_large.webp"),
+    fallbackPreset: "steve"
+  },
   hoodie: {
     label: "Hoodie",
     skin: "#d8b79a",
@@ -2158,6 +2430,7 @@ const PLAYER_SKIN_PRESETS = {
   },
   alex: {
     label: "Alex",
+    model: "slim",
     skin: "#d5ab88",
     skinShade: "#b98a68",
     hair: "#cf7c3b",
@@ -2191,6 +2464,7 @@ const PLAYER_SKIN_PRESETS = {
 };
 
 const playerSkinCanvasCache = new Map();
+const builtInPlayerSkinLoadState = new Map();
 let customPlayerSkinCache = {
   dataUrl: "",
   canvas: null,
@@ -2204,6 +2478,28 @@ function fillCanvasRects(ctx, color, rects) {
     const [x, y, w = 1, h = 1] = rect;
     ctx.fillRect(x, y, w, h);
   }
+}
+
+function setCanvasPlayerModel(canvas, model = "classic") {
+  if (canvas?.dataset) {
+    canvas.dataset.playerModel = model === "slim" ? "slim" : "classic";
+  }
+  return canvas;
+}
+
+function fillSkinBoxTexture(ctx, u, v, w, h, d, faces = {}) {
+  const fill = (x, y, width, height, color) => {
+    if (!color) return;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, width, height);
+  };
+
+  fill(u + d, v, w, d, faces.top);
+  fill(u + d + w, v, w, d, faces.bottom);
+  fill(u, v + d, d, h, faces.left);
+  fill(u + d, v + d, w, h, faces.front);
+  fill(u + d + w, v + d, d, h, faces.right);
+  fill(u + d + w + d, v + d, w, h, faces.back);
 }
 
 function buildPlayerSkinCanvas(paletteOverrides = {}) {
@@ -2228,98 +2524,146 @@ function buildPlayerSkinCanvas(paletteOverrides = {}) {
     mouth: "#5c3f28",
     ...paletteOverrides
   };
-  const canvas = document.createElement("canvas");
+  const model = palette.model === "slim" ? "slim" : "classic";
+  const armWidth = model === "slim" ? 3 : 4;
+  const canvas = setCanvasPlayerModel(document.createElement("canvas"), model);
   canvas.width = 64;
   canvas.height = 64;
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  fillCanvasRects(ctx, palette.skin, [
-    [8, 8, 8, 8],
-    [20, 20, 8, 12],
-    [44, 20, 4, 12],
-    [36, 52, 4, 12],
-    [4, 20, 4, 12],
-    [20, 52, 4, 12]
-  ]);
-  fillCanvasRects(ctx, palette.skinShade, [
-    [20, 30, 8, 2],
-    [44, 30, 4, 2],
-    [36, 62, 4, 2],
-    [4, 30, 4, 2],
-    [20, 62, 4, 2]
-  ]);
-  if (palette.hair) {
-    fillCanvasRects(ctx, palette.hair, [
-      [8, 8, 8, 2],
-      [8, 10, 2, 3],
-      [14, 10, 2, 3],
-      [9, 11, 6, 2],
-      [40, 8, 8, 2],
-      [40, 10, 2, 3],
-      [46, 10, 2, 3],
-      [41, 11, 6, 2]
-    ]);
-  }
-  if (palette.hairShade) {
-    fillCanvasRects(ctx, palette.hairShade, [
-      [10, 10, 4, 1],
-      [42, 10, 4, 1]
-    ]);
-  }
+  fillSkinBoxTexture(ctx, 0, 0, 8, 8, 8, {
+    top: palette.skin,
+    bottom: palette.skinShade,
+    left: palette.skinShade,
+    front: palette.skin,
+    right: palette.skinShade,
+    back: palette.skinShade
+  });
+  fillSkinBoxTexture(ctx, 32, 0, 8, 8, 8, {
+    top: palette.hair,
+    bottom: null,
+    left: palette.hairShade || palette.hair,
+    front: palette.hair,
+    right: palette.hairShade || palette.hair,
+    back: palette.hairShade || palette.hair
+  });
   fillCanvasRects(ctx, palette.eyeWhite, [
     [9, 12, 2, 1],
-    [12, 12, 2, 1]
+    [13, 12, 2, 1]
   ]);
   fillCanvasRects(ctx, palette.eye, [
     [10, 12, 1, 1],
-    [13, 12, 1, 1]
+    [14, 12, 1, 1]
   ]);
   fillCanvasRects(ctx, palette.mouth, [
-    [11, 14, 2, 1]
+    [11, 14, 3, 1]
   ]);
-  fillCanvasRects(ctx, palette.shirt, [
-    [20, 20, 8, 10],
-    [44, 20, 4, 4],
-    [36, 52, 4, 4]
+  fillCanvasRects(ctx, palette.hair, [
+    [40, 8, 8, 2],
+    [32, 8, 2, 7],
+    [46, 8, 2, 7],
+    [41, 10, 6, 2]
   ]);
-  fillCanvasRects(ctx, palette.shirtShade, [
-    [20, 20, 8, 2],
-    [20, 28, 8, 2],
-    [44, 20, 4, 2],
-    [36, 52, 4, 2]
-  ]);
-  fillCanvasRects(ctx, palette.arm || palette.shirt, [
-    [44, 20, 4, 10],
-    [36, 52, 4, 10]
-  ]);
-  fillCanvasRects(ctx, palette.armShade || palette.shirtShade, [
-    [44, 20, 4, 2],
-    [36, 52, 4, 2]
-  ]);
-  if (palette.shirtAccent) {
-    fillCanvasRects(ctx, palette.shirtAccent, [
-      [20, 23, 2, 4],
-      [26, 23, 2, 4],
-      [22, 23, 4, 1]
-    ]);
-  }
-  fillCanvasRects(ctx, palette.leg || palette.pants, [
-    [4, 20, 4, 10],
-    [20, 52, 4, 10]
-  ]);
-  fillCanvasRects(ctx, palette.legShade || palette.pantsShade, [
-    [4, 20, 4, 2],
-    [20, 52, 4, 2]
-  ]);
-  fillCanvasRects(ctx, palette.shoes, [
-    [4, 30, 4, 2],
-    [20, 62, 4, 2]
+
+  fillSkinBoxTexture(ctx, 16, 16, 8, 12, 4, {
+    top: palette.shirtShade,
+    bottom: palette.belt,
+    left: palette.shirtShade,
+    front: palette.shirt,
+    right: palette.shirtShade,
+    back: palette.shirtShade
+  });
+  fillSkinBoxTexture(ctx, 16, 32, 8, 12, 4, {
+    top: palette.shirtAccent || palette.shirtShade,
+    bottom: null,
+    left: palette.shirtShade,
+    front: palette.shirtAccent || palette.shirt,
+    right: palette.shirtShade,
+    back: palette.shirtShade
+  });
+  fillCanvasRects(ctx, palette.shirtAccent || palette.eyeWhite, [
+    [21, 22, 2, 6],
+    [25, 22, 2, 6],
+    [23, 22, 2, 2],
+    [22, 28, 4, 1]
   ]);
   fillCanvasRects(ctx, palette.belt, [
-    [20, 30, 8, 2]
+    [20, 30, 8, 2],
+    [16, 30, 4, 2],
+    [28, 30, 4, 2],
+    [32, 30, 8, 2]
   ]);
+
+  const paintArm = (u, v) => {
+    fillSkinBoxTexture(ctx, u, v, armWidth, 12, 4, {
+      top: palette.arm || palette.shirt,
+      bottom: palette.skinShade,
+      left: palette.armShade || palette.shirtShade,
+      front: palette.skin,
+      right: palette.armShade || palette.shirtShade,
+      back: palette.skinShade
+    });
+    fillCanvasRects(ctx, palette.arm || palette.shirt, [
+      [u + 4, v + 4, armWidth, 4],
+      [u, v + 4, 4, 4],
+      [u + 4 + armWidth, v + 4, 4, 4],
+      [u + 8 + armWidth, v + 4, armWidth, 4]
+    ]);
+    fillCanvasRects(ctx, palette.armShade || palette.shirtShade, [
+      [u + 4, v + 4, armWidth, 1]
+    ]);
+  };
+
+  paintArm(40, 16);
+  paintArm(32, 48);
+  fillSkinBoxTexture(ctx, 40, 32, armWidth, 12, 4, {
+    top: palette.shirtAccent,
+    bottom: null,
+    left: palette.shirtShade,
+    front: palette.shirtAccent,
+    right: palette.shirtShade,
+    back: palette.shirtShade
+  });
+  fillSkinBoxTexture(ctx, 48, 48, armWidth, 12, 4, {
+    top: palette.shirtAccent,
+    bottom: null,
+    left: palette.shirtShade,
+    front: palette.shirtAccent,
+    right: palette.shirtShade,
+    back: palette.shirtShade
+  });
+
+  const paintLeg = (u, v, overlayU = null, overlayV = null) => {
+    fillSkinBoxTexture(ctx, u, v, 4, 12, 4, {
+      top: palette.pantsShade,
+      bottom: palette.shoes,
+      left: palette.legShade || palette.pantsShade,
+      front: palette.leg || palette.pants,
+      right: palette.legShade || palette.pantsShade,
+      back: palette.pantsShade
+    });
+    fillCanvasRects(ctx, palette.shoes, [
+      [u + 4, v + 14, 4, 2],
+      [u, v + 14, 4, 2],
+      [u + 8, v + 14, 4, 2],
+      [u + 12, v + 14, 4, 2]
+    ]);
+    if (overlayU !== null && overlayV !== null) {
+      fillSkinBoxTexture(ctx, overlayU, overlayV, 4, 12, 4, {
+        top: palette.pantsShade,
+        bottom: null,
+        left: palette.pantsShade,
+        front: palette.pantsShade,
+        right: palette.pantsShade,
+        back: palette.pantsShade
+      });
+    }
+  };
+
+  paintLeg(0, 16, 0, 32);
+  paintLeg(16, 48, 0, 48);
 
   return canvas;
 }
@@ -2330,6 +2674,31 @@ function isValidPlayerSkinPreset(preset) {
 
 function getPresetPlayerSkinCanvas(preset = DEFAULT_SETTINGS.playerSkinPreset) {
   const resolvedPreset = Object.prototype.hasOwnProperty.call(PLAYER_SKIN_PRESETS, preset) ? preset : DEFAULT_SETTINGS.playerSkinPreset;
+  const presetMeta = PLAYER_SKIN_PRESETS[resolvedPreset];
+  if (presetMeta?.source) {
+    if (!playerSkinCanvasCache.has(resolvedPreset)) {
+      const fallbackPreset = presetMeta.fallbackPreset && PLAYER_SKIN_PRESETS[presetMeta.fallbackPreset]
+        ? presetMeta.fallbackPreset
+        : "steve";
+      playerSkinCanvasCache.set(resolvedPreset, buildPlayerSkinCanvas(PLAYER_SKIN_PRESETS[fallbackPreset]));
+    }
+    const state = builtInPlayerSkinLoadState.get(resolvedPreset);
+    if (!state?.loading && !state?.loaded) {
+      builtInPlayerSkinLoadState.set(resolvedPreset, { loading: true, loaded: false });
+      const image = new Image();
+      image.onload = () => {
+        playerSkinCanvasCache.set(resolvedPreset, normalizeImportedPlayerSkinCanvas(image));
+        builtInPlayerSkinLoadState.set(resolvedPreset, { loading: false, loaded: true });
+        triggerPlayerSkinRefresh();
+      };
+      image.onerror = () => {
+        console.warn(`Failed to load built-in player skin: ${presetMeta.source}`);
+        builtInPlayerSkinLoadState.set(resolvedPreset, { loading: false, loaded: false, failed: true });
+      };
+      image.src = presetMeta.source;
+    }
+    return playerSkinCanvasCache.get(resolvedPreset);
+  }
   if (!playerSkinCanvasCache.has(resolvedPreset)) {
     playerSkinCanvasCache.set(resolvedPreset, buildPlayerSkinCanvas(PLAYER_SKIN_PRESETS[resolvedPreset]));
   }
@@ -2341,7 +2710,7 @@ function getDefaultPlayerSkinCanvas() {
 }
 
 function normalizeImportedPlayerSkinCanvas(image) {
-  const canvas = document.createElement("canvas");
+  const canvas = setCanvasPlayerModel(document.createElement("canvas"), "classic");
   canvas.width = 64;
   canvas.height = 64;
   const ctx = canvas.getContext("2d");
@@ -2447,13 +2816,13 @@ function readPlayerSkinFile(file) {
       const image = new Image();
       image.onload = () => {
         if (!((image.width === 64 && image.height === 64) || (image.width === 64 && image.height === 32))) {
-          reject(new Error("Skin must be 64x64 or 64x32."));
+          reject(new Error("Skin must be 64x64 or 64x32 PNG/WebP."));
           return;
         }
         const canvas = normalizeImportedPlayerSkinCanvas(image);
         resolve(canvas.toDataURL("image/png"));
       };
-      image.onerror = () => reject(new Error("That PNG skin could not be loaded."));
+      image.onerror = () => reject(new Error("That skin file could not be loaded."));
       image.src = dataUrl;
     };
     reader.readAsDataURL(file);
@@ -2477,8 +2846,298 @@ function getArmorPreviewColor(itemType) {
   }
 }
 
+const PLAYER_PREVIEW_GL_CACHE = new WeakMap();
+const PLAYER_PREVIEW_MESH_CACHE = new WeakMap();
+
+function getPlayerSkinModel(canvas) {
+  return canvas?.dataset?.playerModel === "slim" ? "slim" : "classic";
+}
+
+function getPlayerPreviewGlRenderer(canvas) {
+  let cached = PLAYER_PREVIEW_GL_CACHE.get(canvas);
+  if (cached) {
+    return cached;
+  }
+  const gl = canvas.getContext("webgl", {
+    alpha: true,
+    antialias: false,
+    depth: true,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false
+  });
+  if (!gl) {
+    return null;
+  }
+
+  const program = createProgram(
+    gl,
+    `
+      attribute vec3 aPos;
+      attribute vec2 aUV;
+      attribute float aShade;
+      uniform mat4 uProj;
+      uniform mat4 uView;
+      varying vec2 vUV;
+      varying float vShade;
+      void main() {
+        vUV = aUV;
+        vShade = aShade;
+        gl_Position = uProj * uView * vec4(aPos, 1.0);
+      }
+    `,
+    `
+      precision mediump float;
+      uniform sampler2D uTex;
+      varying vec2 vUV;
+      varying float vShade;
+      void main() {
+        vec4 tex = texture2D(uTex, vUV);
+        if (tex.a < 0.06) discard;
+        gl_FragColor = vec4(tex.rgb * vShade, tex.a);
+      }
+    `
+  );
+
+  const vaoExt = gl.getExtension("OES_vertex_array_object");
+  const vao = vaoExt?.createVertexArrayOES?.() || null;
+  const vbo = gl.createBuffer();
+  const ibo = gl.createBuffer();
+  const texture = gl.createTexture();
+  const uProj = gl.getUniformLocation(program, "uProj");
+  const uView = gl.getUniformLocation(program, "uView");
+  const uTex = gl.getUniformLocation(program, "uTex");
+  const aPos = gl.getAttribLocation(program, "aPos");
+  const aUV = gl.getAttribLocation(program, "aUV");
+  const aShade = gl.getAttribLocation(program, "aShade");
+
+  const bindVao = () => {
+    if (vaoExt && vao) {
+      vaoExt.bindVertexArrayOES(vao);
+    }
+  };
+  const unbindVao = () => {
+    if (vaoExt) {
+      vaoExt.bindVertexArrayOES(null);
+    }
+  };
+
+  bindVao();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  const stride = 6 * 4;
+  if (aPos >= 0) {
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, stride, 0);
+  }
+  if (aUV >= 0) {
+    gl.enableVertexAttribArray(aUV);
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, stride, 3 * 4);
+  }
+  if (aShade >= 0) {
+    gl.enableVertexAttribArray(aShade);
+    gl.vertexAttribPointer(aShade, 1, gl.FLOAT, false, stride, 5 * 4);
+  }
+  unbindVao();
+
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+
+  cached = {
+    gl,
+    program,
+    vaoExt,
+    vao,
+    vbo,
+    ibo,
+    texture,
+    uProj,
+    uView,
+    uTex,
+    bindVao,
+    unbindVao,
+    lastSkin: null
+  };
+  PLAYER_PREVIEW_GL_CACHE.set(canvas, cached);
+  return cached;
+}
+
+function buildPlayerPreviewMesh(skin, pose = {}) {
+  const model = getPlayerSkinModel(skin);
+  const headYaw = clamp(Number.isFinite(pose.headYaw) ? pose.headYaw : 0, -0.75, 0.75);
+  const headPitch = clamp(Number.isFinite(pose.headPitch) ? pose.headPitch : 0, -0.45, 0.45);
+  const usesDynamicPose = Math.abs(headYaw) > 0.001 || Math.abs(headPitch) > 0.001;
+  const cached = PLAYER_PREVIEW_MESH_CACHE.get(skin);
+  if (!usesDynamicPose && cached?.model === model) {
+    return cached.mesh;
+  }
+
+  const verts = [];
+  const idx = [];
+  let baseIndex = 0;
+  const texW = skin.width || 64;
+  const texH = skin.height || 64;
+  const scale = 1 / 16;
+  const yaw = -Math.PI / 5.35;
+  const headTilt = -0.08;
+  const armSwing = 0.2;
+  const legSwing = -0.14;
+  const armWidth = model === "slim" ? 3 : 4;
+
+  const pushFace = (p0, p1, p2, p3, uv0, uv1, uv2, uv3, shade = 1) => {
+    verts.push(
+      p0[0], p0[1], p0[2], uv0[0], uv0[1], shade,
+      p1[0], p1[1], p1[2], uv1[0], uv1[1], shade,
+      p2[0], p2[1], p2[2], uv2[0], uv2[1], shade,
+      p3[0], p3[1], p3[2], uv3[0], uv3[1], shade
+    );
+    idx.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex, baseIndex + 2, baseIndex + 3);
+    baseIndex += 4;
+  };
+
+  const rotatePoint = (x, y, z, rotX, pivotY, rotY = 0, pivotX = 0, pivotZ = 0) => {
+    const dx = x - pivotX;
+    const dz = z - pivotZ;
+    const yx = dx * Math.cos(rotY) - dz * Math.sin(rotY);
+    const yz = dx * Math.sin(rotY) + dz * Math.cos(rotY);
+    const dy = y - pivotY;
+    const ry = dy * Math.cos(rotX) - yz * Math.sin(rotX);
+    const rz = dy * Math.sin(rotX) + yz * Math.cos(rotX);
+    const lx = pivotX + yx;
+    const ly = pivotY + ry;
+    const lz = pivotZ + rz;
+    const wx = (lx * Math.cos(yaw) - lz * Math.sin(yaw)) * scale;
+    const wz = (lx * Math.sin(yaw) + lz * Math.cos(yaw)) * scale;
+    const wy = ly * scale;
+    return [wx, wy, wz];
+  };
+
+  const addBox = (x0, y0, z0, x1, y1, z1, u, v, w, h, d, rotX = 0, pivotY = y0, shade = {}, rotY = 0, pivotX = 0, pivotZ = 0) => {
+    const U = (px) => px / texW;
+    const V = (py) => py / texH;
+    const points = [
+      rotatePoint(x0, y0, z0, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x1, y0, z0, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x1, y1, z0, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x0, y1, z0, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x0, y0, z1, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x1, y0, z1, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x1, y1, z1, rotX, pivotY, rotY, pivotX, pivotZ),
+      rotatePoint(x0, y1, z1, rotX, pivotY, rotY, pivotX, pivotZ)
+    ];
+
+    const du = d;
+    const wu = w;
+    const hv = h;
+    pushFace(points[7], points[6], points[2], points[3], [U(u + du), V(v + du)], [U(u + du + wu), V(v + du)], [U(u + du + wu), V(v)], [U(u + du), V(v)], shade.top || 1.04);
+    pushFace(points[0], points[1], points[5], points[4], [U(u + du + wu), V(v)], [U(u + du + wu + wu), V(v)], [U(u + du + wu + wu), V(v + du)], [U(u + du + wu), V(v + du)], shade.bottom || 0.62);
+    pushFace(points[4], points[5], points[6], points[7], [U(u + du), V(v + du + hv)], [U(u + du + wu), V(v + du + hv)], [U(u + du + wu), V(v + du)], [U(u + du), V(v + du)], shade.front || 1);
+    pushFace(points[1], points[0], points[3], points[2], [U(u + du + wu + du), V(v + du + hv)], [U(u + du + wu + du + wu), V(v + du + hv)], [U(u + du + wu + du + wu), V(v + du)], [U(u + du + wu + du), V(v + du)], shade.back || 0.74);
+    pushFace(points[0], points[4], points[7], points[3], [U(u), V(v + du + hv)], [U(u + du), V(v + du + hv)], [U(u + du), V(v + du)], [U(u), V(v + du)], shade.left || 0.82);
+    pushFace(points[5], points[1], points[2], points[6], [U(u + du + wu), V(v + du + hv)], [U(u + du + wu + du), V(v + du + hv)], [U(u + du + wu + du), V(v + du)], [U(u + du + wu), V(v + du)], shade.right || 0.9);
+  };
+
+  const overlay = 0.25;
+  const rightArmX0 = -4 - armWidth;
+  const rightArmX1 = -4;
+  const leftArmX0 = 4;
+  const leftArmX1 = 4 + armWidth;
+
+  addBox(-4, 24, -4, 4, 32, 4, 0, 0, 8, 8, 8, headTilt + headPitch, 28, { front: 1.06, top: 1.12 }, headYaw, 0, 0);
+  addBox(-4 - overlay, 24 - overlay, -4 - overlay, 4 + overlay, 32 + overlay, 4 + overlay, 32, 0, 8, 8, 8, headTilt + headPitch, 28, { front: 1.08, top: 1.13, left: 0.86, right: 0.92, back: 0.78 }, headYaw, 0, 0);
+
+  addBox(-4, 12, -2, 4, 24, 2, 16, 16, 8, 12, 4, 0, 12, { front: 1, top: 1.06 });
+  addBox(-4 - overlay, 12 - overlay, -2 - overlay, 4 + overlay, 24 + overlay, 2 + overlay, 16, 32, 8, 12, 4, 0, 12, { front: 1.02, top: 1.08 });
+
+  addBox(rightArmX0, 12, -2, rightArmX1, 24, 2, 40, 16, armWidth, 12, 4, armSwing, 24, { front: 0.99, top: 1.04 });
+  addBox(rightArmX0 - overlay, 12 - overlay, -2 - overlay, rightArmX1 + overlay, 24 + overlay, 2 + overlay, 40, 32, armWidth, 12, 4, armSwing, 24, { front: 1, top: 1.05 });
+
+  addBox(leftArmX0, 12, -2, leftArmX1, 24, 2, 32, 48, armWidth, 12, 4, -armSwing, 24, { front: 0.99, top: 1.04 });
+  addBox(leftArmX0 - overlay, 12 - overlay, -2 - overlay, leftArmX1 + overlay, 24 + overlay, 2 + overlay, 48, 48, armWidth, 12, 4, -armSwing, 24, { front: 1, top: 1.05 });
+
+  addBox(-4, 0, -2, 0, 12, 2, 0, 16, 4, 12, 4, legSwing, 12, { front: 0.97, top: 1.02 });
+  addBox(-4 - overlay, 0 - overlay, -2 - overlay, 0 + overlay, 12 + overlay, 2 + overlay, 0, 32, 4, 12, 4, legSwing, 12, { front: 0.99, top: 1.04 });
+
+  addBox(0, 0, -2, 4, 12, 2, 16, 48, 4, 12, 4, -legSwing, 12, { front: 0.97, top: 1.02 });
+  addBox(0 - overlay, 0 - overlay, -2 - overlay, 4 + overlay, 12 + overlay, 2 + overlay, 0, 48, 4, 12, 4, -legSwing, 12, { front: 0.99, top: 1.04 });
+
+  const mesh = {
+    vertices: new Float32Array(verts),
+    indices: new Uint16Array(idx)
+  };
+  if (!usesDynamicPose) {
+    PLAYER_PREVIEW_MESH_CACHE.set(skin, { model, mesh });
+  }
+  return mesh;
+}
+
+function renderPlayerPreviewWebGL(canvas, skinOverride = null) {
+  if (!canvas) return false;
+  const renderer = getPlayerPreviewGlRenderer(canvas);
+  if (!renderer) {
+    return false;
+  }
+
+  const skin = skinOverride || getDefaultPlayerSkinCanvas();
+  canvas.width = 160;
+  canvas.height = 240;
+  const { gl } = renderer;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  if (renderer.lastSkin !== skin) {
+    gl.bindTexture(gl.TEXTURE_2D, renderer.texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, skin);
+    renderer.lastSkin = skin;
+  }
+
+  const lookX = clamp(Number(canvas.dataset.lookX) || 0, -1, 1);
+  const lookY = clamp(Number(canvas.dataset.lookY) || 0, -1, 1);
+  const mesh = buildPlayerPreviewMesh(skin, {
+    headYaw: lookX * 0.48,
+    headPitch: -lookY * 0.32
+  });
+  renderer.bindVao();
+  gl.bindBuffer(gl.ARRAY_BUFFER, renderer.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, renderer.ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
+
+  const proj = mat4Identity();
+  const view = mat4Identity();
+  mat4Perspective(proj, Math.PI / 4.2, canvas.width / canvas.height, 0.1, 100);
+  mat4LookAt(
+    view,
+    [1.45 + lookX * 0.16, 1.55 - lookY * 0.1, 3.15],
+    [lookX * 0.22, 1.1 + lookY * 0.16, 0],
+    [0, 1, 0]
+  );
+
+  gl.useProgram(renderer.program);
+  gl.uniformMatrix4fv(renderer.uProj, false, proj);
+  gl.uniformMatrix4fv(renderer.uView, false, view);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, renderer.texture);
+  gl.uniform1i(renderer.uTex, 0);
+  gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_SHORT, 0);
+  renderer.unbindVao();
+  return true;
+}
+
 function renderPlayerPreviewCanvas(canvas, armorItems = {}, skinOverride = null) {
   if (!canvas) return;
+  if (renderPlayerPreviewWebGL(canvas, skinOverride)) {
+    return;
+  }
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const skin = skinOverride || getDefaultPlayerSkinCanvas();
@@ -2858,7 +3517,11 @@ function isCollidable(blockType) {
 
 function shouldRenderFace(blockType, neighborType) {
   if (blockType === BLOCK.WATER) {
-    return neighborType !== BLOCK.WATER;
+    if (neighborType === BLOCK.WATER) {
+      return false;
+    }
+    const neighbor = BLOCK_INFO[neighborType];
+    return !neighbor || !neighbor.transparent || neighborType === BLOCK.AIR;
   }
   if (neighborType === BLOCK.AIR) {
     return true;
@@ -5923,6 +6586,21 @@ class GreedyChunkMesher {
                 [baseX + x[0] + du[0], x[1] + du[1], baseZ + x[2] + du[2]]
               ];
 
+              if (cell.blockType === BLOCK.WATER) {
+                const waterSurfaceY = x[1] + (faceId === "top" ? -0.08 : 0.92);
+                if (faceId === "top") {
+                  for (const point of quad) {
+                    point[1] += waterSurfaceY - x[1];
+                  }
+                } else if (faceId !== "bottom") {
+                  for (const point of quad) {
+                    if (point[1] > x[1]) {
+                      point[1] = waterSurfaceY;
+                    }
+                  }
+                }
+              }
+
               if (dir === -1) {
                 [quad[1], quad[3]] = [quad[3], quad[1]];
               }
@@ -6131,18 +6809,57 @@ class WebGLVoxelRenderer {
     return dx * dx + dz * dz <= r * r;
   }
 
+  _getLookDirXZ() {
+    const look = this.player?.getLookVector?.();
+    const len = Math.hypot(look?.x || 0, look?.z || 0);
+    if (len < 0.0001) {
+      return null;
+    }
+    return { x: look.x / len, z: look.z / len };
+  }
+
+  _getChunkViewDot(chunkX, chunkZ, lookDirXZ = this._getLookDirXZ()) {
+    if (!lookDirXZ) {
+      return 1;
+    }
+    const toChunkX = (chunkX + 0.5) * CHUNK_SIZE - this.player.x;
+    const toChunkZ = (chunkZ + 0.5) * CHUNK_SIZE - this.player.z;
+    const len = Math.hypot(toChunkX, toChunkZ);
+    if (len < 0.0001) {
+      return 1;
+    }
+    return (toChunkX / len) * lookDirXZ.x + (toChunkZ / len) * lookDirXZ.z;
+  }
+
+  _shouldRenderChunk(chunkX, chunkZ, playerChunkX, playerChunkZ, lookDirXZ = this._getLookDirXZ()) {
+    const dx = chunkX - playerChunkX;
+    const dz = chunkZ - playerChunkZ;
+    if (!this._withinDistance(dx, dz)) {
+      return false;
+    }
+    const distSq = dx * dx + dz * dz;
+    if (distSq <= 4) {
+      return true;
+    }
+    return this._getChunkViewDot(chunkX, chunkZ, lookDirXZ) >= -0.18;
+  }
+
   _takeNearest(queue, keySet, playerChunkX, playerChunkZ) {
     if (queue.length === 0) {
       return null;
     }
 
+    const lookDirXZ = this._getLookDirXZ();
     let bestIndex = 0;
     let bestScore = Number.POSITIVE_INFINITY;
     for (let index = 0; index < queue.length; index += 1) {
       const entry = queue[index];
       const dx = entry.chunkX - playerChunkX;
       const dz = entry.chunkZ - playerChunkZ;
-      const score = Math.max(Math.abs(dx), Math.abs(dz)) + Math.hypot(dx, dz) * 0.001;
+      const distanceScore = Math.max(Math.abs(dx), Math.abs(dz)) + Math.hypot(dx, dz) * 0.001;
+      const viewDot = this._getChunkViewDot(entry.chunkX, entry.chunkZ, lookDirXZ);
+      const directionalPenalty = viewDot >= 0 ? -Math.min(0.2, viewDot * 0.16) : Math.abs(viewDot) * 0.8;
+      const score = distanceScore + directionalPenalty;
       if (score < bestScore) {
         bestScore = score;
         bestIndex = index;
@@ -6259,7 +6976,8 @@ class WebGLVoxelRenderer {
         break;
       }
     }
-    this.world.unloadFarChunks(playerChunkX, playerChunkZ, this.renderDistanceChunks + 2);
+    const keepRadius = this.settings?.chunkLagFix === false ? this.renderDistanceChunks + 2 : this.renderDistanceChunks + 1;
+    this.world.unloadFarChunks(playerChunkX, playerChunkZ, keepRadius);
 
     // Drop GPU meshes for chunks we unloaded.
     for (const [key, record] of this.chunkMeshes) {
@@ -6335,11 +7053,12 @@ class WebGLVoxelRenderer {
 
     const playerChunkX = Math.floor(this.player.x / CHUNK_SIZE);
     const playerChunkZ = Math.floor(this.player.z / CHUNK_SIZE);
+    const lookDirXZ = this._getLookDirXZ();
 
     for (const offset of this.visibleOffsets) {
-      if (!this._withinDistance(offset.dx, offset.dz)) continue;
       const cx = playerChunkX + offset.dx;
       const cz = playerChunkZ + offset.dz;
+      if (!this._shouldRenderChunk(cx, cz, playerChunkX, playerChunkZ, lookDirXZ)) continue;
       const record = this.chunkMeshes.get(packChunkKey(cx, cz));
       if (!record) continue;
       record.opaque.draw();
@@ -6353,9 +7072,9 @@ class WebGLVoxelRenderer {
     if (this.settings?.graphicsMode === "fancy") {
       const transparentDraw = [];
       for (const offset of this.visibleOffsets) {
-        if (!this._withinDistance(offset.dx, offset.dz)) continue;
         const cx = playerChunkX + offset.dx;
         const cz = playerChunkZ + offset.dz;
+        if (!this._shouldRenderChunk(cx, cz, playerChunkX, playerChunkZ, lookDirXZ)) continue;
         const record = this.chunkMeshes.get(packChunkKey(cx, cz));
         if (!record) continue;
         const dx = (cx + 0.5) * CHUNK_SIZE - this.player.x;
@@ -6368,9 +7087,9 @@ class WebGLVoxelRenderer {
       }
     } else {
       for (const offset of this.visibleOffsets) {
-        if (!this._withinDistance(offset.dx, offset.dz)) continue;
         const cx = playerChunkX + offset.dx;
         const cz = playerChunkZ + offset.dz;
+        if (!this._shouldRenderChunk(cx, cz, playerChunkX, playerChunkZ, lookDirXZ)) continue;
         const record = this.chunkMeshes.get(packChunkKey(cx, cz));
         if (!record) continue;
         record.transparent.draw();
@@ -6379,7 +7098,6 @@ class WebGLVoxelRenderer {
 
     if (this.settings?.mobModels !== false) {
       this._objEntities.draw(this.proj, this.view, this.entities || []);
-      this._zombie.draw(this.proj, this.view, this.entities || []);
     }
     this._entities.draw(this.proj, this.view, this.entities || []);
 
@@ -6569,13 +7287,11 @@ class WebGLVoxelRenderer {
         const hasEntityTexture = !isItem && !!(this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type));
         const canUseObjModel = hasObjModel && hasEntityTexture;
         const canUseZombieModel = isZombie && !!this.entityTextures?.getImage("zombie");
-        if (canUseObjModel && this.settings?.mobModels !== false) {
+        if (canUseObjModel && this.settings?.mobModels !== false && e.type !== "sheep") {
           continue;
         }
-        if (canUseZombieModel && this.settings?.mobModels !== false) {
-          // Zombie uses the 3D model renderer.
-          continue;
-        }
+        // Keep zombies on the billboard path for now; it is more reliable than the
+        // experimental box-model renderer and avoids invisible mobs.
 
         const image = isItem
           ? this.textureLibrary?.getItemTexture(e.itemType ?? e.blockType, this.settings) || null
@@ -7059,6 +7775,7 @@ class WebGLVoxelRenderer {
 
       for (const e of entities) {
         if (!e || Number.isFinite(e.itemType ?? e.blockType)) continue;
+        if (e.type === "sheep") continue;
         const model = this.objModelLibrary?.getModel(e.type);
         if (!model) continue;
         const image = this.entityTextures?.getImage(e.type) || null;
@@ -7170,6 +7887,230 @@ export default function FreeCube2Game(engine) {
 
   let ui = null;
   let loadingStartChunk = null;
+  let musicPool = new Map();
+  let currentMusicAudio = null;
+  let currentMusicGain = 0;
+  let fadingMusicVoices = [];
+  let currentMusicTrack = "";
+  let currentMusicState = "";
+  let musicUnlocked = false;
+  let runtimeLowFpsTimer = 0;
+  let runtimeCompactCooldown = 0;
+  let runtimeMaintenanceTimer = 0;
+
+  const VOLUME_PRESETS = [0, 0.25, 0.5, 0.75, 1];
+  const MUSIC_FADE_SECONDS = 2.8;
+
+  function formatVolumeLabel(value) {
+    return `${Math.round(clamp(value, 0, 1) * 100)}%`;
+  }
+
+  function cycleVolumePreset(value) {
+    const rounded = Math.round(clamp(value, 0, 1) * 100) / 100;
+    const currentIndex = Math.max(0, VOLUME_PRESETS.findIndex((preset) => Math.abs(preset - rounded) < 0.001));
+    return VOLUME_PRESETS[(currentIndex + 1) % VOLUME_PRESETS.length];
+  }
+
+  function preloadMusicTracks() {
+    for (const track of [MUSIC_TRACKS.title, MUSIC_TRACKS.pause, ...Object.values(MUSIC_TRACKS.gameplay)]) {
+      const resolvedTrack = resolveResourcePackAsset(track, settings);
+      if (!resolvedTrack || musicPool.has(resolvedTrack)) continue;
+      const audio = new Audio(resolvedTrack);
+      audio.preload = "auto";
+      audio.loop = false;
+      musicPool.set(resolvedTrack, audio);
+      audio.load();
+    }
+  }
+
+  function getMusicVolumeScalar() {
+    return clamp((settings.masterVolume || 0) * (settings.musicVolume || 0), 0, 1);
+  }
+
+  function syncMusicVolume() {
+    const baseVolume = getMusicVolumeScalar();
+    if (currentMusicAudio) {
+      currentMusicAudio.volume = baseVolume * currentMusicGain;
+    }
+    for (const voice of fadingMusicVoices) {
+      if (voice?.audio) {
+        voice.audio.volume = baseVolume * clamp(voice.gain, 0, 1);
+      }
+    }
+  }
+
+  function retireMusicVoice(voice, resetPosition = true) {
+    const audio = voice?.audio || voice;
+    if (!audio) return;
+    audio.onended = null;
+    audio.pause();
+    if (resetPosition) {
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // Ignore media reset issues.
+      }
+    }
+  }
+
+  function queueMusicFadeOut(audio, gain = 1, resetPosition = true) {
+    if (!audio) return;
+    audio.onended = null;
+    fadingMusicVoices.push({
+      audio,
+      gain: clamp(gain, 0, 1),
+      resetPosition
+    });
+  }
+
+  function stopMusic(resetPosition = true) {
+    if (currentMusicAudio) {
+      retireMusicVoice(currentMusicAudio, resetPosition);
+    }
+    currentMusicAudio = null;
+    currentMusicGain = 0;
+    for (const voice of fadingMusicVoices) {
+      retireMusicVoice(voice, voice.resetPosition && resetPosition);
+    }
+    fadingMusicVoices = [];
+    currentMusicTrack = "";
+    currentMusicState = "";
+  }
+
+  function getDesiredMusicState() {
+    if (mode === "playing") {
+      return "gameplay";
+    }
+    if (mode === "paused") {
+      return "pause";
+    }
+    return "title";
+  }
+
+  function isPlayerInCave() {
+    if (!player || !world) return false;
+    const px = Math.floor(player.x);
+    const pz = Math.floor(player.z);
+    const py = Math.floor(player.y + PLAYER_EYE_HEIGHT);
+    const column = world.terrain.describeColumn(px, pz);
+    if (py >= column.height - 4) {
+      return false;
+    }
+    let covered = 0;
+    for (let y = py + 1; y <= Math.min(WORLD_HEIGHT - 1, py + 10); y += 1) {
+      const block = world.getBlock(px, y, pz);
+      if (block !== BLOCK.AIR && block !== BLOCK.WATER) {
+        covered += 1;
+      }
+    }
+    return covered >= 3;
+  }
+
+  function isPlayerInVillage() {
+    if (!player || !world) return false;
+    const center = getNearestVillageCenter(player.x, player.z, world.seed, 36);
+    if (!center) return false;
+    const dx = center.x - player.x;
+    const dz = center.z - player.z;
+    return dx * dx + dz * dz <= 18 * 18;
+  }
+
+  function getGameplayMusicTrack() {
+    if (!player || !world) return "";
+    if (isPlayerInCave()) {
+      return MUSIC_TRACKS.gameplay.cave;
+    }
+    if (isPlayerInVillage()) {
+      return MUSIC_TRACKS.gameplay.village;
+    }
+    const column = world.terrain.describeColumn(Math.floor(player.x), Math.floor(player.z));
+    if (column.biome === "forest") {
+      return MUSIC_TRACKS.gameplay.forest;
+    }
+    return "";
+  }
+
+  function playMusicTrack(state, track) {
+    if (!musicUnlocked || !track) {
+      return;
+    }
+    preloadMusicTracks();
+    const resolvedTrack = resolveResourcePackAsset(track, settings);
+    const source = musicPool.get(resolvedTrack);
+    if (!source) {
+      return;
+    }
+    if (currentMusicTrack === resolvedTrack && currentMusicState === state) {
+      syncMusicVolume();
+      return;
+    }
+    if (currentMusicAudio) {
+      queueMusicFadeOut(currentMusicAudio, currentMusicGain, false);
+    }
+    const audio = source?.cloneNode?.(true) || new Audio(resolvedTrack);
+    audio.preload = "auto";
+    currentMusicAudio = audio;
+    currentMusicGain = 0;
+    currentMusicTrack = resolvedTrack;
+    currentMusicState = state;
+    currentMusicAudio.loop = state !== "gameplay";
+    currentMusicAudio.currentTime = 0;
+    currentMusicAudio.onended = state === "gameplay"
+      ? () => {
+          if (currentMusicState !== "gameplay") return;
+          playMusicTrack("gameplay", getGameplayMusicTrack());
+        }
+      : null;
+    syncMusicVolume();
+    currentMusicAudio.play().catch(() => {});
+  }
+
+  function updateMusicFades(dt) {
+    if (currentMusicAudio) {
+      currentMusicGain = clamp(currentMusicGain + dt / MUSIC_FADE_SECONDS, 0, 1);
+    } else {
+      currentMusicGain = 0;
+    }
+    if (fadingMusicVoices.length > 0) {
+      const next = [];
+      for (const voice of fadingMusicVoices) {
+        voice.gain = clamp(voice.gain - dt / MUSIC_FADE_SECONDS, 0, 1);
+        if (voice.gain <= 0.001) {
+          retireMusicVoice(voice, voice.resetPosition);
+          continue;
+        }
+        next.push(voice);
+      }
+      fadingMusicVoices = next;
+    }
+    syncMusicVolume();
+  }
+
+  function updateMusicState(dt = 0) {
+    if (!musicUnlocked) {
+      return;
+    }
+    const desiredState = getDesiredMusicState();
+    const desiredTrack = desiredState === "gameplay" ? getGameplayMusicTrack() : MUSIC_TRACKS[desiredState];
+    if (desiredState === "gameplay" && !desiredTrack) {
+      if (currentMusicState === "gameplay" && currentMusicAudio) {
+        queueMusicFadeOut(currentMusicAudio, currentMusicGain, false);
+        currentMusicAudio = null;
+        currentMusicGain = 0;
+        currentMusicTrack = "";
+        currentMusicState = "";
+      }
+    } else {
+      playMusicTrack(desiredState, desiredTrack);
+    }
+    updateMusicFades(dt);
+  }
+
+  function unlockMusicPlayback() {
+    if (musicUnlocked) return;
+    musicUnlocked = true;
+    updateMusicState();
+  }
 
   function setupWebGL() {
     const canvas = engine.canvas;
@@ -7352,7 +8293,7 @@ export default function FreeCube2Game(engine) {
         .fc-furnace-progress{width:54px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
         .fc-furnace-progress > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
         .fc-furnace-slot-output{grid-column:4;grid-row:1 / span 2}
-        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
+        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('./PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
         @keyframes fc-menu-pan{0%{background-position:0 0}100%{background-position:-256px -256px}}
         #freecube2-menu::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.06), transparent 52%),linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.55));pointer-events:none}
         #freecube2-menu.show{display:flex}
@@ -7562,11 +8503,13 @@ export default function FreeCube2Game(engine) {
                   <button id="fc-video-ms" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-bob" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-fps" class="fc-btn fc-video-btn" type="button"></button>
+                  <button id="fc-video-mastervol" class="fc-btn fc-video-btn" type="button"></button>
+                  <button id="fc-video-musicvol" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-mobs" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-fullscreen" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-lagfix" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-inv" class="fc-btn fc-video-btn" type="button"></button>
-                  <button id="fc-resource-packs-btn" class="fc-btn fc-video-btn" type="button">Resource Packs...</button>
+                  <button id="fc-resource-packs-btn" class="fc-btn fc-video-btn" type="button" data-action="open-resource-packs-screen">Resource Packs...</button>
                   <button id="fc-video-gm" class="fc-btn fc-video-btn" type="button"></button>
                 </div>
                 <div class="fc-video-meta">
@@ -7592,7 +8535,7 @@ export default function FreeCube2Game(engine) {
                       </div>
                     </div>
                   </div>
-                  <input id="fc-skin-file" type="file" accept="image/png" style="display:none" />
+                  <input id="fc-skin-file" type="file" accept="image/png,image/webp" style="display:none" />
                 </div>
                 <div class="fc-small" style="margin-top:10px">Tip: ESC opens Game Menu. T opens chat. F1 hides HUD.</div>
               </div>
@@ -7603,7 +8546,7 @@ export default function FreeCube2Game(engine) {
           </div>
           <div id="fc-screen-resource-packs" style="display:none">
             <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 6px auto">Select Resource Packs</div>
-            <div class="fc-small" style="margin-bottom:10px">Choose between the built-in packs for this world.</div>
+            <div class="fc-small" style="margin-bottom:10px">Import a pack folder to override textures, sounds, music, and supported mob skins.</div>
             <div class="fc-pack-shell">
               <div class="fc-card fc-pack-column">
                 <div class="fc-pack-head">Available</div>
@@ -7615,9 +8558,10 @@ export default function FreeCube2Game(engine) {
               </div>
             </div>
             <div class="fc-row" style="margin-top:10px">
-              <button class="fc-btn half" data-action="open-resource-packs">Open Pack Folder</button>
+              <button class="fc-btn half" data-action="open-resource-packs">Import Pack Folder</button>
               <button class="fc-btn half" data-action="done-resource-packs">Done</button>
             </div>
+            <input id="fc-resource-pack-folder" type="file" multiple webkitdirectory directory style="display:none" />
           </div>
           <div id="fc-screen-loading" style="display:none">
             <div style="font:700 20px ui-monospace,Menlo,Consolas,monospace;color:#fff;margin:10px 6px 6px 6px">Loading...</div>
@@ -7718,6 +8662,8 @@ export default function FreeCube2Game(engine) {
     const videoMouseBtn = root.querySelector("#fc-video-ms");
     const videoViewBobBtn = root.querySelector("#fc-video-bob");
     const videoFpsBtn = root.querySelector("#fc-video-fps");
+    const videoMasterVolumeBtn = root.querySelector("#fc-video-mastervol");
+    const videoMusicVolumeBtn = root.querySelector("#fc-video-musicvol");
     const videoMobModelsBtn = root.querySelector("#fc-video-mobs");
     const videoFullscreenBtn = root.querySelector("#fc-video-fullscreen");
     const videoChunkLagBtn = root.querySelector("#fc-video-lagfix");
@@ -7728,6 +8674,7 @@ export default function FreeCube2Game(engine) {
     const skinPreviewEl = root.querySelector("#fc-skin-preview");
     const skinCurrentEl = root.querySelector("#fc-skin-current");
     const skinFileInput = root.querySelector("#fc-skin-file");
+    const resourcePackFileInput = root.querySelector("#fc-resource-pack-folder");
     const resourcePackAvailableEl = root.querySelector("#fc-resource-pack-available");
     const resourcePackSelectedEl = root.querySelector("#fc-resource-pack-selected");
 
@@ -7814,6 +8761,8 @@ export default function FreeCube2Game(engine) {
       videoMouseBtn,
       videoViewBobBtn,
       videoFpsBtn,
+      videoMasterVolumeBtn,
+      videoMusicVolumeBtn,
       videoMobModelsBtn,
       videoFullscreenBtn,
       videoChunkLagBtn,
@@ -7824,6 +8773,7 @@ export default function FreeCube2Game(engine) {
       skinPreviewEl,
       skinCurrentEl,
       skinFileInput,
+      resourcePackFileInput,
       resourcePackAvailableEl,
       resourcePackSelectedEl,
       loadBar,
@@ -8204,10 +9154,13 @@ export default function FreeCube2Game(engine) {
   }
 
   function updateInventoryCursorPosition() {
-    if (!ui || !inventoryOpen || ui.inventoryCursorEl.style.display === "none") return;
+    if (!ui || !inventoryOpen) return;
     const mouse = input?.getMousePosition?.() || { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    ui.inventoryCursorEl.style.left = `${mouse.x}px`;
-    ui.inventoryCursorEl.style.top = `${mouse.y}px`;
+    if (ui.inventoryCursorEl.style.display !== "none") {
+      ui.inventoryCursorEl.style.left = `${mouse.x}px`;
+      ui.inventoryCursorEl.style.top = `${mouse.y}px`;
+    }
+    updateMenuPreviewLookTargets(mouse);
   }
 
   function clearInventoryDragVisuals() {
@@ -8236,6 +9189,41 @@ export default function FreeCube2Game(engine) {
     renderPlayerPreviewCanvas(canvas, {}, getSelectedPlayerSkinCanvas(settings));
     ui.skinPreviewEl.innerHTML = "";
     ui.skinPreviewEl.appendChild(canvas);
+  }
+
+  function updatePreviewCanvasLook(canvas, armorItems = null, skinOverride = null, mouse = null) {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 1 || rect.height <= 1) return;
+    const pointer = mouse || input?.getMousePosition?.() || { x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 };
+    const nx = clamp(((pointer.x - rect.left) / rect.width - 0.5) * 2, -1, 1);
+    const ny = clamp(((pointer.y - rect.top) / rect.height - 0.45) * 2, -1, 1);
+    const prevX = Number(canvas.dataset.lookX) || 0;
+    const prevY = Number(canvas.dataset.lookY) || 0;
+    if (Math.abs(prevX - nx) < 0.025 && Math.abs(prevY - ny) < 0.025) {
+      return;
+    }
+    canvas.dataset.lookX = String(nx);
+    canvas.dataset.lookY = String(ny);
+    renderPlayerPreviewCanvas(canvas, armorItems || {}, skinOverride);
+  }
+
+  function updateMenuPreviewLookTargets(mouse = null) {
+    if (!ui) return;
+    const inventoryCanvas = ui.inventoryPreviewEl?.querySelector?.("canvas");
+    if (inventoryOpen && inventoryCanvas) {
+      updatePreviewCanvasLook(inventoryCanvas, {
+        head: getArmorSlotType(0),
+        chest: getArmorSlotType(1),
+        legs: getArmorSlotType(2),
+        feet: getArmorSlotType(3)
+      }, getSelectedPlayerSkinCanvas(settings), mouse);
+    }
+    const settingsCanvas = ui.skinPreviewEl?.querySelector?.("canvas");
+    const settingsVisible = ui.screens?.settings?.style?.display !== "none";
+    if (settingsVisible && settingsCanvas) {
+      updatePreviewCanvasLook(settingsCanvas, {}, getSelectedPlayerSkinCanvas(settings), mouse);
+    }
   }
 
   function renderInventoryUI() {
@@ -10252,19 +11240,21 @@ export default function FreeCube2Game(engine) {
     ui.videoMouseBtn.textContent = `Mouse Sensitivity: ${formatMouseSensitivityLabel(settings.mouseSensitivity)}`;
     ui.videoViewBobBtn.textContent = `View Bobbing: ${settings.viewBobbing !== false ? "ON" : "OFF"}`;
     ui.videoFpsBtn.textContent = `Show FPS: ${settings.showFps !== false ? "ON" : "OFF"}`;
+    ui.videoMasterVolumeBtn.textContent = `Master Volume: ${formatVolumeLabel(settings.masterVolume)}`;
+    ui.videoMusicVolumeBtn.textContent = `Music Volume: ${formatVolumeLabel(settings.musicVolume)}`;
     ui.videoMobModelsBtn.textContent = `3D Mob Models: ${settings.mobModels !== false ? "ON" : "OFF"}`;
     ui.videoFullscreenBtn.textContent = `Fullscreen: ${(settings.fullscreen || !!document.fullscreenElement) ? "ON" : "OFF"}`;
     ui.videoChunkLagBtn.textContent = `Chunk Lag Fix: ${settings.chunkLagFix !== false ? "ON" : "OFF"}`;
     ui.videoInvertYBtn.textContent = `Invert Y: ${settings.invertY ? "ON" : "OFF"}`;
     ui.videoGameModeBtn.textContent = `Game Mode: ${settings.gameMode === GAME_MODE.CREATIVE ? "Creative" : "Survival"}`;
-    ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack).name}`;
+    ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack, settings).name}`;
     ui.skinCurrentEl.textContent = `Current: ${getSelectedPlayerSkinLabel(settings)}`;
     renderSettingsSkinPreview();
     ui.fpsEl.style.display = settings.showFps === false ? "none" : "block";
   }
 
   function renderResourcePackEntry(packName, selected = false) {
-    const meta = getResourcePackMeta(packName);
+    const meta = getResourcePackMeta(packName, settings);
     const entry = document.createElement("div");
     entry.className = `fc-pack-entry${selected ? " selected" : ""}`;
     entry.dataset.packId = packName;
@@ -10275,7 +11265,7 @@ export default function FreeCube2Game(engine) {
     const icon = document.createElement("img");
     icon.className = "fc-pack-icon";
     icon.alt = meta.name;
-    icon.src = getBlockTexturePath(meta.iconBlock || BLOCK.GRASS, "top", { texturePack: packName }) || getBlockTexturePath(BLOCK.GRASS, "top", DEFAULT_SETTINGS);
+    icon.src = getBlockTexturePath(meta.iconBlock || BLOCK.GRASS, "top", { ...settings, texturePack: packName }) || getBlockTexturePath(BLOCK.GRASS, "top", DEFAULT_SETTINGS);
     entry.appendChild(icon);
 
     const copy = document.createElement("div");
@@ -10287,8 +11277,8 @@ export default function FreeCube2Game(engine) {
 
   function renderResourcePackUI() {
     ensureUI();
-    const selectedPack = settings.texturePack === "default" ? "default" : DEFAULT_SETTINGS.texturePack;
-    const packNames = Object.keys(RESOURCE_PACK_META);
+    const selectedPack = getAvailableResourcePackNames(settings).includes(settings.texturePack) ? settings.texturePack : DEFAULT_SETTINGS.texturePack;
+    const packNames = getAvailableResourcePackNames(settings);
 
     ui.resourcePackAvailableEl.innerHTML = "";
     ui.resourcePackSelectedEl.innerHTML = "";
@@ -10298,7 +11288,7 @@ export default function FreeCube2Game(engine) {
     if (available.length === 0) {
       const empty = document.createElement("div");
       empty.className = "fc-pack-empty";
-      empty.textContent = "No other built-in packs available.";
+      empty.textContent = "No other packs imported yet.";
       ui.resourcePackAvailableEl.appendChild(empty);
     } else {
       for (const packName of available) {
@@ -10325,6 +11315,9 @@ export default function FreeCube2Game(engine) {
       }
       glRenderer.chunkMeshes.clear();
       glRenderer.meshQueue = [];
+      glRenderer.meshQueuedKeys = new Set();
+      glRenderer.chunkGenQueue = [];
+      glRenderer.chunkGenQueuedKeys = new Set();
     }
   }
 
@@ -10332,8 +11325,12 @@ export default function FreeCube2Game(engine) {
     if (textures) {
       textures.settings = settings;
     }
+    if (entityTextures) {
+      entityTextures.settings = settings;
+    }
     if (atlas) {
       atlas.settings = settings;
+      atlas.build().catch((error) => console.warn("Atlas rebuild failed:", error.message));
     }
     setHotbarImages();
     if (useWebGL && glRenderer) {
@@ -10342,7 +11339,7 @@ export default function FreeCube2Game(engine) {
       canvasRenderer.setSettings(settings);
     }
     if (ui?.resourcePackCurrentEl) {
-      ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack).name}`;
+      ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack, settings).name}`;
     }
     if (ui?.resourcePackAvailableEl && ui?.resourcePackSelectedEl) {
       renderResourcePackUI();
@@ -10403,6 +11400,118 @@ export default function FreeCube2Game(engine) {
     refreshWorldList(selectedWorldId);
   }
 
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error(`Could not read ${file?.name || "file"}.`));
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function normalizeResourcePackRelativePath(relativePath = "") {
+    const cleaned = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!cleaned) return "";
+    const parts = cleaned.split("/").filter(Boolean);
+    if (parts.length <= 1) {
+      return normalizeAssetPath(cleaned);
+    }
+    return normalizeAssetPath(parts.slice(1).join("/"));
+  }
+
+  function inferIconBlockFromAssets(assets = {}) {
+    const entries = Object.entries(BLOCK_TEXTURE_PATHS);
+    for (const [blockId, faces] of entries) {
+      for (const sourcePath of Object.values(faces || {})) {
+        if (assets[normalizeAssetPath(sourcePath)]) {
+          return Number(blockId);
+        }
+      }
+    }
+    return BLOCK.GRASS;
+  }
+
+  async function preloadCustomResourcePackAssets(pack) {
+    if (!pack?.assets) return;
+    const imageTasks = [];
+    for (const [path, dataUrl] of Object.entries(pack.assets)) {
+      if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
+        continue;
+      }
+      imageTasks.push(
+        engine.resources.loadImage(dataUrl)
+          .then((image) => {
+            textures?.images?.set?.(dataUrl, image);
+            const match = Object.entries(ENTITY_TEXTURE_FILE_PATHS).find(([, entityPath]) => entityPath === path);
+            if (match) {
+              const [entityType] = match;
+              entityTextures?.images?.set?.(entityType, image);
+              entityTextures?.billboardImages?.delete?.(entityType);
+              entityTextures?.glTextures?.delete?.(entityType);
+            }
+          })
+          .catch((error) => {
+            console.warn(`Custom pack image failed for ${path}: ${error.message}`);
+          })
+      );
+    }
+    await Promise.all(imageTasks);
+  }
+
+  async function importResourcePackFiles(fileList) {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (files.length === 0) {
+      throw new Error("Choose a resource-pack folder first.");
+    }
+
+    let packMeta = null;
+    const assets = {};
+    let rootFolderName = "";
+
+    for (const file of files) {
+      const relativePath = String(file.webkitRelativePath || file.name || "");
+      if (!rootFolderName && relativePath) {
+        rootFolderName = relativePath.split("/").filter(Boolean)[0] || "";
+      }
+      const normalizedPath = normalizeResourcePackRelativePath(relativePath);
+      if (!normalizedPath) continue;
+
+      if (normalizedPath.endsWith("/pack.json") || normalizedPath === "./pack.json") {
+        try {
+          packMeta = JSON.parse(await file.text());
+        } catch (error) {
+          console.warn("Custom pack metadata parse failed:", error.message);
+        }
+        continue;
+      }
+
+      const dataUrl = await readFileAsDataUrl(file);
+      assets[normalizedPath] = dataUrl;
+    }
+
+    const defaultName = rootFolderName || `Custom Pack ${getCustomResourcePacks(settings).length + 1}`;
+    const safeName = String(packMeta?.name || defaultName).trim() || defaultName;
+    const packIdBase = safeName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || generateId();
+    const packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}`;
+    const pack = {
+      id: packId,
+      name: safeName,
+      description: String(packMeta?.description || "Imported custom pack.").trim(),
+      iconBlock: Number.isFinite(packMeta?.iconBlock) ? Number(packMeta.iconBlock) : inferIconBlockFromAssets(assets),
+      assets
+    };
+
+    settings.customResourcePacks = [
+      ...getCustomResourcePacks(settings).filter((existing) => existing.id !== pack.id),
+      pack
+    ];
+    settings.texturePack = pack.id;
+    await preloadCustomResourcePackAssets(pack);
+    applyTexturePackSetting();
+    markWorldDirty();
+    setSettingsUI();
+  }
+
   function loadWorldFromStore(worldId) {
     const meta = store.getWorldMeta(worldId);
     const save = store.loadWorld(worldId);
@@ -10421,9 +11530,12 @@ export default function FreeCube2Game(engine) {
     settings.graphicsMode = settings.graphicsMode === "fancy" ? "fancy" : DEFAULT_SETTINGS.graphicsMode;
     settings.chunkLagFix = settings.chunkLagFix !== false;
     settings.fullscreen = !!settings.fullscreen;
-    settings.texturePack = settings.texturePack === "default" ? "default" : DEFAULT_SETTINGS.texturePack;
+    settings.masterVolume = clamp(Number.isFinite(settings.masterVolume) ? settings.masterVolume : DEFAULT_SETTINGS.masterVolume, 0, 1);
+    settings.musicVolume = clamp(Number.isFinite(settings.musicVolume) ? settings.musicVolume : DEFAULT_SETTINGS.musicVolume, 0, 1);
+    settings.customResourcePacks = getCustomResourcePacks(settings);
+    settings.texturePack = getAvailableResourcePackNames(settings).includes(settings.texturePack) ? settings.texturePack : DEFAULT_SETTINGS.texturePack;
     settings.playerSkinPreset = isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
-    if (settings.playerSkinPreset === "freecube") {
+    if (settings.playerSkinPreset === "freecube" || settings.playerSkinPreset === "hoodie") {
       settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
     }
     settings.playerSkinDataUrl = typeof settings.playerSkinDataUrl === "string" ? settings.playerSkinDataUrl : "";
@@ -10436,8 +11548,18 @@ export default function FreeCube2Game(engine) {
     if (settings.playerSkinPreset === "custom") {
       getCustomPlayerSkinCanvas(settings.playerSkinDataUrl);
     }
+    const activeCustomPack = getCustomResourcePack(settings);
+    if (activeCustomPack) {
+      preloadCustomResourcePackAssets(activeCustomPack).then(() => {
+        applyTexturePackSetting();
+      });
+    }
+    syncMusicVolume();
     if (textures) {
       textures.settings = settings;
+    }
+    if (entityTextures) {
+      entityTextures.settings = settings;
     }
     if (atlas) {
       atlas.settings = settings;
@@ -10476,6 +11598,8 @@ export default function FreeCube2Game(engine) {
       glRenderer.chunkMeshes.clear();
       glRenderer.chunkGenQueue = [];
       glRenderer.meshQueue = [];
+      glRenderer.chunkGenQueuedKeys = new Set();
+      glRenderer.meshQueuedKeys = new Set();
       glRenderer.mesher = new GreedyChunkMesher(world, atlas);
       canvasRenderer = null;
       return;
@@ -10517,6 +11641,9 @@ export default function FreeCube2Game(engine) {
     mobRenderWarnings.clear();
     lastMobRenderSummaryAt = 0;
     saveTimer = 0;
+    runtimeLowFpsTimer = 0;
+    runtimeCompactCooldown = 0;
+    runtimeMaintenanceTimer = 0;
     loadingStartChunk = { x: Math.floor(player.x / CHUNK_SIZE), z: Math.floor(player.z / CHUNK_SIZE) };
     ensureActiveRenderer();
     logMobRenderDiagnostics("world-start");
@@ -10566,6 +11693,9 @@ export default function FreeCube2Game(engine) {
     inventoryCraftCounts.fill(0);
     tableCraftTypes.fill(0);
     tableCraftCounts.fill(0);
+    runtimeLowFpsTimer = 0;
+    runtimeCompactCooldown = 0;
+    runtimeMaintenanceTimer = 0;
     resetInventoryDragState();
     ensureUI();
     ui.showScreen("title");
@@ -10858,6 +11988,90 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function compactRuntimeState(forceMeshReset = false) {
+    if (world?.terrain) {
+      world.terrain.heightCache.clear();
+      world.terrain.columnCache.clear();
+    }
+    if (!glRenderer || !world || !player) {
+      return;
+    }
+
+    const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
+    const keepRadius = settings.chunkLagFix === false ? settings.renderDistanceChunks + 2 : settings.renderDistanceChunks + 1;
+    world.unloadFarChunks(playerChunkX, playerChunkZ, keepRadius);
+
+    for (const [key, record] of glRenderer.chunkMeshes) {
+      if (!world.chunks.has(key) || forceMeshReset) {
+        record.opaque.destroy();
+        record.transparent.destroy();
+        glRenderer.chunkMeshes.delete(key);
+      }
+    }
+
+    if (forceMeshReset) {
+      glRenderer.chunkGenQueue = [];
+      glRenderer.meshQueue = [];
+      glRenderer.chunkGenQueuedKeys = new Set();
+      glRenderer.meshQueuedKeys = new Set();
+      for (const offset of glRenderer.visibleOffsets) {
+        const chunkX = playerChunkX + offset.dx;
+        const chunkZ = playerChunkZ + offset.dz;
+        if (glRenderer._withinDistance(offset.dx, offset.dz)) {
+          if (world.peekChunk(chunkX, chunkZ)) {
+            glRenderer.queueChunk(chunkX, chunkZ);
+          } else {
+            glRenderer.queueChunkGeneration(chunkX, chunkZ);
+          }
+        }
+      }
+      return;
+    }
+
+    glRenderer.chunkGenQueue = glRenderer.chunkGenQueue.filter((entry) => {
+      const dx = entry.chunkX - playerChunkX;
+      const dz = entry.chunkZ - playerChunkZ;
+      return glRenderer._withinDistance(dx, dz) && !glRenderer.chunkMeshes.has(entry.key);
+    });
+    glRenderer.chunkGenQueuedKeys = new Set(glRenderer.chunkGenQueue.map((entry) => entry.key));
+
+    glRenderer.meshQueue = glRenderer.meshQueue.filter((entry) => {
+      const dx = entry.chunkX - playerChunkX;
+      const dz = entry.chunkZ - playerChunkZ;
+      return glRenderer._withinDistance(dx, dz) && world.chunks.has(entry.key);
+    });
+    glRenderer.meshQueuedKeys = new Set(glRenderer.meshQueue.map((entry) => entry.key));
+  }
+
+  function updateRuntimePerformance(dt) {
+    runtimeCompactCooldown = Math.max(0, runtimeCompactCooldown - dt);
+    runtimeMaintenanceTimer += dt;
+
+    if (mode !== "playing" || !useWebGL || !world || !player || !glRenderer) {
+      runtimeLowFpsTimer = 0;
+      return;
+    }
+
+    if (runtimeMaintenanceTimer >= 30) {
+      compactRuntimeState(false);
+      runtimeMaintenanceTimer = 0;
+    }
+
+    const lowFpsThreshold = settings.chunkLagFix === false ? 34 : 48;
+    if (fpsSmoothed > 0 && fpsSmoothed < lowFpsThreshold) {
+      runtimeLowFpsTimer += dt;
+    } else {
+      runtimeLowFpsTimer = Math.max(0, runtimeLowFpsTimer - dt * 1.4);
+    }
+
+    if (runtimeLowFpsTimer >= 6 && runtimeCompactCooldown <= 0) {
+      compactRuntimeState(fpsSmoothed < 34);
+      runtimeLowFpsTimer = 0;
+      runtimeCompactCooldown = 18;
+    }
+  }
+
   function wireUiEvents() {
     ensureUI();
     if (ui.root.dataset.wired === "1") return;
@@ -10878,7 +12092,9 @@ export default function FreeCube2Game(engine) {
     });
 
     window.addEventListener("mousemove", () => {
+      const mouse = input?.getMousePosition?.() || null;
       updateInventoryCursorPosition();
+      updateMenuPreviewLookTargets(mouse);
     });
 
     ui.root.addEventListener("mousedown", (event) => {
@@ -11012,7 +12228,7 @@ export default function FreeCube2Game(engine) {
 
       const packEntry = event.target.closest("[data-pack-select]");
       if (packEntry?.dataset.packSelect) {
-        settings.texturePack = packEntry.dataset.packSelect === "default" ? "default" : DEFAULT_SETTINGS.texturePack;
+        settings.texturePack = packEntry.dataset.packSelect;
         applyTexturePackSetting();
         markWorldDirty();
         setSettingsUI();
@@ -11044,7 +12260,8 @@ export default function FreeCube2Game(engine) {
         ui.showScreen("settings");
         setSettingsUI();
       } else if (action === "open-resource-packs") {
-        alert("Built-in packs are available here already. Custom pack folders are not wired in yet.");
+        ui.resourcePackFileInput.value = "";
+        ui.resourcePackFileInput.click();
       } else if (action === "skin-import") {
         ui.skinFileInput.value = "";
         ui.skinFileInput.click();
@@ -11056,7 +12273,10 @@ export default function FreeCube2Game(engine) {
         setSettingsUI();
         if (inventoryOpen) renderInventoryUI();
       } else if (action === "skin-freecube" || action === "skin-steve" || action === "skin-alex" || action === "skin-zombie") {
-        const preset = action.replace("skin-", "");
+        let preset = action.replace("skin-", "");
+        if (preset === "steve") {
+          preset = "steve_large";
+        }
         settings.playerSkinPreset = preset;
         settings.playerSkinDataUrl = "";
         customPlayerSkinCache = { dataUrl: "", canvas: null, loading: false, failed: false };
@@ -11154,6 +12374,21 @@ export default function FreeCube2Game(engine) {
       }
     });
 
+    ui.resourcePackFileInput.addEventListener("change", async () => {
+      const files = ui.resourcePackFileInput.files;
+      if (!files?.length) {
+        return;
+      }
+      try {
+        await importResourcePackFiles(files);
+        renderResourcePackUI();
+      } catch (error) {
+        alert(`Resource-pack import failed: ${error.message}`);
+      } finally {
+        ui.resourcePackFileInput.value = "";
+      }
+    });
+
     ui.root.addEventListener("contextmenu", (event) => {
       if (!inventoryOpen) return;
       if (suppressInventoryClick) {
@@ -11223,6 +12458,20 @@ export default function FreeCube2Game(engine) {
       setSettingsUI();
     });
 
+    ui.videoMasterVolumeBtn.addEventListener("click", () => {
+      settings.masterVolume = cycleVolumePreset(settings.masterVolume);
+      syncMusicVolume();
+      markWorldDirty();
+      setSettingsUI();
+    });
+
+    ui.videoMusicVolumeBtn.addEventListener("click", () => {
+      settings.musicVolume = cycleVolumePreset(settings.musicVolume);
+      syncMusicVolume();
+      markWorldDirty();
+      setSettingsUI();
+    });
+
     ui.videoMobModelsBtn.addEventListener("click", () => {
       settings.mobModels = !(settings.mobModels !== false);
       logMobRenderDiagnostics("toggle");
@@ -11277,6 +12526,7 @@ export default function FreeCube2Game(engine) {
       textures.settings = settings;
       textures.startLoading();
       entityTextures = new EntityTextureLibrary(engine);
+      entityTextures.settings = settings;
       entityTextures.startLoading();
       objModels = new ObjModelLibrary(engine);
       objModels.startLoading();
@@ -11293,6 +12543,9 @@ export default function FreeCube2Game(engine) {
       ui.showScreen("title");
       ui.setHudVisible(false);
       setSettingsUI();
+      preloadMusicTracks();
+      window.addEventListener("pointerdown", unlockMusicPlayback, { once: true });
+      window.addEventListener("keydown", unlockMusicPlayback, { once: true });
       // Hotbar thumbnails depend on PNG textures; refresh once they're loaded.
       textures.readyPromise?.then(() => setHotbarImages());
 
@@ -11313,9 +12566,11 @@ export default function FreeCube2Game(engine) {
     update(dt) {
       if (!input || !textures) return;
       updateFps(dt);
+      updateRuntimePerformance(dt);
       ensureStore();
       updateChat(dt);
       updateHud(dt);
+      updateMusicState(dt);
 
       if (document.hidden) {
         input.resetState?.(true);
