@@ -1,10 +1,10 @@
-const GAME_VERSION = "5.6.2";
+const GAME_VERSION = "5.7.0";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
-const WORLD_SEED = 124578;
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 112;
 const SEA_LEVEL = 30;
+const LAVA_LEVEL = 8;
 const PLAYER_HEIGHT = 1.8;
 const PLAYER_EYE_HEIGHT = 1.62;
 const PLAYER_RADIUS = 0.32;
@@ -40,6 +40,8 @@ const PLAY_CHUNK_MESH_LIMIT = 2;
 const PLAY_CHUNK_GEN_BUDGET_MS = 1.5;
 const PLAY_CHUNK_MESH_BUDGET_MS = 2.25;
 const AUTOSAVE_INTERVAL_SECONDS = 8;
+const RANDOM_BLOCK_TICK_INTERVAL = 0.16;
+const RANDOM_BLOCK_TICKS_PER_STEP = 6;
 
 const GAME_MODE = {
   SURVIVAL: "survival",
@@ -597,7 +599,10 @@ const BLOCK = {
   GOLD_ORE: 16,
   DIAMOND_ORE: 17,
   REDSTONE_ORE: 18,
-  EMERALD_ORE: 19
+  EMERALD_ORE: 19,
+  LAVA: 20,
+  COBBLESTONE: 21,
+  OBSIDIAN: 22
 };
 
 const ITEM = {
@@ -649,6 +654,8 @@ const BLOCK_BREAK_TIME = {
   [BLOCK.DIAMOND_ORE]: 2.2,
   [BLOCK.REDSTONE_ORE]: 2.05,
   [BLOCK.EMERALD_ORE]: 2.25,
+  [BLOCK.COBBLESTONE]: 1.6,
+  [BLOCK.OBSIDIAN]: 8.5,
   [BLOCK.WOOD]: 1.05,
   [BLOCK.PLANKS]: 0.85,
   [BLOCK.CRAFTING_TABLE]: 0.95,
@@ -657,12 +664,17 @@ const BLOCK_BREAK_TIME = {
   [BLOCK.BRICK]: 1.9,
   [BLOCK.GLASS]: 0.28,
   [BLOCK.WATER]: Infinity,
+  [BLOCK.LAVA]: Infinity,
   [BLOCK.BEDROCK]: Infinity
 };
 
 function getBreakTime(blockType) {
   const t = BLOCK_BREAK_TIME[blockType];
   return Number.isFinite(t) ? Math.max(0.08, t) : 0.8;
+}
+
+function isFluidBlock(blockType) {
+  return blockType === BLOCK.WATER || blockType === BLOCK.LAVA;
 }
 
 function getToolBreakMultiplier(itemType, blockType) {
@@ -684,6 +696,8 @@ function getToolBreakMultiplier(itemType, blockType) {
       blockType === BLOCK.STONE ||
       blockType === BLOCK.BRICK ||
       blockType === BLOCK.FURNACE ||
+      blockType === BLOCK.COBBLESTONE ||
+      blockType === BLOCK.OBSIDIAN ||
       blockType === BLOCK.COAL_ORE ||
       blockType === BLOCK.IRON_ORE ||
       blockType === BLOCK.GOLD_ORE ||
@@ -698,6 +712,42 @@ function getToolBreakMultiplier(itemType, blockType) {
     return 2 * tierBoost;
   }
   return 1;
+}
+
+function getToolTier(itemType) {
+  if (!getItemToolType(itemType)) {
+    return 0;
+  }
+  return clamp(Number(getItemInfo(itemType)?.tier) || 1, 1, 3);
+}
+
+function getRequiredToolForBlock(blockType) {
+  switch (blockType) {
+    case BLOCK.STONE:
+    case BLOCK.COBBLESTONE:
+    case BLOCK.BRICK:
+    case BLOCK.FURNACE:
+    case BLOCK.COAL_ORE:
+      return { tool: "pickaxe", tier: 1 };
+    case BLOCK.IRON_ORE:
+    case BLOCK.GOLD_ORE:
+    case BLOCK.REDSTONE_ORE:
+    case BLOCK.DIAMOND_ORE:
+    case BLOCK.EMERALD_ORE:
+      return { tool: "pickaxe", tier: 2 };
+    case BLOCK.OBSIDIAN:
+      return { tool: "pickaxe", tier: 3 };
+    default:
+      return null;
+  }
+}
+
+function canHarvestBlock(itemType, blockType) {
+  const requirement = getRequiredToolForBlock(blockType);
+  if (!requirement) {
+    return true;
+  }
+  return getItemToolType(itemType) === requirement.tool && getToolTier(itemType) >= requirement.tier;
 }
 
 const BLOCK_INFO = {
@@ -772,6 +822,17 @@ const BLOCK_INFO = {
       top: rgb(74, 145, 226),
       side: rgb(54, 120, 206),
       bottom: rgb(40, 99, 177)
+    }
+  },
+  [BLOCK.LAVA]: {
+    name: "Lava",
+    collidable: false,
+    transparent: true,
+    alpha: 0.72,
+    palette: {
+      top: rgb(255, 142, 40),
+      side: rgb(224, 92, 22),
+      bottom: rgb(168, 46, 16)
     }
   },
   [BLOCK.SAND]: {
@@ -916,104 +977,141 @@ const BLOCK_INFO = {
       side: rgb(60, 160, 105),
       bottom: rgb(48, 132, 86)
     }
+  },
+  [BLOCK.COBBLESTONE]: {
+    name: "Cobblestone",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(123, 126, 132),
+      side: rgb(111, 114, 120),
+      bottom: rgb(92, 95, 101)
+    }
+  },
+  [BLOCK.OBSIDIAN]: {
+    name: "Obsidian",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(53, 34, 78),
+      side: rgb(42, 26, 64),
+      bottom: rgb(31, 20, 47)
+    }
   }
 };
 
 const BLOCK_TEXTURE_PATHS = {
   [BLOCK.GRASS]: {
-    top: "PNG/Tiles/grass_top.png",
-    side: "PNG/Tiles/dirt_grass.png",
-    bottom: "PNG/Tiles/dirt.png"
+    top: "assets/PNG/Tiles/grass_top.png",
+    side: "assets/PNG/Tiles/dirt_grass.png",
+    bottom: "assets/PNG/Tiles/dirt.png"
   },
   [BLOCK.DIRT]: {
-    top: "PNG/Tiles/dirt.png",
-    side: "PNG/Tiles/dirt.png",
-    bottom: "PNG/Tiles/dirt.png"
+    top: "assets/PNG/Tiles/dirt.png",
+    side: "assets/PNG/Tiles/dirt.png",
+    bottom: "assets/PNG/Tiles/dirt.png"
   },
   [BLOCK.STONE]: {
-    top: "PNG/Tiles/stone.png",
-    side: "PNG/Tiles/stone.png",
-    bottom: "PNG/Tiles/stone.png"
+    top: "assets/PNG/Tiles/stone.png",
+    side: "assets/PNG/Tiles/stone.png",
+    bottom: "assets/PNG/Tiles/stone.png"
   },
   [BLOCK.WOOD]: {
-    top: "PNG/Tiles/trunk_top.png",
-    side: "PNG/Tiles/trunk_side.png",
-    bottom: "PNG/Tiles/trunk_top.png"
+    top: "assets/PNG/Tiles/trunk_top.png",
+    side: "assets/PNG/Tiles/trunk_side.png",
+    bottom: "assets/PNG/Tiles/trunk_top.png"
   },
   [BLOCK.LEAVES]: {
-    top: "PNG/Tiles/leaves.png",
-    side: "PNG/Tiles/leaves.png",
-    bottom: "PNG/Tiles/leaves.png"
+    top: "assets/PNG/Tiles/leaves.png",
+    side: "assets/PNG/Tiles/leaves.png",
+    bottom: "assets/PNG/Tiles/leaves.png"
   },
   [BLOCK.WATER]: {
-    top: "PNG/Tiles/water.png",
-    side: "PNG/Tiles/water.png",
-    bottom: "PNG/Tiles/water.png"
+    top: "assets/PNG/Tiles/water.png",
+    side: "assets/PNG/Tiles/water.png",
+    bottom: "assets/PNG/Tiles/water.png"
+  },
+  [BLOCK.LAVA]: {
+    top: "assets/PNG/Tiles/lava.png",
+    side: "assets/PNG/Tiles/lava.png",
+    bottom: "assets/PNG/Tiles/lava.png"
   },
   [BLOCK.SAND]: {
-    top: "PNG/Tiles/sand.png",
-    side: "PNG/Tiles/sand.png",
-    bottom: "PNG/Tiles/sand.png"
+    top: "assets/PNG/Tiles/sand.png",
+    side: "assets/PNG/Tiles/sand.png",
+    bottom: "assets/PNG/Tiles/sand.png"
   },
   [BLOCK.PLANKS]: {
-    top: "PNG/Tiles/wood.png",
-    side: "PNG/Tiles/wood.png",
-    bottom: "PNG/Tiles/wood.png"
+    top: "assets/PNG/Tiles/wood.png",
+    side: "assets/PNG/Tiles/wood.png",
+    bottom: "assets/PNG/Tiles/wood.png"
   },
   [BLOCK.BRICK]: {
-    top: "PNG/Tiles/brick_red.png",
-    side: "PNG/Tiles/brick_red.png",
-    bottom: "PNG/Tiles/brick_red.png"
+    top: "assets/PNG/Tiles/brick_red.png",
+    side: "assets/PNG/Tiles/brick_red.png",
+    bottom: "assets/PNG/Tiles/brick_red.png"
   },
   [BLOCK.BEDROCK]: {
-    top: "PNG/Tiles/greystone.png",
-    side: "PNG/Tiles/greystone.png",
-    bottom: "PNG/Tiles/greystone.png"
+    top: "assets/PNG/Tiles/greystone.png",
+    side: "assets/PNG/Tiles/greystone.png",
+    bottom: "assets/PNG/Tiles/greystone.png"
   },
   [BLOCK.GLASS]: {
-    top: "PNG/Tiles/glass.png",
-    side: "PNG/Tiles/glass.png",
-    bottom: "PNG/Tiles/glass.png"
+    top: "assets/PNG/Tiles/glass.png",
+    side: "assets/PNG/Tiles/glass.png",
+    bottom: "assets/PNG/Tiles/glass.png"
   },
   [BLOCK.CRAFTING_TABLE]: {
-    top: "PNG/Tiles/table.png",
-    side: "PNG/Tiles/table.png",
-    bottom: "PNG/Tiles/table.png"
+    top: "assets/PNG/Tiles/table.png",
+    side: "assets/PNG/Tiles/table.png",
+    bottom: "assets/PNG/Tiles/table.png"
   },
   [BLOCK.FURNACE]: {
-    top: "PNG/Tiles/oven.png",
-    side: "PNG/Tiles/oven.png",
-    bottom: "PNG/Tiles/oven.png"
+    top: "assets/PNG/Tiles/oven.png",
+    side: "assets/PNG/Tiles/oven.png",
+    bottom: "assets/PNG/Tiles/oven.png"
   },
   [BLOCK.COAL_ORE]: {
-    top: "PNG/Tiles/stone_coal.png",
-    side: "PNG/Tiles/stone_coal.png",
-    bottom: "PNG/Tiles/stone_coal.png"
+    top: "assets/PNG/Tiles/stone_coal.png",
+    side: "assets/PNG/Tiles/stone_coal.png",
+    bottom: "assets/PNG/Tiles/stone_coal.png"
   },
   [BLOCK.IRON_ORE]: {
-    top: "PNG/Tiles/stone_iron.png",
-    side: "PNG/Tiles/stone_iron.png",
-    bottom: "PNG/Tiles/stone_iron.png"
+    top: "assets/PNG/Tiles/stone_iron.png",
+    side: "assets/PNG/Tiles/stone_iron.png",
+    bottom: "assets/PNG/Tiles/stone_iron.png"
   },
   [BLOCK.GOLD_ORE]: {
-    top: "PNG/Tiles/stone_gold.png",
-    side: "PNG/Tiles/stone_gold.png",
-    bottom: "PNG/Tiles/stone_gold.png"
+    top: "assets/PNG/Tiles/stone_gold.png",
+    side: "assets/PNG/Tiles/stone_gold.png",
+    bottom: "assets/PNG/Tiles/stone_gold.png"
   },
   [BLOCK.DIAMOND_ORE]: {
-    top: "PNG/Tiles/stone_diamond.png",
-    side: "PNG/Tiles/stone_diamond.png",
-    bottom: "PNG/Tiles/stone_diamond.png"
+    top: "assets/PNG/Tiles/stone_diamond.png",
+    side: "assets/PNG/Tiles/stone_diamond.png",
+    bottom: "assets/PNG/Tiles/stone_diamond.png"
   },
   [BLOCK.REDSTONE_ORE]: {
-    top: "PNG/Tiles/redstone.png",
-    side: "PNG/Tiles/redstone.png",
-    bottom: "PNG/Tiles/redstone.png"
+    top: "assets/PNG/Tiles/redstone.png",
+    side: "assets/PNG/Tiles/redstone.png",
+    bottom: "assets/PNG/Tiles/redstone.png"
   },
   [BLOCK.EMERALD_ORE]: {
-    top: "PNG/Tiles/redstone_emerald.png",
-    side: "PNG/Tiles/redstone_emerald.png",
-    bottom: "PNG/Tiles/redstone_emerald.png"
+    top: "assets/PNG/Tiles/redstone_emerald.png",
+    side: "assets/PNG/Tiles/redstone_emerald.png",
+    bottom: "assets/PNG/Tiles/redstone_emerald.png"
+  },
+  [BLOCK.COBBLESTONE]: {
+    top: "assets/PNG/Tiles/gravel_stone.png",
+    side: "assets/PNG/Tiles/gravel_stone.png",
+    bottom: "assets/PNG/Tiles/gravel_stone.png"
+  },
+  [BLOCK.OBSIDIAN]: {
+    top: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
+    side: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
+    bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png"
   }
 };
 
@@ -1021,99 +1119,114 @@ const TEXTURE_PACKS = {
   default: {},
   gigantopack32: {
     [BLOCK.GRASS]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/grass_top (13).png",
-      side: "PNG/Tiles/dirt_grass.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/dirt4.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/grass_top (13).png",
+      side: "assets/PNG/Tiles/dirt_grass.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/dirt4.png"
     },
     [BLOCK.DIRT]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/dirt4.png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/dirt4.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/dirt4.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/dirt4.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/dirt4.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/dirt4.png"
     },
     [BLOCK.STONE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/stone (45).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/stone (45).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/stone (45).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/stone (45).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/stone (45).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/stone (45).png"
     },
     [BLOCK.WOOD]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/log_oak_top (45).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/log_oak (46).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/log_oak_top (45).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/log_oak_top (45).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/log_oak (46).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/log_oak_top (45).png"
     },
     [BLOCK.LEAVES]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png"
     },
     [BLOCK.WATER]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/water_still (12).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/water_still (12).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/water_still (12).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/water_still (12).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/water_still (12).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/water_still (12).png"
+    },
+    [BLOCK.LAVA]: {
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/lava_still (12).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/lava_still (12).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/lava_still (12).png"
     },
     [BLOCK.SAND]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/sand (7).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/sand (7).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/sand (7).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/sand (7).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/sand (7).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/sand (7).png"
     },
     [BLOCK.PLANKS]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/planks_oak (35).png"
     },
     [BLOCK.BRICK]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/brick.png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/brick.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/brick.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/brick.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/brick.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/brick.png"
     },
     [BLOCK.BEDROCK]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/bedrock.png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/bedrock.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/bedrock.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/bedrock.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/bedrock.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/bedrock.png"
     },
     [BLOCK.GLASS]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/glass_light_blue.png"
     },
     [BLOCK.CRAFTING_TABLE]: {
-      top: "PNG/Tiles/table.png",
-      side: "PNG/Tiles/table.png",
-      bottom: "PNG/Tiles/table.png"
+      top: "assets/PNG/Tiles/table.png",
+      side: "assets/PNG/Tiles/table.png",
+      bottom: "assets/PNG/Tiles/table.png"
     },
     [BLOCK.FURNACE]: {
-      top: "PNG/Tiles/oven.png",
-      side: "PNG/Tiles/oven.png",
-      bottom: "PNG/Tiles/oven.png"
+      top: "assets/PNG/Tiles/oven.png",
+      side: "assets/PNG/Tiles/oven.png",
+      bottom: "assets/PNG/Tiles/oven.png"
     },
     [BLOCK.COAL_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/coal_ore (52).png"
     },
     [BLOCK.IRON_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/iron_ore (52).png"
     },
     [BLOCK.GOLD_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/gold_ore (35).png"
     },
     [BLOCK.DIAMOND_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/diamond_ore (23).png"
     },
     [BLOCK.REDSTONE_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/redstone_ore (34).png"
     },
     [BLOCK.EMERALD_ORE]: {
-      top: "32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png",
-      side: "32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png",
-      bottom: "32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png"
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/emerald_ore (16).png"
+    },
+    [BLOCK.COBBLESTONE]: {
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/cobblestone.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/cobblestone.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/cobblestone.png"
+    },
+    [BLOCK.OBSIDIAN]: {
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png"
     }
   }
 };
@@ -1198,11 +1311,11 @@ const ITEM_TEXTURE_SOURCES = {
       <rect x="4" y="13" width="2" height="2" fill="#8b5a2b"/>
     </svg>
   `),
-  [ITEM.WOODEN_PICKAXE]: "PNG/Items/pick_bronze.png",
-  [ITEM.WOODEN_AXE]: "PNG/Items/axe_bronze.png",
-  [ITEM.WOODEN_SHOVEL]: "PNG/Items/shovel_bronze.png",
-  [ITEM.WOODEN_SWORD]: "PNG/Items/sword_bronze.png",
-  [ITEM.WOODEN_HOE]: "PNG/Items/hoe_bronze.png",
+  [ITEM.WOODEN_PICKAXE]: "assets/PNG/Items/pick_bronze.png",
+  [ITEM.WOODEN_AXE]: "assets/PNG/Items/axe_bronze.png",
+  [ITEM.WOODEN_SHOVEL]: "assets/PNG/Items/shovel_bronze.png",
+  [ITEM.WOODEN_SWORD]: "assets/PNG/Items/sword_bronze.png",
+  [ITEM.WOODEN_HOE]: "assets/PNG/Items/hoe_bronze.png",
   [ITEM.LEATHER_HELMET]: svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
       <rect width="16" height="16" fill="none"/>
@@ -1326,21 +1439,21 @@ const ITEM_TEXTURE_SOURCES = {
       <rect x="9" y="8" width="2" height="2" fill="#b96d66"/>
     </svg>
   `),
-  [ITEM.COAL]: "PNG/Items/ore_coal.png",
-  [ITEM.DIAMOND]: "PNG/Items/ore_diamond.png",
-  [ITEM.EMERALD]: "PNG/Items/ore_emerald.png",
-  [ITEM.IRON_INGOT]: "PNG/Items/ore_iron.png",
-  [ITEM.GOLD_INGOT]: "PNG/Items/ore_gold.png",
-  [ITEM.IRON_PICKAXE]: "PNG/Items/pick_iron.png",
-  [ITEM.IRON_AXE]: "PNG/Items/axe_iron.png",
-  [ITEM.IRON_SHOVEL]: "PNG/Items/shovel_iron.png",
-  [ITEM.IRON_SWORD]: "PNG/Items/sword_iron.png",
-  [ITEM.IRON_HOE]: "PNG/Items/hoe_iron.png",
-  [ITEM.DIAMOND_PICKAXE]: "PNG/Items/pick_diamond.png",
-  [ITEM.DIAMOND_AXE]: "PNG/Items/axe_diamond.png",
-  [ITEM.DIAMOND_SHOVEL]: "PNG/Items/shovel_diamond.png",
-  [ITEM.DIAMOND_SWORD]: "PNG/Items/sword_diamond.png",
-  [ITEM.DIAMOND_HOE]: "PNG/Items/hoe_diamond.png",
+  [ITEM.COAL]: "assets/PNG/Items/ore_coal.png",
+  [ITEM.DIAMOND]: "assets/PNG/Items/ore_diamond.png",
+  [ITEM.EMERALD]: "assets/PNG/Items/ore_emerald.png",
+  [ITEM.IRON_INGOT]: "assets/PNG/Items/ore_iron.png",
+  [ITEM.GOLD_INGOT]: "assets/PNG/Items/ore_gold.png",
+  [ITEM.IRON_PICKAXE]: "assets/PNG/Items/pick_iron.png",
+  [ITEM.IRON_AXE]: "assets/PNG/Items/axe_iron.png",
+  [ITEM.IRON_SHOVEL]: "assets/PNG/Items/shovel_iron.png",
+  [ITEM.IRON_SWORD]: "assets/PNG/Items/sword_iron.png",
+  [ITEM.IRON_HOE]: "assets/PNG/Items/hoe_iron.png",
+  [ITEM.DIAMOND_PICKAXE]: "assets/PNG/Items/pick_diamond.png",
+  [ITEM.DIAMOND_AXE]: "assets/PNG/Items/axe_diamond.png",
+  [ITEM.DIAMOND_SHOVEL]: "assets/PNG/Items/shovel_diamond.png",
+  [ITEM.DIAMOND_SWORD]: "assets/PNG/Items/sword_diamond.png",
+  [ITEM.DIAMOND_HOE]: "assets/PNG/Items/hoe_diamond.png",
   [ITEM.REDSTONE_DUST]: svgDataUrl(`
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
       <rect width="16" height="16" fill="none"/>
@@ -1471,6 +1584,8 @@ function getSmeltingResult(itemType) {
 
 function getBlockDrop(blockType, x = 0, y = 0, z = 0, seed = 0) {
   switch (blockType) {
+    case BLOCK.STONE:
+      return { itemType: BLOCK.COBBLESTONE, count: 1 };
     case BLOCK.COAL_ORE:
       return { itemType: ITEM.COAL, count: 1 + Math.floor(random3(x, y, z, seed + 611) * 2) };
     case BLOCK.DIAMOND_ORE:
@@ -1571,26 +1686,59 @@ function getBlockTextureEntry(blockType, settingsState = DEFAULT_SETTINGS) {
   return override || BLOCK_TEXTURE_PATHS[blockType] || null;
 }
 
-function getBlockTexturePath(blockType, faceId, settingsState = DEFAULT_SETTINGS) {
+function getBlockTextureCandidates(blockType, faceId, settingsState = DEFAULT_SETTINGS) {
+  const candidates = [];
+  const add = (path) => {
+    if (typeof path === "string" && path && !candidates.includes(path)) {
+      candidates.push(path);
+    }
+  };
+
   const entry = getBlockTextureEntry(blockType, settingsState);
-  if (!entry) {
-    return null;
+  if (entry) {
+    const rawPath = faceId === "top" ? entry.top : faceId === "bottom" ? entry.bottom : entry.side;
+    add(resolveResourcePackAsset(rawPath, settingsState));
+    add(normalizeAssetPath(rawPath));
   }
-  const rawPath = faceId === "top" ? entry.top : faceId === "bottom" ? entry.bottom : entry.side;
-  return resolveResourcePackAsset(rawPath, settingsState);
+
+  const builtinEntry = BLOCK_TEXTURE_PATHS[blockType];
+  if (builtinEntry) {
+    const rawPath = faceId === "top" ? builtinEntry.top : faceId === "bottom" ? builtinEntry.bottom : builtinEntry.side;
+    add(normalizeAssetPath(rawPath));
+  }
+
+  return candidates;
 }
 
-function getAllBlockTexturePaths() {
+function getBlockTexturePath(blockType, faceId, settingsState = DEFAULT_SETTINGS) {
+  return getBlockTextureCandidates(blockType, faceId, settingsState)[0] || null;
+}
+
+function getAllBlockTexturePaths(settingsState = DEFAULT_SETTINGS) {
   const paths = new Set();
+  for (const blockType of Object.keys(BLOCK_INFO).map(Number)) {
+    if (!Number.isFinite(blockType) || blockType === BLOCK.AIR) continue;
+    for (const faceId of ["top", "side", "bottom"]) {
+      for (const path of getBlockTextureCandidates(blockType, faceId, settingsState)) {
+        if (path) {
+          paths.add(path);
+        }
+      }
+    }
+  }
   for (const entry of Object.values(BLOCK_TEXTURE_PATHS)) {
     for (const path of Object.values(entry || {})) {
-      if (path) paths.add(normalizeAssetPath(path));
+      if (path) {
+        paths.add(normalizeAssetPath(path));
+      }
     }
   }
   for (const pack of Object.values(TEXTURE_PACKS)) {
     for (const entry of Object.values(pack || {})) {
       for (const path of Object.values(entry || {})) {
-        if (path) paths.add(normalizeAssetPath(path));
+        if (path) {
+          paths.add(normalizeAssetPath(path));
+        }
       }
     }
   }
@@ -1628,12 +1776,12 @@ const OBJ_ENTITY_MODEL_PATHS = {
 };
 
 const MUSIC_TRACKS = {
-  title: normalizeAssetPath("Wav/music/welcome.wav"),
-  pause: normalizeAssetPath("Wav/music/pausescreen.mp3"),
+  title: normalizeAssetPath("assets/Wav/music/welcome.wav"),
+  pause: normalizeAssetPath("assets/Wav/music/pausescreen.mp3"),
   gameplay: {
-    cave: normalizeAssetPath("Wav/music/caves.mp3"),
-    village: normalizeAssetPath("Wav/music/village.mp3"),
-    forest: normalizeAssetPath("Wav/music/Forest_Ambience.mp3")
+    cave: normalizeAssetPath("assets/Wav/music/caves.mp3"),
+    village: normalizeAssetPath("assets/Wav/music/village.mp3"),
+    forest: normalizeAssetPath("assets/Wav/music/Forest_Ambience.mp3")
   }
 };
 
@@ -1740,8 +1888,9 @@ function getMobDef(type) {
   return MOB_DEFS[type] || MOB_DEFS.sheep;
 }
 
-function getVillageCenterInRegion(regionX, regionZ, seed = WORLD_SEED) {
-  const hash = hash4(regionX * 37, 11, regionZ * 53, seed + 9411);
+function getVillageCenterInRegion(regionX, regionZ, seed) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const hash = hash4(regionX * 37, 11, regionZ * 53, worldSeed + 9411);
   if ((hash % 100) >= 16) {
     return null;
   }
@@ -1755,7 +1904,8 @@ function getVillageCenterInRegion(regionX, regionZ, seed = WORLD_SEED) {
   };
 }
 
-function getNearbyVillageCenters(x, z, seed = WORLD_SEED, radius = 128) {
+function getNearbyVillageCenters(x, z, seed, radius = 128) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
   const regionWorldSize = VILLAGE_REGION_CHUNKS * CHUNK_SIZE;
   const minRegionX = Math.floor((x - radius) / regionWorldSize);
   const maxRegionX = Math.floor((x + radius) / regionWorldSize);
@@ -1765,7 +1915,7 @@ function getNearbyVillageCenters(x, z, seed = WORLD_SEED, radius = 128) {
 
   for (let regionX = minRegionX; regionX <= maxRegionX; regionX += 1) {
     for (let regionZ = minRegionZ; regionZ <= maxRegionZ; regionZ += 1) {
-      const center = getVillageCenterInRegion(regionX, regionZ, seed);
+      const center = getVillageCenterInRegion(regionX, regionZ, worldSeed);
       if (!center) continue;
       const dx = center.x - x;
       const dz = center.z - z;
@@ -1778,10 +1928,11 @@ function getNearbyVillageCenters(x, z, seed = WORLD_SEED, radius = 128) {
   return centers;
 }
 
-function getNearestVillageCenter(x, z, seed = WORLD_SEED, radius = 128) {
+function getNearestVillageCenter(x, z, seed, radius = 128) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
   let best = null;
   let bestDist2 = radius * radius;
-  for (const center of getNearbyVillageCenters(x, z, seed, radius)) {
+  for (const center of getNearbyVillageCenters(x, z, worldSeed, radius)) {
     const dx = center.x - x;
     const dz = center.z - z;
     const dist2 = dx * dx + dz * dz;
@@ -1836,6 +1987,7 @@ class TextureLibrary {
     this.engine = engine;
     this.images = new Map();
     this.pending = new Set();
+    this.failedPaths = new Set();
     this.settings = { ...DEFAULT_SETTINGS };
     this.loadStarted = false;
     this.ready = false;
@@ -1851,7 +2003,7 @@ class TextureLibrary {
     }
 
     this.loadStarted = true;
-    const uniquePaths = [...new Set([...getAllBlockTexturePaths(), ...getAllItemTexturePaths()])];
+    const uniquePaths = [...new Set([...getAllBlockTexturePaths(this.settings), ...getAllItemTexturePaths()])];
 
     this.total = uniquePaths.length;
     let loaded = 0;
@@ -1861,9 +2013,11 @@ class TextureLibrary {
         try {
           const image = await this.engine.resources.loadImage(path);
           this.images.set(path, image);
+          this.failedPaths.delete(path);
           loaded += 1;
           this.progress = loaded / Math.max(1, this.total);
         } catch (error) {
+          this.failedPaths.add(path);
           console.warn(`Texture load failed for ${path}: ${error.message}`);
         }
       })
@@ -1883,15 +2037,17 @@ class TextureLibrary {
   }
 
   ensureImage(path) {
-    if (!path || this.images.has(path) || this.pending.has(path)) {
+    if (!path || this.images.has(path) || this.pending.has(path) || this.failedPaths.has(path)) {
       return;
     }
     this.pending.add(path);
     this.engine.resources.loadImage(path)
       .then((image) => {
         this.images.set(path, image);
+        this.failedPaths.delete(path);
       })
       .catch((error) => {
+        this.failedPaths.add(path);
         console.warn(`Texture load failed for ${path}: ${error.message}`);
       })
       .finally(() => {
@@ -1900,9 +2056,14 @@ class TextureLibrary {
   }
 
   getBlockFaceTexture(blockType, faceId, settingsState = this.settings) {
-    const path = getBlockTexturePath(blockType, faceId, settingsState);
-    this.ensureImage(path);
-    return this.images.get(path) || null;
+    for (const path of getBlockTextureCandidates(blockType, faceId, settingsState)) {
+      this.ensureImage(path);
+      const image = this.images.get(path);
+      if (image) {
+        return image;
+      }
+    }
+    return null;
   }
 
   getItemTexture(itemType, settingsState = this.settings) {
@@ -1915,7 +2076,7 @@ class TextureLibrary {
     }
     const path = resolveResourcePackAsset(info.texture, settingsState);
     this.ensureImage(path);
-    return this.images.get(path) || null;
+    return this.images.get(path) || this.images.get(normalizeAssetPath(info.texture)) || null;
   }
 }
 
@@ -2375,7 +2536,7 @@ const MOB_LOOT_TABLES = {
 const PLAYER_SKIN_PRESETS = {
   steve_large: {
     label: "Steve",
-    source: normalizeAssetPath("PNG/skins/steve_large.webp"),
+    source: normalizeAssetPath("assets/PNG/skins/steve_large.webp"),
     fallbackPreset: "steve"
   },
   hoodie: {
@@ -2709,15 +2870,42 @@ function getDefaultPlayerSkinCanvas() {
   return getPresetPlayerSkinCanvas(DEFAULT_SETTINGS.playerSkinPreset);
 }
 
+function getNormalizedSkinDimensions(width, height) {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    return null;
+  }
+  if (w % 64 !== 0) {
+    return null;
+  }
+  const scale = w / 64;
+  if (scale < 1 || !Number.isInteger(scale)) {
+    return null;
+  }
+  if (h === 64 * scale) {
+    return { width: 64, height: 64, scale, legacy: false };
+  }
+  if (h === 32 * scale) {
+    return { width: 64, height: 32, scale, legacy: true };
+  }
+  return null;
+}
+
 function normalizeImportedPlayerSkinCanvas(image) {
+  const dimensions = getNormalizedSkinDimensions(image.width, image.height);
   const canvas = setCanvasPlayerModel(document.createElement("canvas"), "classic");
   canvas.width = 64;
   canvas.height = 64;
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, 64, 64);
-  ctx.drawImage(image, 0, 0);
-  if (image.width === 64 && image.height === 32) {
+  if (dimensions) {
+    ctx.drawImage(image, 0, 0, dimensions.width, dimensions.height);
+  } else {
+    ctx.drawImage(image, 0, 0, 64, 64);
+  }
+  if (dimensions?.legacy) {
     // Classic 64x32 skins don't have the second leg/arm textures in the bottom half.
     // Duplicate the visible front faces so the preview still renders cleanly.
     ctx.drawImage(canvas, 4, 20, 4, 12, 20, 52, 4, 12);
@@ -2739,7 +2927,7 @@ function queueCustomPlayerSkinLoad(dataUrl) {
   customPlayerSkinCache.loading = true;
   const image = new Image();
   image.onload = () => {
-    if (!((image.width === 64 && image.height === 64) || (image.width === 64 && image.height === 32))) {
+    if (!getNormalizedSkinDimensions(image.width, image.height)) {
       console.warn("Unsupported player skin size:", image.width, image.height);
       if (customPlayerSkinCache.dataUrl === dataUrl) {
         customPlayerSkinCache.canvas = null;
@@ -2812,11 +3000,11 @@ function readPlayerSkinFile(file) {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("That skin file could not be read."));
     reader.onload = () => {
-      const dataUrl = String(reader.result || "");
-      const image = new Image();
-      image.onload = () => {
-        if (!((image.width === 64 && image.height === 64) || (image.width === 64 && image.height === 32))) {
-          reject(new Error("Skin must be 64x64 or 64x32 PNG/WebP."));
+    const dataUrl = String(reader.result || "");
+    const image = new Image();
+    image.onload = () => {
+        if (!getNormalizedSkinDimensions(image.width, image.height)) {
+          reject(new Error("Skin must be 64x64 or 64x32, or a scaled multiple like 128x128 or 256x256."));
           return;
         }
         const canvas = normalizeImportedPlayerSkinCanvas(image);
@@ -3516,12 +3704,24 @@ function isCollidable(blockType) {
 }
 
 function shouldRenderFace(blockType, neighborType) {
-  if (blockType === BLOCK.WATER) {
-    if (neighborType === BLOCK.WATER) {
+  if (isFluidBlock(blockType)) {
+    if (neighborType === blockType) {
       return false;
     }
+    if (neighborType === BLOCK.AIR) {
+      return true;
+    }
     const neighbor = BLOCK_INFO[neighborType];
-    return !neighbor || !neighbor.transparent || neighborType === BLOCK.AIR;
+    if (!neighbor) {
+      return true;
+    }
+    if (isFluidBlock(neighborType)) {
+      return true;
+    }
+    if (!neighbor.collidable) {
+      return true;
+    }
+    return !!neighbor.transparent;
   }
   if (neighborType === BLOCK.AIR) {
     return true;
@@ -3531,7 +3731,7 @@ function shouldRenderFace(blockType, neighborType) {
   if (!neighbor) {
     return true;
   }
-  if (!neighbor.collidable && neighborType !== BLOCK.WATER) {
+  if (!neighbor.collidable && !isFluidBlock(neighborType)) {
     return true;
   }
   if (!block.transparent && neighbor.transparent) {
@@ -3563,6 +3763,9 @@ class TerrainGenerator {
     this.cavesXY = new FractalNoise(seed + 173, 3, 0.52, 2.06);
     this.cavesYZ = new FractalNoise(seed + 197, 3, 0.54, 2.14);
     this.caveWarp = new FractalNoise(seed + 223, 2, 0.5, 2);
+    this.caveRooms = new FractalNoise(seed + 239, 3, 0.54, 2.12);
+    this.caveDetail = new FractalNoise(seed + 257, 2, 0.58, 2.45);
+    this.lavaPools = new FractalNoise(seed + 271, 2, 0.56, 2.08);
     this.heightCache = new Map();
     this.columnCache = new Map();
   }
@@ -3739,31 +3942,55 @@ class TerrainGenerator {
   }
 
   shouldCarveCave(x, y, z, surfaceY) {
-    if (y < 11 || y >= surfaceY - 5) {
+    if (y < 6 || y >= surfaceY - 4) {
       return false;
     }
 
-    const depth = clamp((surfaceY - y) / 34, 0, 1);
-    if (depth < 0.24) {
+    const depth = clamp((surfaceY - y) / 38, 0, 1);
+    if (depth < 0.18) {
       return false;
     }
 
-    const warp = this.caveWarp.fractal(x * 0.018, z * 0.018) * 9;
-    const sampleX = (x + warp) * 0.055;
-    const sampleY = y * 0.06;
-    const sampleZ = (z - warp) * 0.055;
+    const warpXZ = this.caveWarp.fractal(x * 0.017, z * 0.017) * 8;
+    const warpY = this.caveWarp.fractal(y * 0.021 + 17.3, z * 0.019 - 9.1) * 4.5;
+    const sampleX = (x + warpXZ) * 0.05;
+    const sampleY = (y + warpY) * 0.056;
+    const sampleZ = (z - warpXZ) * 0.05;
 
-    const density =
-      Math.abs(this.cavesXZ.fractal(sampleX, sampleZ)) * 0.46 +
-      Math.abs(this.cavesXY.fractal(sampleX, sampleY)) * 0.29 +
-      Math.abs(this.cavesYZ.fractal(sampleY, sampleZ)) * 0.25;
-
+    const chamber =
+      (1 - Math.abs(this.cavesXZ.fractal(sampleX * 0.92, sampleZ * 0.92))) * 0.36 +
+      (1 - Math.abs(this.cavesXY.fractal(sampleX * 0.95 + 19.4, sampleY * 0.95 - 11.2))) * 0.32 +
+      (1 - Math.abs(this.cavesYZ.fractal(sampleY * 0.93 - 7.6, sampleZ * 0.93 + 5.8))) * 0.32;
     const tunnel =
-      Math.abs(this.cavesXZ.fractal(sampleX * 1.9 + 17.3, sampleZ * 1.9 - 11.4)) * 0.6 +
-      Math.abs(this.cavesXY.fractal(sampleX * 1.7 - 8.1, sampleY * 1.7 + 3.7)) * 0.4;
+      (1 - Math.abs(this.cavesXZ.fractal(sampleX * 2.18 + 17.3, sampleZ * 2.18 - 11.4))) * 0.55 +
+      (1 - Math.abs(this.cavesYZ.fractal(sampleY * 2.03 + 6.7, sampleZ * 2.03 - 14.2))) * 0.45;
+    const detail =
+      (1 - Math.abs(this.caveRooms.fractal(sampleX * 1.45 - 8.4, sampleZ * 1.45 + 2.8))) * 0.55 +
+      (1 - Math.abs(this.caveDetail.fractal(sampleX * 1.92 + 13.2, sampleY * 1.92 - 4.5))) * 0.45;
+    const caveCeilingPenalty = y > surfaceY - 10 ? (y - (surfaceY - 10)) * 0.03 : 0;
+    const roomThreshold = 0.73 + (1 - depth) * 0.11 + caveCeilingPenalty;
+    const tunnelThreshold = 0.79 + (1 - depth) * 0.08 + caveCeilingPenalty;
+    const keepPillarChance = 0.04 + (1 - depth) * 0.07;
+    if (random3(x, y, z, this.seed + 311) < keepPillarChance) {
+      return false;
+    }
 
-    const threshold = 0.102 + depth * 0.074 + (y < SEA_LEVEL - 14 ? 0.012 : 0);
-    return (density < threshold && tunnel < threshold * 0.94) || tunnel < threshold * 0.54;
+    const carveRoom = chamber > roomThreshold && detail > 0.54;
+    const carveTunnel = tunnel > tunnelThreshold && detail > 0.44;
+    return carveRoom || carveTunnel;
+  }
+
+  shouldFillCaveWithLava(x, y, z, surfaceY) {
+    if (y > LAVA_LEVEL || y >= surfaceY - 16) {
+      return false;
+    }
+
+    const poolMask = this.lavaPools.fractal(x * 0.031, z * 0.031) * 0.5 + 0.5;
+    if (poolMask < 0.63) {
+      return false;
+    }
+    const fillHeight = clamp(Math.floor(4 + (poolMask - 0.63) * 16), 4, LAVA_LEVEL);
+    return y <= fillHeight;
   }
 }
 
@@ -3844,13 +4071,15 @@ class Chunk {
 
           if (
             type !== BLOCK.AIR &&
-            type !== BLOCK.WATER &&
+            !isFluidBlock(type) &&
             type !== BLOCK.BEDROCK &&
-            y >= 11 &&
-            y < surfaceY - 5 &&
+            y >= 6 &&
+            y < surfaceY - 4 &&
             this.world.terrain.shouldCarveCave(worldX, y, worldZ, surfaceY)
           ) {
-            type = BLOCK.AIR;
+            type = this.world.terrain.shouldFillCaveWithLava(worldX, y, worldZ, surfaceY)
+              ? BLOCK.LAVA
+              : BLOCK.AIR;
           }
 
           this.setLocalRaw(lx, y, lz, type);
@@ -4051,9 +4280,9 @@ class Chunk {
 }
 
 class World {
-  constructor(seed = WORLD_SEED) {
-    this.seed = seed;
-    this.terrain = new TerrainGenerator(seed);
+  constructor(seed) {
+    this.seed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+    this.terrain = new TerrainGenerator(this.seed);
     this.chunks = new Map();
     this.modifiedChunks = new Map();
     this.savedPlayerState = null;
@@ -4136,6 +4365,57 @@ class World {
     return chunk.getLocal(mod(x, CHUNK_SIZE), y, mod(z, CHUNK_SIZE));
   }
 
+  resolveFluidInteractionAt(x, y, z) {
+    const type = this.getBlock(x, y, z);
+    if (!isFluidBlock(type)) {
+      return false;
+    }
+
+    const horizontalNeighbors = [
+      [1, 0, 0],
+      [-1, 0, 0],
+      [0, 0, 1],
+      [0, 0, -1]
+    ];
+
+    if (type === BLOCK.WATER) {
+      if (this.getBlock(x, y - 1, z) === BLOCK.LAVA) {
+        return this.setBlock(x, y - 1, z, BLOCK.OBSIDIAN);
+      }
+      for (const [dx, dy, dz] of horizontalNeighbors) {
+        if (this.getBlock(x + dx, y + dy, z + dz) === BLOCK.LAVA) {
+          return this.setBlock(x + dx, y + dy, z + dz, BLOCK.COBBLESTONE);
+        }
+      }
+      return false;
+    }
+
+    if (this.getBlock(x, y + 1, z) === BLOCK.WATER || this.getBlock(x, y - 1, z) === BLOCK.WATER) {
+      return this.setBlock(x, y, z, BLOCK.OBSIDIAN);
+    }
+    for (const [dx, dy, dz] of horizontalNeighbors) {
+      if (this.getBlock(x + dx, y + dy, z + dz) === BLOCK.WATER) {
+        return this.setBlock(x, y, z, BLOCK.COBBLESTONE);
+      }
+    }
+    return false;
+  }
+
+  resolveFluidInteractionsAround(x, y, z) {
+    const checks = [
+      [x, y, z],
+      [x + 1, y, z],
+      [x - 1, y, z],
+      [x, y + 1, z],
+      [x, y - 1, z],
+      [x, y, z + 1],
+      [x, y, z - 1]
+    ];
+    for (const [cx, cy, cz] of checks) {
+      this.resolveFluidInteractionAt(cx, cy, cz);
+    }
+  }
+
   setBlock(x, y, z, type) {
     if (y <= 0 || y >= WORLD_HEIGHT) {
       return false;
@@ -4160,6 +4440,7 @@ class World {
     }
     bucket.set(packLocalKey(localX, y, localZ), type);
     this.markChunkAndTouchingNeighborsDirty(chunkX, chunkZ, localX, localZ);
+    this.resolveFluidInteractionsAround(x, y, z);
     this.saveDirty = true;
     return true;
   }
@@ -4183,7 +4464,7 @@ class World {
           const worldZ = worldBaseZ + z;
 
           for (const face of FACE_DEFS) {
-            if (type === BLOCK.WATER && face.id === "bottom") {
+            if (isFluidBlock(type) && face.id === "bottom") {
               continue;
             }
             const neighborType = this.peekBlock(
@@ -4296,7 +4577,7 @@ class World {
 
     while (traveled <= maxDistance) {
       const blockType = this.peekBlock(x, y, z);
-      if (blockType !== BLOCK.AIR && blockType !== BLOCK.WATER && traveled > 0) {
+      if (blockType !== BLOCK.AIR && !isFluidBlock(blockType) && traveled > 0) {
         return {
           x,
           y,
@@ -4603,6 +4884,8 @@ class Player {
     this.regenTimer = 0;
     this.starveTimer = 0;
     this.inWater = false;
+    this.inLava = false;
+    this.lavaDamageTimer = 0;
     this.fallDistance = 0;
     this.pendingFallDamage = 0;
     this.isSprinting = false;
@@ -4691,7 +4974,7 @@ class Player {
     return false;
   }
 
-  isInWater(world, x = this.x, y = this.y, z = this.z) {
+  isInFluid(world, targetType, x = this.x, y = this.y, z = this.z) {
     const aabb = this.getAABB(x, y, z);
     const minX = Math.floor(aabb.minX);
     const maxX = Math.floor(aabb.maxX - 0.00001);
@@ -4703,13 +4986,21 @@ class Player {
     for (let bx = minX; bx <= maxX; bx += 1) {
       for (let by = minY; by <= maxY; by += 1) {
         for (let bz = minZ; bz <= maxZ; bz += 1) {
-          if (world.getBlock(bx, by, bz) === BLOCK.WATER && this.intersectsBlock(bx, by, bz, x, y, z)) {
+          if (world.getBlock(bx, by, bz) === targetType && this.intersectsBlock(bx, by, bz, x, y, z)) {
             return true;
           }
         }
       }
     }
     return false;
+  }
+
+  isInWater(world, x = this.x, y = this.y, z = this.z) {
+    return this.isInFluid(world, BLOCK.WATER, x, y, z);
+  }
+
+  isInLava(world, x = this.x, y = this.y, z = this.z) {
+    return this.isInFluid(world, BLOCK.LAVA, x, y, z);
   }
 
   setPosition(x, y, z) {
@@ -4719,6 +5010,9 @@ class Player {
     this.vx = 0;
     this.vy = 0;
     this.vz = 0;
+    this.inWater = false;
+    this.inLava = false;
+    this.lavaDamageTimer = 0;
   }
 
   hasGroundSupport(world, x = this.x, z = this.z) {
@@ -4806,7 +5100,9 @@ class Player {
     }
 
     const startedInWater = this.inWater;
+    const startedInLava = this.inLava;
     this.inWater = this.isInWater(world);
+    this.inLava = this.isInLava(world);
     const startY = this.y;
     const wasOnGround = this.onGround;
 
@@ -4828,17 +5124,17 @@ class Player {
       moveZ /= length;
     }
     const isCreative = settingsState?.gameMode === GAME_MODE.CREATIVE;
-    this.isCrouching = !isCreative && !this.inWater && input.isDown("Shift");
+    this.isCrouching = !isCreative && !this.inWater && !this.inLava && input.isDown("Shift");
     if (this.isCrouching) {
       this.sprintToggled = false;
     }
 
     const wantsSprint = isCreative
       ? !this.isCrouching && length > 0 && this.sprintToggled
-      : !this.inWater && !this.isCrouching && this.hunger > 0 && length > 0 && forward > 0 && this.sprintToggled;
+      : !this.inWater && !this.inLava && !this.isCrouching && this.hunger > 0 && length > 0 && forward > 0 && this.sprintToggled;
     this.isSprinting = wantsSprint;
 
-    const speed = isCreative ? (wantsSprint ? 10.5 : 6.8) : this.inWater ? 2.8 : this.isCrouching ? 1.75 : wantsSprint ? 6.9 : 4.6;
+    const speed = isCreative ? (wantsSprint ? 10.5 : 6.8) : this.inLava ? 1.7 : this.inWater ? 2.8 : this.isCrouching ? 1.75 : wantsSprint ? 6.9 : 4.6;
 
     let targetVX = moveX * speed;
     let targetVZ = moveZ * speed;
@@ -4856,7 +5152,7 @@ class Player {
         targetVZ = 0;
       }
     }
-    const accel = isCreative ? 12.5 : this.inWater ? 7.5 : this.onGround ? 16 : 5;
+    const accel = isCreative ? 12.5 : this.inLava ? 5.2 : this.inWater ? 7.5 : this.onGround ? 16 : 5;
     const blend = clamp(accel * dt, 0, 1);
 
     this.vx = lerp(this.vx, targetVX, blend);
@@ -4877,6 +5173,21 @@ class Player {
       this.onGround = false;
       this.inWater = false;
       this.fallDistance = 0;
+    } else if (this.inLava) {
+      const wantUp = input.isDown(" ");
+
+      if (wantUp) {
+        this.vy = lerp(this.vy, 2.4, clamp(4.8 * dt, 0, 1));
+      } else {
+        this.vy = lerp(this.vy, -1.2, clamp(2.2 * dt, 0, 1));
+      }
+
+      const drag = Math.pow(0.91, dt * 60);
+      this.vx *= drag;
+      this.vz *= drag;
+      this.vy *= Math.pow(0.95, dt * 60);
+      this.vy = clamp(this.vy, -3.2, 3.4);
+      this.onGround = false;
     } else if (this.inWater) {
       // Fluid movement: buoyancy + drag + swim controls.
       const wantUp = input.isDown(" ");
@@ -4915,15 +5226,16 @@ class Player {
     this.y += this.vy * dt;
     this.resolveAxisCollisions(world, "y", this.vy * dt);
     this.inWater = isCreative ? false : this.isInWater(world);
+    this.inLava = isCreative ? false : this.isInLava(world);
 
     const fallStep = Math.max(0, startY - this.y);
     if (isCreative) {
       this.fallDistance = 0;
       this.pendingFallDamage = 0;
-    } else if (this.inWater) {
+    } else if (this.inWater || this.inLava) {
       this.fallDistance = 0;
     } else if (this.onGround) {
-      if (!startedInWater && this.fallDistance > 3.25) {
+      if (!startedInWater && !startedInLava && this.fallDistance > 3.25) {
         this.pendingFallDamage = Math.max(this.pendingFallDamage, Math.floor(this.fallDistance - 3));
       }
       this.fallDistance = 0;
@@ -5105,6 +5417,41 @@ function findWalkableY(world, x, z, hintY = SEA_LEVEL + 4, clearance = 2) {
       return y + 1.001;
     }
   }
+  return null;
+}
+
+function findLoadedWalkableY(world, x, z, hintY = SEA_LEVEL + 4, clearance = 2) {
+  const blockX = Math.floor(x);
+  const blockZ = Math.floor(z);
+  const chunkX = Math.floor(blockX / CHUNK_SIZE);
+  const chunkZ = Math.floor(blockZ / CHUNK_SIZE);
+  if (!world.peekChunk(chunkX, chunkZ)) {
+    return null;
+  }
+
+  const startY = clamp(Math.floor(hintY) + 3, 1, WORLD_HEIGHT - 3);
+  const endY = Math.max(1, startY - 18);
+
+  const canStandAt = (groundY) => {
+    const ground = world.peekBlock(blockX, groundY, blockZ);
+    if (!isCollidable(ground) || BLOCK_INFO[ground]?.transparent || isFluidBlock(ground)) {
+      return false;
+    }
+    for (let i = 1; i <= clearance; i += 1) {
+      const block = world.peekBlock(blockX, groundY + i, blockZ);
+      if (block !== BLOCK.AIR && (isCollidable(block) || isFluidBlock(block))) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  for (let y = startY; y >= endY; y -= 1) {
+    if (canStandAt(y)) {
+      return y + 1.001;
+    }
+  }
+
   return null;
 }
 
@@ -6366,6 +6713,7 @@ class TextureArrayAtlas {
     this.settings = textures?.settings || { ...DEFAULT_SETTINGS };
     this.texture = null;
     this.pathToLayer = new Map();
+    this.blockFaceLayerCache = new Map();
     this.layerCount = 0;
   }
 
@@ -6374,8 +6722,20 @@ class TextureArrayAtlas {
   }
 
   getLayerForBlockFace(blockType, faceId) {
-    const path = getBlockTexturePath(blockType, faceId, this.settings);
-    return this.getLayerForPath(path);
+    const cacheKey = `${blockType}:${faceId}`;
+    const cached = this.blockFaceLayerCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    for (const path of getBlockTextureCandidates(blockType, faceId, this.settings)) {
+      if (this.pathToLayer.has(path)) {
+        const layer = this.getLayerForPath(path);
+        this.blockFaceLayerCache.set(cacheKey, layer);
+        return layer;
+      }
+    }
+    this.blockFaceLayerCache.set(cacheKey, 0);
+    return 0;
   }
 
   async build() {
@@ -6383,9 +6743,10 @@ class TextureArrayAtlas {
     await this.textures.startLoading();
     await this.textures.readyPromise;
 
-    const uniquePaths = getAllBlockTexturePaths().sort();
+    const uniquePaths = getAllBlockTexturePaths(this.settings).sort();
 
     this.pathToLayer.clear();
+    this.blockFaceLayerCache.clear();
     uniquePaths.forEach((path, index) => this.pathToLayer.set(path, index));
     this.layerCount = Math.max(1, uniquePaths.length);
 
@@ -6586,7 +6947,7 @@ class GreedyChunkMesher {
                 [baseX + x[0] + du[0], x[1] + du[1], baseZ + x[2] + du[2]]
               ];
 
-              if (cell.blockType === BLOCK.WATER) {
+              if (isFluidBlock(cell.blockType)) {
                 const waterSurfaceY = x[1] + (faceId === "top" ? -0.08 : 0.92);
                 if (faceId === "top") {
                   for (const point of quad) {
@@ -6597,6 +6958,8 @@ class GreedyChunkMesher {
                     if (point[1] > x[1]) {
                       point[1] = waterSurfaceY;
                     }
+                    point[0] -= normal[0] * 0.02;
+                    point[2] -= normal[2] * 0.02;
                   }
                 }
               }
@@ -7048,6 +7411,8 @@ class WebGLVoxelRenderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas.texture);
     gl.uniform1i(this.uTex, 0);
 
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
     gl.disable(gl.BLEND);
     gl.depthMask(true);
 
@@ -7067,6 +7432,7 @@ class WebGLVoxelRenderer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
 
     // Draw transparent chunks sorted back-to-front (chunk-level sort)
     if (this.settings?.graphicsMode === "fancy") {
@@ -7104,6 +7470,7 @@ class WebGLVoxelRenderer {
     // Outline is drawn last so it stays readable.
     this._outline.draw(this.proj, this.view);
 
+    gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
   }
 
@@ -7866,6 +8233,7 @@ export default function FreeCube2Game(engine) {
   let boss = { active: false, name: "Boss", health: 1 };
   let worldTime = 0; // seconds, loops
   let spawnTimer = 0;
+  let worldTickTimer = 0;
   let saveTimer = 0;
   let fps = 0;
   let fpsTimer = 0;
@@ -7999,7 +8367,7 @@ export default function FreeCube2Game(engine) {
     let covered = 0;
     for (let y = py + 1; y <= Math.min(WORLD_HEIGHT - 1, py + 10); y += 1) {
       const block = world.getBlock(px, y, pz);
-      if (block !== BLOCK.AIR && block !== BLOCK.WATER) {
+      if (block !== BLOCK.AIR && !isFluidBlock(block)) {
         covered += 1;
       }
     }
@@ -8293,7 +8661,7 @@ export default function FreeCube2Game(engine) {
         .fc-furnace-progress{width:54px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
         .fc-furnace-progress > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
         .fc-furnace-slot-output{grid-column:4;grid-row:1 / span 2}
-        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('./PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
+        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('./assets/PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
         @keyframes fc-menu-pan{0%{background-position:0 0}100%{background-position:-256px -256px}}
         #freecube2-menu::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.06), transparent 52%),linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.55));pointer-events:none}
         #freecube2-menu.show{display:flex}
@@ -8546,7 +8914,7 @@ export default function FreeCube2Game(engine) {
           </div>
           <div id="fc-screen-resource-packs" style="display:none">
             <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 6px auto">Select Resource Packs</div>
-            <div class="fc-small" style="margin-bottom:10px">Import a pack folder to override textures, sounds, music, and supported mob skins.</div>
+            <div class="fc-small" style="margin-bottom:10px">Import a pack folder or ZIP to override textures, sounds, music, and supported mob skins.</div>
             <div class="fc-pack-shell">
               <div class="fc-card fc-pack-column">
                 <div class="fc-pack-head">Available</div>
@@ -8561,7 +8929,11 @@ export default function FreeCube2Game(engine) {
               <button class="fc-btn half" data-action="open-resource-packs">Import Pack Folder</button>
               <button class="fc-btn half" data-action="done-resource-packs">Done</button>
             </div>
+            <div class="fc-row" style="margin-top:10px">
+              <button class="fc-btn" data-action="open-resource-packs-zip">Import Pack ZIP</button>
+            </div>
             <input id="fc-resource-pack-folder" type="file" multiple webkitdirectory directory style="display:none" />
+            <input id="fc-resource-pack-zip" type="file" accept=".zip,application/zip" style="display:none" />
           </div>
           <div id="fc-screen-loading" style="display:none">
             <div style="font:700 20px ui-monospace,Menlo,Consolas,monospace;color:#fff;margin:10px 6px 6px 6px">Loading...</div>
@@ -8675,6 +9047,7 @@ export default function FreeCube2Game(engine) {
     const skinCurrentEl = root.querySelector("#fc-skin-current");
     const skinFileInput = root.querySelector("#fc-skin-file");
     const resourcePackFileInput = root.querySelector("#fc-resource-pack-folder");
+    const resourcePackZipInput = root.querySelector("#fc-resource-pack-zip");
     const resourcePackAvailableEl = root.querySelector("#fc-resource-pack-available");
     const resourcePackSelectedEl = root.querySelector("#fc-resource-pack-selected");
 
@@ -8774,6 +9147,7 @@ export default function FreeCube2Game(engine) {
       skinCurrentEl,
       skinFileInput,
       resourcePackFileInput,
+      resourcePackZipInput,
       resourcePackAvailableEl,
       resourcePackSelectedEl,
       loadBar,
@@ -10073,7 +10447,7 @@ export default function FreeCube2Game(engine) {
 
   function addToInventory(itemType, count, refreshUi = true) {
     if (!itemType || itemType === BLOCK.AIR) return count;
-    if (itemType === BLOCK.WATER || itemType === BLOCK.BEDROCK) return count;
+    if (isFluidBlock(itemType) || itemType === BLOCK.BEDROCK) return count;
     let left = Math.max(0, Math.floor(count));
     if (left === 0) return 0;
 
@@ -10580,6 +10954,186 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function blocksSkyLight(blockType) {
+    if (blockType === BLOCK.AIR || isFluidBlock(blockType)) {
+      return false;
+    }
+    const info = BLOCK_INFO[blockType];
+    if (!info) {
+      return true;
+    }
+    return info.collidable && !info.transparent;
+  }
+
+  function hasSkyExposureAt(x, y, z) {
+    if (!world) return false;
+    const blockX = Math.floor(x);
+    const blockZ = Math.floor(z);
+    const startY = clamp(Math.floor(y) + 1, 1, WORLD_HEIGHT - 1);
+    for (let by = startY; by < WORLD_HEIGHT; by += 1) {
+      if (blocksSkyLight(world.peekBlock(blockX, by, blockZ))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function getApproxSkyLightLevel(x, y, z, cycle = getDayCycleInfo(worldTime)) {
+    if (!hasSkyExposureAt(x, y, z)) {
+      return 0;
+    }
+    return clamp(Math.round(cycle.daylight * 15), 0, 15);
+  }
+
+  function canGrassStayAt(x, y, z, cycle = getDayCycleInfo(worldTime)) {
+    if (!world) return false;
+    const above = world.peekBlock(x, y + 1, z);
+    if (blocksSkyLight(above)) {
+      return false;
+    }
+    return getApproxSkyLightLevel(x, y + 1, z, cycle) >= 4;
+  }
+
+  function canGrassSpreadTo(x, y, z, cycle = getDayCycleInfo(worldTime)) {
+    if (!world || world.peekBlock(x, y, z) !== BLOCK.DIRT) {
+      return false;
+    }
+    const above = world.peekBlock(x, y + 1, z);
+    if (blocksSkyLight(above)) {
+      return false;
+    }
+    return getApproxSkyLightLevel(x, y + 1, z, cycle) >= 9;
+  }
+
+  function hasNearbyGrass(x, y, z) {
+    if (!world) return false;
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          if (world.peekBlock(x + dx, y + dy, z + dz) === BLOCK.GRASS) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  function tickGrassBlockAt(x, y, z, cycle = getDayCycleInfo(worldTime)) {
+    if (!world) return;
+    const blockType = world.peekBlock(x, y, z);
+    if (blockType === BLOCK.GRASS) {
+      if (!canGrassStayAt(x, y, z, cycle)) {
+        world.setBlock(x, y, z, BLOCK.DIRT);
+      }
+      return;
+    }
+    if (blockType === BLOCK.DIRT && canGrassSpreadTo(x, y, z, cycle) && hasNearbyGrass(x, y, z) && Math.random() < 0.2) {
+      world.setBlock(x, y, z, BLOCK.GRASS);
+    }
+  }
+
+  function updateWorldRandomTicks(dt) {
+    if (!world || !player) return;
+    worldTime = (worldTime + dt) % MINECRAFT_DAY_LENGTH_SECONDS;
+    worldTickTimer += dt;
+    if (worldTickTimer < RANDOM_BLOCK_TICK_INTERVAL) {
+      return;
+    }
+
+    const cycle = getDayCycleInfo(worldTime);
+    const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
+    const maxChunkDistance = (settings?.renderDistanceChunks || DEFAULT_RENDER_DISTANCE) + 1;
+    const candidateChunks = [];
+    for (const chunk of world.chunks.values()) {
+      if (!chunk?.generated) continue;
+      const dist = Math.max(Math.abs(chunk.chunkX - playerChunkX), Math.abs(chunk.chunkZ - playerChunkZ));
+      if (dist <= maxChunkDistance) {
+        candidateChunks.push(chunk);
+      }
+    }
+    if (candidateChunks.length === 0) {
+      worldTickTimer = 0;
+      return;
+    }
+
+    while (worldTickTimer >= RANDOM_BLOCK_TICK_INTERVAL) {
+      worldTickTimer -= RANDOM_BLOCK_TICK_INTERVAL;
+      for (let i = 0; i < RANDOM_BLOCK_TICKS_PER_STEP; i += 1) {
+        const chunk = candidateChunks[(Math.random() * candidateChunks.length) | 0];
+        const localX = (Math.random() * CHUNK_SIZE) | 0;
+        const localZ = (Math.random() * CHUNK_SIZE) | 0;
+        const worldX = chunk.chunkX * CHUNK_SIZE + localX;
+        const worldZ = chunk.chunkZ * CHUNK_SIZE + localZ;
+        const surfaceY = clamp(world.terrain.describeColumn(worldX, worldZ).height, 1, WORLD_HEIGHT - 2);
+        tickGrassBlockAt(worldX, surfaceY, worldZ, cycle);
+        tickGrassBlockAt(worldX, surfaceY - 1, worldZ, cycle);
+      }
+    }
+  }
+
+  function isSpawnDistanceValid(x, z) {
+    if (!player) return false;
+    const dx = x - player.x;
+    const dz = z - player.z;
+    const dist2 = dx * dx + dz * dz;
+    return dist2 >= 24 * 24 && dist2 <= 128 * 128;
+  }
+
+  function hasMobSpawnSpace(x, y, z, mob) {
+    const blockX = Math.floor(x);
+    const blockY = Math.floor(y);
+    const blockZ = Math.floor(z);
+    const clearance = Math.max(2, Math.ceil(mob.height));
+    for (let i = 0; i < clearance; i += 1) {
+      const block = world.peekBlock(blockX, blockY + i, blockZ);
+      if (block !== BLOCK.AIR && (isCollidable(block) || isFluidBlock(block))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function isValidSpawnGround(blockType, requireGrass = false) {
+    if (!isCollidable(blockType) || isFluidBlock(blockType)) {
+      return false;
+    }
+    const info = BLOCK_INFO[blockType];
+    if (!info || info.transparent) {
+      return false;
+    }
+    return requireGrass ? blockType === BLOCK.GRASS : true;
+  }
+
+  function isValidMobSpawnLocation(type, x, y, z, cycle = getDayCycleInfo(worldTime), mob = new Mob(type)) {
+    if (!world || !Number.isFinite(y) || !isSpawnDistanceValid(x, z)) {
+      return false;
+    }
+    const groundY = Math.floor(y) - 1;
+    const groundBlock = world.peekBlock(Math.floor(x), groundY, Math.floor(z));
+    const light = getApproxSkyLightLevel(x, y, z, cycle);
+    const hostile = !!getMobDef(type).hostile;
+    const requireGrass = !hostile && type !== "villager";
+    if (!isValidSpawnGround(groundBlock, requireGrass)) {
+      return false;
+    }
+    if (!hasMobSpawnSpace(x, y, z, mob)) {
+      return false;
+    }
+    if (entityWouldCollide(world, x, y, z, mob.radius, mob.height)) {
+      return false;
+    }
+    if (hostile) {
+      return light <= 7;
+    }
+    if (type === "villager") {
+      return light >= 8;
+    }
+    return light >= 9;
+  }
+
   function getMobCapRadius() {
     const renderDistance = settings?.renderDistanceChunks || DEFAULT_RENDER_DISTANCE;
     return Math.max(42, (renderDistance + 0.6) * CHUNK_SIZE);
@@ -10650,11 +11204,11 @@ export default function FreeCube2Game(engine) {
     const checkY = Math.floor(mob.y + Math.max(1, mob.height - 0.1));
     const checkZ = Math.floor(mob.z);
     const bodyBlock = world.getBlock(checkX, Math.floor(mob.y + 0.1), checkZ);
-    if (bodyBlock === BLOCK.WATER) return false;
+    if (isFluidBlock(bodyBlock)) return false;
 
     for (let y = checkY; y < WORLD_HEIGHT; y += 1) {
       const block = world.getBlock(checkX, y, checkZ);
-      if (block !== BLOCK.AIR && block !== BLOCK.WATER) {
+      if (block !== BLOCK.AIR && !isFluidBlock(block)) {
         return false;
       }
     }
@@ -10664,6 +11218,8 @@ export default function FreeCube2Game(engine) {
   function spawnMobNearPlayer(type = "zombie") {
     if (!world || !player) return false;
     const mob = new Mob(type);
+    const cycle = getDayCycleInfo(worldTime);
+    const hostile = !!getMobDef(type).hostile;
 
     if (type === "villager") {
       const center = getNearestVillageCenter(player.x, player.z, world.seed, Math.max(96, getMobCapRadius() * 1.35));
@@ -10674,10 +11230,9 @@ export default function FreeCube2Game(engine) {
         const dist = 2.5 + random2(tries + 17, tries * 11, center.seed + 1902) * 7.5;
         const x = center.x + Math.sin(angle) * dist;
         const z = center.z + Math.cos(angle) * dist;
-        const y = findWalkableY(world, x, z, world.terrain.describeColumn(Math.floor(x), Math.floor(z)).height + 1, 2);
+        const y = findLoadedWalkableY(world, x, z, world.terrain.describeColumn(Math.floor(x), Math.floor(z)).height + 1, 2);
         if (!Number.isFinite(y)) continue;
-        if (world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === BLOCK.WATER) continue;
-        if (entityWouldCollide(world, x, y, z, mob.radius, mob.height)) continue;
+        if (!isValidMobSpawnLocation(type, x, y, z, cycle, mob)) continue;
         mob.setPosition(x, y, z);
         mob.homeX = center.x;
         mob.homeZ = center.z;
@@ -10687,31 +11242,28 @@ export default function FreeCube2Game(engine) {
       return false;
     }
 
-    const base = world.findSpawn(Math.floor(player.x), Math.floor(player.z));
-    for (let tries = 0; tries < 18; tries += 1) {
+    const maxDist = Math.min(128, Math.max(42, getMobCapRadius() * 1.9));
+    const minDist = hostile ? 24 : 28;
+    for (let tries = 0; tries < 28; tries += 1) {
       const angle = random2(tries, tries * 9, world.seed + 1211) * Math.PI * 2;
-      const dist = 6 + random2(tries, tries * 13, world.seed + 1212) * 10;
-      const x = base.x + Math.sin(angle) * dist;
-      const z = base.z + Math.cos(angle) * dist;
-      const spawn = world.findSpawn(Math.floor(x), Math.floor(z));
-      const y = findWalkableY(world, x, z, spawn.y + 1, mob.height > 1.2 ? 2 : 1);
+      const dist = minDist + random2(tries, tries * 13, world.seed + 1212) * (maxDist - minDist);
+      const x = player.x + Math.sin(angle) * dist;
+      const z = player.z + Math.cos(angle) * dist;
+      const surfaceHint = world.terrain.describeColumn(Math.floor(x), Math.floor(z)).height + 1;
+      const caveHint = clamp(player.y + (random2(tries, tries * 17, world.seed + 1227) - 0.5) * 26, 3, surfaceHint + 1);
+      const hintY = hostile ? caveHint : surfaceHint;
+      const y = findLoadedWalkableY(world, x, z, hintY, mob.height > 1.2 ? 2 : 1);
       if (!Number.isFinite(y)) continue;
-      if (world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === BLOCK.WATER) continue;
-      if (!entityWouldCollide(world, x, y, z, mob.radius, mob.height)) {
-        mob.setPosition(x, y, z);
-        mobs.push(mob);
-        return true;
-      }
+      if (!isValidMobSpawnLocation(type, x, y, z, cycle, mob)) continue;
+      mob.setPosition(x, y, z);
+      mobs.push(mob);
+      return true;
     }
-    mob.setPosition(base.x + 6, base.y, base.z);
-    mobs.push(mob);
-    return true;
+    return false;
   }
 
   function updateSpawning(dt) {
     if (!world || !player) return;
-    worldTime = (worldTime + dt) % MINECRAFT_DAY_LENGTH_SECONDS;
-
     const cycle = getDayCycleInfo(worldTime);
     const capRadius = getMobCapRadius();
     const capRadius2 = capRadius * capRadius;
@@ -10985,6 +11537,7 @@ export default function FreeCube2Game(engine) {
     player.hurtCooldown = 0;
     player.regenTimer = 0;
     player.starveTimer = 0;
+    player.lavaDamageTimer = 0;
     player.fallDistance = 0;
     player.pendingFallDamage = 0;
     mining.key = null;
@@ -11008,7 +11561,18 @@ export default function FreeCube2Game(engine) {
       player.hunger = player.maxHunger;
       player.regenTimer = 0;
       player.starveTimer = 0;
+      player.lavaDamageTimer = 0;
       return;
+    }
+
+    if (player.inLava) {
+      player.lavaDamageTimer += dt;
+      if (player.lavaDamageTimer >= 0.8) {
+        player.lavaDamageTimer = 0;
+        applyDamage(2, "lava");
+      }
+    } else {
+      player.lavaDamageTimer = 0;
     }
 
     // Hunger drains slowly when sprinting.
@@ -11413,10 +11977,207 @@ export default function FreeCube2Game(engine) {
     const cleaned = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+/, "");
     if (!cleaned) return "";
     const parts = cleaned.split("/").filter(Boolean);
-    if (parts.length <= 1) {
-      return normalizeAssetPath(cleaned);
+    const assetsIndex = parts.findIndex((part) => part.toLowerCase() === "assets");
+    if (assetsIndex >= 0) {
+      return normalizeAssetPath(parts.slice(assetsIndex).join("/"));
     }
-    return normalizeAssetPath(parts.slice(1).join("/"));
+    if (parts.length > 1 && /^pack\.(json|mcmeta)$/i.test(parts[1])) {
+      return normalizeAssetPath(parts.slice(1).join("/"));
+    }
+    return normalizeAssetPath(cleaned);
+  }
+
+  function getMimeTypeForPath(path = "") {
+    const lowerPath = String(path || "").toLowerCase();
+    if (lowerPath.endsWith(".png")) return "image/png";
+    if (lowerPath.endsWith(".webp")) return "image/webp";
+    if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg")) return "image/jpeg";
+    if (lowerPath.endsWith(".svg")) return "image/svg+xml";
+    if (lowerPath.endsWith(".gif")) return "image/gif";
+    if (lowerPath.endsWith(".ogg")) return "audio/ogg";
+    if (lowerPath.endsWith(".wav")) return "audio/wav";
+    if (lowerPath.endsWith(".mp3")) return "audio/mpeg";
+    if (lowerPath.endsWith(".json") || lowerPath.endsWith(".mcmeta")) return "application/json";
+    if (lowerPath.endsWith(".txt") || lowerPath.endsWith(".obj")) return "text/plain";
+    return "application/octet-stream";
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not encode imported resource-pack asset."));
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function decodeZipEntryName(bytes) {
+    try {
+      return new TextDecoder("utf-8").decode(bytes);
+    } catch (error) {
+      let fallback = "";
+      for (const byte of bytes) {
+        fallback += String.fromCharCode(byte);
+      }
+      return fallback;
+    }
+  }
+
+  async function inflateZipBytes(bytes) {
+    if (typeof DecompressionStream !== "function") {
+      throw new Error("This browser does not support ZIP resource-pack importing yet.");
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    const inflated = await new Response(stream).arrayBuffer();
+    return new Uint8Array(inflated);
+  }
+
+  async function extractZipEntries(file) {
+    const archiveBuffer = await file.arrayBuffer();
+    const view = new DataView(archiveBuffer);
+    const bytes = new Uint8Array(archiveBuffer);
+    const EOCD_SIGNATURE = 0x06054b50;
+    const CENTRAL_SIGNATURE = 0x02014b50;
+    const LOCAL_SIGNATURE = 0x04034b50;
+    let eocdOffset = -1;
+    const searchStart = Math.max(0, view.byteLength - 0xffff - 22);
+
+    for (let offset = view.byteLength - 22; offset >= searchStart; offset -= 1) {
+      if (view.getUint32(offset, true) === EOCD_SIGNATURE) {
+        eocdOffset = offset;
+        break;
+      }
+    }
+
+    if (eocdOffset < 0) {
+      throw new Error("That ZIP file is missing a valid central directory.");
+    }
+
+    const totalEntries = view.getUint16(eocdOffset + 10, true);
+    const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true);
+    const entries = [];
+    let cursor = centralDirectoryOffset;
+
+    for (let entryIndex = 0; entryIndex < totalEntries; entryIndex += 1) {
+      if (view.getUint32(cursor, true) !== CENTRAL_SIGNATURE) {
+        throw new Error("That ZIP file has an invalid central directory entry.");
+      }
+
+      const compressionMethod = view.getUint16(cursor + 10, true);
+      const compressedSize = view.getUint32(cursor + 20, true);
+      const nameLength = view.getUint16(cursor + 28, true);
+      const extraLength = view.getUint16(cursor + 30, true);
+      const commentLength = view.getUint16(cursor + 32, true);
+      const localHeaderOffset = view.getUint32(cursor + 42, true);
+      const nameBytes = bytes.slice(cursor + 46, cursor + 46 + nameLength);
+      const relativePath = decodeZipEntryName(nameBytes).replace(/\\/g, "/");
+      cursor += 46 + nameLength + extraLength + commentLength;
+
+      if (!relativePath || relativePath.endsWith("/")) {
+        continue;
+      }
+      if (view.getUint32(localHeaderOffset, true) !== LOCAL_SIGNATURE) {
+        throw new Error(`ZIP entry "${relativePath}" has an invalid local header.`);
+      }
+
+      const localNameLength = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
+      const compressedBytes = bytes.slice(dataStart, dataStart + compressedSize);
+
+      let fileBytes = null;
+      if (compressionMethod === 0) {
+        fileBytes = compressedBytes;
+      } else if (compressionMethod === 8) {
+        fileBytes = await inflateZipBytes(compressedBytes);
+      } else {
+        throw new Error(`ZIP entry "${relativePath}" uses unsupported compression method ${compressionMethod}.`);
+      }
+
+      entries.push({ relativePath, bytes: fileBytes });
+    }
+
+    return entries;
+  }
+
+  function parseResourcePackMetadata(rawMeta, fallbackName) {
+    if (!rawMeta || typeof rawMeta !== "object") {
+      return {
+        name: fallbackName,
+        description: "Imported custom pack."
+      };
+    }
+    const packSection = rawMeta.pack && typeof rawMeta.pack === "object" ? rawMeta.pack : null;
+    const descriptionValue = packSection?.description ?? rawMeta.description;
+    return {
+      name: String(rawMeta.name || fallbackName).trim() || fallbackName,
+      description: String(descriptionValue || "Imported custom pack.").trim()
+    };
+  }
+
+  async function importResourcePackEntries(entries, defaultNameHint = "") {
+    const normalizedEntries = Array.from(entries || []).filter((entry) => entry && typeof entry.relativePath === "string");
+    if (normalizedEntries.length === 0) {
+      throw new Error("Choose a resource pack first.");
+    }
+
+    let packMeta = null;
+    const assets = {};
+    let rootFolderName = "";
+
+    for (const entry of normalizedEntries) {
+      const relativePath = String(entry.relativePath || "");
+      if (!rootFolderName && relativePath) {
+        rootFolderName = relativePath.split("/").filter(Boolean)[0] || "";
+      }
+      const normalizedPath = normalizeResourcePackRelativePath(relativePath);
+      if (!normalizedPath) continue;
+
+      const lowerNormalizedPath = normalizedPath.toLowerCase();
+      if (lowerNormalizedPath.endsWith("/pack.json") || lowerNormalizedPath === "./pack.json" || lowerNormalizedPath.endsWith("/pack.mcmeta") || lowerNormalizedPath === "./pack.mcmeta") {
+        try {
+          const text = typeof entry.text === "string"
+            ? entry.text
+            : entry.file
+              ? await entry.file.text()
+              : new TextDecoder("utf-8").decode(entry.bytes || new Uint8Array());
+          packMeta = JSON.parse(text);
+        } catch (error) {
+          console.warn("Custom pack metadata parse failed:", error.message);
+        }
+        continue;
+      }
+
+      if (typeof entry.dataUrl === "string" && entry.dataUrl) {
+        assets[normalizedPath] = entry.dataUrl;
+      } else if (entry.file) {
+        assets[normalizedPath] = await readFileAsDataUrl(entry.file);
+      } else if (entry.bytes instanceof Uint8Array) {
+        assets[normalizedPath] = await blobToDataUrl(new Blob([entry.bytes], { type: getMimeTypeForPath(relativePath) }));
+      }
+    }
+
+    const defaultName = defaultNameHint || rootFolderName || `Custom Pack ${getCustomResourcePacks(settings).length + 1}`;
+    const meta = parseResourcePackMetadata(packMeta, defaultName);
+    const packIdBase = meta.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || generateId();
+    const packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}`;
+    const pack = {
+      id: packId,
+      name: meta.name,
+      description: meta.description,
+      iconBlock: Number.isFinite(packMeta?.iconBlock) ? Number(packMeta.iconBlock) : inferIconBlockFromAssets(assets),
+      assets
+    };
+
+    settings.customResourcePacks = [
+      ...getCustomResourcePacks(settings).filter((existing) => existing.id !== pack.id),
+      pack
+    ];
+    settings.texturePack = pack.id;
+    await preloadCustomResourcePackAssets(pack);
+    applyTexturePackSetting();
+    markWorldDirty();
+    setSettingsUI();
   }
 
   function inferIconBlockFromAssets(assets = {}) {
@@ -11463,53 +12224,21 @@ export default function FreeCube2Game(engine) {
     if (files.length === 0) {
       throw new Error("Choose a resource-pack folder first.");
     }
+    await importResourcePackEntries(
+      files.map((file) => ({
+        relativePath: String(file.webkitRelativePath || file.name || ""),
+        file
+      }))
+    );
+  }
 
-    let packMeta = null;
-    const assets = {};
-    let rootFolderName = "";
-
-    for (const file of files) {
-      const relativePath = String(file.webkitRelativePath || file.name || "");
-      if (!rootFolderName && relativePath) {
-        rootFolderName = relativePath.split("/").filter(Boolean)[0] || "";
-      }
-      const normalizedPath = normalizeResourcePackRelativePath(relativePath);
-      if (!normalizedPath) continue;
-
-      if (normalizedPath.endsWith("/pack.json") || normalizedPath === "./pack.json") {
-        try {
-          packMeta = JSON.parse(await file.text());
-        } catch (error) {
-          console.warn("Custom pack metadata parse failed:", error.message);
-        }
-        continue;
-      }
-
-      const dataUrl = await readFileAsDataUrl(file);
-      assets[normalizedPath] = dataUrl;
+  async function importResourcePackZip(file) {
+    if (!file) {
+      throw new Error("Choose a resource-pack ZIP first.");
     }
-
-    const defaultName = rootFolderName || `Custom Pack ${getCustomResourcePacks(settings).length + 1}`;
-    const safeName = String(packMeta?.name || defaultName).trim() || defaultName;
-    const packIdBase = safeName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || generateId();
-    const packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}`;
-    const pack = {
-      id: packId,
-      name: safeName,
-      description: String(packMeta?.description || "Imported custom pack.").trim(),
-      iconBlock: Number.isFinite(packMeta?.iconBlock) ? Number(packMeta.iconBlock) : inferIconBlockFromAssets(assets),
-      assets
-    };
-
-    settings.customResourcePacks = [
-      ...getCustomResourcePacks(settings).filter((existing) => existing.id !== pack.id),
-      pack
-    ];
-    settings.texturePack = pack.id;
-    await preloadCustomResourcePackAssets(pack);
-    applyTexturePackSetting();
-    markWorldDirty();
-    setSettingsUI();
+    const entries = await extractZipEntries(file);
+    const defaultName = String(file.name || "").replace(/\.zip$/i, "").trim();
+    await importResourcePackEntries(entries, defaultName || "");
   }
 
   function loadWorldFromStore(worldId) {
@@ -11723,26 +12452,28 @@ export default function FreeCube2Game(engine) {
 
   function breakCurrentTarget() {
     if (!currentTarget || player.breakCooldown > 0) return false;
-    if (currentTarget.type === BLOCK.BEDROCK || currentTarget.type === BLOCK.WATER) return false;
+    if (currentTarget.type === BLOCK.BEDROCK || isFluidBlock(currentTarget.type)) return false;
     if (world.setBlock(currentTarget.x, currentTarget.y, currentTarget.z, BLOCK.AIR)) {
       if (!isCreativeMode()) {
         if (currentTarget.type === BLOCK.FURNACE) {
           dropFurnaceContentsAt(currentTarget.x, currentTarget.y, currentTarget.z);
         }
-        const drop = getBlockDrop(currentTarget.type, currentTarget.x, currentTarget.y, currentTarget.z, world.seed);
-        const jx = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 2.2;
-        const jz = (random3(currentTarget.z, currentTarget.y, currentTarget.x, world.seed + 2002) - 0.5) * 2.2;
-        spawnItemEntity(
-          drop.itemType,
-          drop.count,
-          currentTarget.x + 0.5,
-          currentTarget.y + 0.55,
-          currentTarget.z + 0.5,
-          jx,
-          3.4,
-          jz,
-          0.55
-        );
+        if (canHarvestBlock(getSelectedHeldItemType(), currentTarget.type)) {
+          const drop = getBlockDrop(currentTarget.type, currentTarget.x, currentTarget.y, currentTarget.z, world.seed);
+          const jx = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 2.2;
+          const jz = (random3(currentTarget.z, currentTarget.y, currentTarget.x, world.seed + 2002) - 0.5) * 2.2;
+          spawnItemEntity(
+            drop.itemType,
+            drop.count,
+            currentTarget.x + 0.5,
+            currentTarget.y + 0.55,
+            currentTarget.z + 0.5,
+            jx,
+            3.4,
+            jz,
+            0.55
+          );
+        }
       }
       player.breakCooldown = settings.gameMode === GAME_MODE.CREATIVE ? 0.06 : 0.12;
       return true;
@@ -11790,7 +12521,7 @@ export default function FreeCube2Game(engine) {
       return;
     }
 
-    if (currentTarget.type === BLOCK.BEDROCK || currentTarget.type === BLOCK.WATER) {
+    if (currentTarget.type === BLOCK.BEDROCK || isFluidBlock(currentTarget.type)) {
       mining.key = null;
       mining.progress = 0;
       setMiningProgress(0);
@@ -11804,8 +12535,11 @@ export default function FreeCube2Game(engine) {
       mining.type = currentTarget.type;
     }
 
-    const toolMultiplier = getToolBreakMultiplier(getSelectedHeldItemType(), mining.type);
-    const time = getBreakTime(mining.type) / Math.max(1, toolMultiplier);
+    const heldItemType = getSelectedHeldItemType();
+    const toolMultiplier = getToolBreakMultiplier(heldItemType, mining.type);
+    const canHarvest = canHarvestBlock(heldItemType, mining.type);
+    const penalty = canHarvest ? 1 : getRequiredToolForBlock(mining.type) ? 3.2 : 1;
+    const time = getBreakTime(mining.type) * penalty / Math.max(1, toolMultiplier);
     mining.progress += dt / time;
     setMiningProgress(mining.progress);
 
@@ -11825,7 +12559,7 @@ export default function FreeCube2Game(engine) {
     const place = currentTarget.place;
     if (!place || place.y <= 0 || place.y >= WORLD_HEIGHT) return;
     const existing = world.getBlock(place.x, place.y, place.z);
-    if (existing !== BLOCK.AIR && existing !== BLOCK.WATER) return;
+    if (existing !== BLOCK.AIR && !isFluidBlock(existing)) return;
     if (player.intersectsBlock(place.x, place.y, place.z)) return;
     const type = getSelectedHeldBlockType();
     if (!type || type === BLOCK.AIR) return;
@@ -12262,6 +12996,9 @@ export default function FreeCube2Game(engine) {
       } else if (action === "open-resource-packs") {
         ui.resourcePackFileInput.value = "";
         ui.resourcePackFileInput.click();
+      } else if (action === "open-resource-packs-zip") {
+        ui.resourcePackZipInput.value = "";
+        ui.resourcePackZipInput.click();
       } else if (action === "skin-import") {
         ui.skinFileInput.value = "";
         ui.skinFileInput.click();
@@ -12386,6 +13123,21 @@ export default function FreeCube2Game(engine) {
         alert(`Resource-pack import failed: ${error.message}`);
       } finally {
         ui.resourcePackFileInput.value = "";
+      }
+    });
+
+    ui.resourcePackZipInput.addEventListener("change", async () => {
+      const file = ui.resourcePackZipInput.files?.[0];
+      if (!file) {
+        return;
+      }
+      try {
+        await importResourcePackZip(file);
+        renderResourcePackUI();
+      } catch (error) {
+        alert(`Resource-pack ZIP import failed: ${error.message}`);
+      } finally {
+        ui.resourcePackZipInput.value = "";
       }
     });
 
@@ -12723,6 +13475,7 @@ export default function FreeCube2Game(engine) {
         player.isCrouching = false;
       }
 
+      updateWorldRandomTicks(dt);
       player.ensureSafePosition(world);
       updatePlayerVitals(dt);
 
