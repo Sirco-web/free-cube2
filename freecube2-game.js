@@ -7411,8 +7411,10 @@ class WebGLVoxelRenderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas.texture);
     gl.uniform1i(this.uTex, 0);
 
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
+    // Keep culling off for chunk geometry until the greedy mesher winding is
+    // fully normalized. Turning it on here causes valid faces like grass/sand
+    // tops to disappear on some chunks.
+    gl.disable(gl.CULL_FACE);
     gl.disable(gl.BLEND);
     gl.depthMask(true);
 
