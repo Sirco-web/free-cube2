@@ -26,10 +26,54 @@ const DEFAULT_SETTINGS = {
   musicVolume: 0.65,
   texturePack: "default",
   mobModels: true,
+  performancePreset: "balanced",
   playerSkinPreset: "steve_large",
   playerSkinDataUrl: "",
   customResourcePacks: []
 };
+
+const PERFORMANCE_PRESETS = ["balanced", "boost", "turbo"];
+
+function normalizePerformancePreset(value, fallback = DEFAULT_SETTINGS.performancePreset) {
+  return PERFORMANCE_PRESETS.includes(value) ? value : fallback;
+}
+
+function getPerformancePresetLabel(value = DEFAULT_SETTINGS.performancePreset) {
+  switch (normalizePerformancePreset(value)) {
+    case "turbo":
+      return "Max FPS";
+    case "boost":
+      return "Boost";
+    default:
+      return "Balanced";
+  }
+}
+
+function getPerformancePresetConfig(value = DEFAULT_SETTINGS.performancePreset) {
+  switch (normalizePerformancePreset(value)) {
+    case "turbo":
+      return {
+        entityDistance: 24,
+        waterSteps: 10,
+        lavaSteps: 3,
+        cleanupBias: 1
+      };
+    case "boost":
+      return {
+        entityDistance: 32,
+        waterSteps: 14,
+        lavaSteps: 4,
+        cleanupBias: 0.5
+      };
+    default:
+      return {
+        entityDistance: 44,
+        waterSteps: 18,
+        lavaSteps: 5,
+        cleanupBias: 0
+      };
+  }
+}
 
 const LOADING_CHUNK_GEN_LIMIT = 4;
 const LOADING_CHUNK_MESH_LIMIT = 4;
@@ -42,6 +86,13 @@ const PLAY_CHUNK_MESH_BUDGET_MS = 2.25;
 const AUTOSAVE_INTERVAL_SECONDS = 8;
 const RANDOM_BLOCK_TICK_INTERVAL = 0.16;
 const RANDOM_BLOCK_TICKS_PER_STEP = 6;
+const WATER_FLOW_TICK_SECONDS = 0.12;
+const LAVA_FLOW_TICK_SECONDS = 0.62;
+const MAX_WATER_FLOW_LEVEL = 7;
+const MAX_LAVA_FLOW_LEVEL = 4;
+const BLOCK_TICK_STEP_SECONDS = 0.05;
+const MAX_BLOCK_TICK_STEPS_PER_FRAME = 2;
+const TARGET_SCAN_INTERVAL_SECONDS = 1 / 30;
 
 const GAME_MODE = {
   SURVIVAL: "survival",
@@ -109,6 +160,12 @@ function makeSafeFileName(value, fallback = "world") {
   const compact = normalized.replace(/[. ]+$/g, "").slice(0, 64);
   return compact || fallback;
 }
+
+function packBlockPositionKey(x, y, z) {
+  return `${Math.floor(x)}|${Math.floor(y)}|${Math.floor(z)}`;
+}
+
+let playerSkinRefreshHandler = null;
 
 function downloadTextFile(filename, content, mimeType = "application/json") {
   const blob = new Blob([content], { type: mimeType });
@@ -179,6 +236,39 @@ function deserializeModifiedChunks(obj) {
     if (bucket.size > 0) {
       result.set(chunkKey, bucket);
     }
+  }
+  return result;
+}
+
+function serializeFluidStates(fluidStates) {
+  const result = {};
+  for (const [key, state] of fluidStates || []) {
+    if (!state || !isFluidBlock(state.type)) continue;
+    result[key] = {
+      type: Number(state.type) || 0,
+      level: clamp(Math.floor(Number(state.level) || 0), 0, MAX_WATER_FLOW_LEVEL),
+      source: !!state.source,
+      falling: !!state.falling
+    };
+  }
+  return result;
+}
+
+function deserializeFluidStates(obj) {
+  const result = new Map();
+  if (!obj || typeof obj !== "object") {
+    return result;
+  }
+  for (const [key, state] of Object.entries(obj)) {
+    if (!state || typeof state !== "object") continue;
+    const type = Number(state.type) || 0;
+    if (!isFluidBlock(type)) continue;
+    result.set(key, {
+      type,
+      level: clamp(Math.floor(Number(state.level) || 0), 0, MAX_WATER_FLOW_LEVEL),
+      source: !!state.source,
+      falling: !!state.falling
+    });
   }
   return result;
 }
@@ -263,7 +353,7 @@ class WorldStore {
       this.index.selectedWorldId = worldId;
     }
     this.saveIndex();
-    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, player: null, settings: null });
+    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, fluidStates: {}, player: null, settings: null });
     return worldId;
   }
 
@@ -357,6 +447,7 @@ class WorldStore {
         version: save.version || GAME_VERSION,
         seed: normalizeWorldSeed(save.seed ?? meta.seed, meta.seed),
         modifiedChunks: save.modifiedChunks && typeof save.modifiedChunks === "object" ? save.modifiedChunks : {},
+        fluidStates: save.fluidStates && typeof save.fluidStates === "object" ? save.fluidStates : {},
         furnaces: save.furnaces && typeof save.furnaces === "object" ? save.furnaces : {},
         player: save.player && typeof save.player === "object" ? save.player : null,
         settings: save.settings && typeof save.settings === "object" ? save.settings : null
@@ -372,7 +463,7 @@ class WorldStore {
     const exportedMeta = data.meta && typeof data.meta === "object" ? data.meta : {};
     const payloadCandidate = data.payload && typeof data.payload === "object"
       ? data.payload
-      : (data.modifiedChunks || data.player || data.settings || data.furnaces || data.seed ? data : null);
+      : (data.modifiedChunks || data.fluidStates || data.player || data.settings || data.furnaces || data.seed ? data : null);
     if (!payloadCandidate || typeof payloadCandidate !== "object") {
       return null;
     }
@@ -392,6 +483,7 @@ class WorldStore {
       version: payloadCandidate.version || data.gameVersion || GAME_VERSION,
       seed,
       modifiedChunks: payloadCandidate.modifiedChunks && typeof payloadCandidate.modifiedChunks === "object" ? payloadCandidate.modifiedChunks : {},
+      fluidStates: payloadCandidate.fluidStates && typeof payloadCandidate.fluidStates === "object" ? payloadCandidate.fluidStates : {},
       furnaces: payloadCandidate.furnaces && typeof payloadCandidate.furnaces === "object" ? payloadCandidate.furnaces : {},
       player: payloadCandidate.player && typeof payloadCandidate.player === "object" ? payloadCandidate.player : null,
       settings: payloadCandidate.settings && typeof payloadCandidate.settings === "object" ? payloadCandidate.settings : null
@@ -2517,6 +2609,8 @@ const FURNACE_SMELT_TIME = 5.5;
 const SMELTING_RECIPES = {
   [ITEM.RAW_CHICKEN]: ITEM.COOKED_CHICKEN,
   [ITEM.RAW_MUTTON]: ITEM.COOKED_MUTTON,
+  [BLOCK.SAND]: BLOCK.GLASS,
+  [BLOCK.COBBLESTONE]: BLOCK.STONE,
   [BLOCK.IRON_ORE]: ITEM.IRON_INGOT,
   [BLOCK.GOLD_ORE]: ITEM.GOLD_INGOT
 };
@@ -2915,11 +3009,7 @@ function normalizeImportedPlayerSkinCanvas(image) {
 }
 
 function triggerPlayerSkinRefresh() {
-  if (!ui) return;
-  setSettingsUI();
-  if (inventoryOpen) {
-    renderInventoryUI();
-  }
+  playerSkinRefreshHandler?.();
 }
 
 function queueCustomPlayerSkinLoad(dataUrl) {
@@ -4285,6 +4375,9 @@ class World {
     this.terrain = new TerrainGenerator(this.seed);
     this.chunks = new Map();
     this.modifiedChunks = new Map();
+    this.fluidStates = new Map();
+    this.activeWaterUpdates = new Set();
+    this.activeLavaUpdates = new Set();
     this.savedPlayerState = null;
     this.savedSettings = null;
     this.saveDirty = false;
@@ -4302,6 +4395,7 @@ class World {
       chunk = new Chunk(this, chunkX, chunkZ);
       this.chunks.set(key, chunk);
       chunk.generate();
+      this.queueFluidUpdatesForChunk(chunkX, chunkZ);
       this.markChunkAndNeighborsDirty(chunkX, chunkZ);
     }
     return chunk;
@@ -4365,8 +4459,327 @@ class World {
     return chunk.getLocal(mod(x, CHUNK_SIZE), y, mod(z, CHUNK_SIZE));
   }
 
+  getFluidUpdateSet(type) {
+    return type === BLOCK.LAVA ? this.activeLavaUpdates : this.activeWaterUpdates;
+  }
+
+  getFluidMaxLevel(type) {
+    return type === BLOCK.LAVA ? MAX_LAVA_FLOW_LEVEL : MAX_WATER_FLOW_LEVEL;
+  }
+
+  getFluidStateAt(x, y, z, peekOnly = false) {
+    const type = peekOnly ? this.peekBlock(x, y, z) : this.getBlock(x, y, z);
+    if (!isFluidBlock(type)) {
+      return null;
+    }
+    const key = packBlockPositionKey(x, y, z);
+    const stored = this.fluidStates.get(key);
+    if (stored && stored.type === type) {
+      return { ...stored, implicit: false };
+    }
+    return { type, level: 0, source: true, falling: false, implicit: true };
+  }
+
+  clearFluidStateAt(x, y, z) {
+    const key = packBlockPositionKey(x, y, z);
+    this.fluidStates.delete(key);
+    this.activeWaterUpdates.delete(key);
+    this.activeLavaUpdates.delete(key);
+  }
+
+  queueFluidUpdateAt(x, y, z, type = this.peekBlock(x, y, z)) {
+    if (!isFluidBlock(type)) {
+      return;
+    }
+    this.getFluidUpdateSet(type).add(packBlockPositionKey(x, y, z));
+  }
+
+  queueFluidUpdatesAround(x, y, z) {
+    const checks = [
+      [x, y, z],
+      [x + 1, y, z],
+      [x - 1, y, z],
+      [x, y + 1, z],
+      [x, y - 1, z],
+      [x, y, z + 1],
+      [x, y, z - 1]
+    ];
+    for (const [cx, cy, cz] of checks) {
+      const type = this.peekBlock(cx, cy, cz);
+      if (isFluidBlock(type)) {
+        this.queueFluidUpdateAt(cx, cy, cz, type);
+      }
+    }
+  }
+
+  queueFluidUpdatesForChunk(chunkX, chunkZ) {
+    const chunk = this.peekChunk(chunkX, chunkZ);
+    if (!chunk) {
+      return;
+    }
+    const minX = chunkX * CHUNK_SIZE;
+    const maxX = minX + CHUNK_SIZE;
+    const minZ = chunkZ * CHUNK_SIZE;
+    const maxZ = minZ + CHUNK_SIZE;
+    for (const [key, state] of this.fluidStates) {
+      const [x, y, z] = key.split("|").map(Number);
+      if (x >= minX && x < maxX && z >= minZ && z < maxZ && y > 0 && y < WORLD_HEIGHT) {
+        this.queueFluidUpdateAt(x, y, z, state.type);
+      }
+    }
+
+    const maxY = clamp((chunk.meshMaxY || SEA_LEVEL) + 1, 1, WORLD_HEIGHT - 1);
+    for (let lx = 0; lx < CHUNK_SIZE; lx += 1) {
+      for (let lz = 0; lz < CHUNK_SIZE; lz += 1) {
+        for (let y = 1; y <= maxY; y += 1) {
+          const type = chunk.getLocal(lx, y, lz);
+          if (!isFluidBlock(type)) {
+            continue;
+          }
+          const worldX = minX + lx;
+          const worldZ = minZ + lz;
+          const hasFlowOpening =
+            this.peekBlock(worldX, y - 1, worldZ) === BLOCK.AIR ||
+            this.peekBlock(worldX + 1, y, worldZ) === BLOCK.AIR ||
+            this.peekBlock(worldX - 1, y, worldZ) === BLOCK.AIR ||
+            this.peekBlock(worldX, y, worldZ + 1) === BLOCK.AIR ||
+            this.peekBlock(worldX, y, worldZ - 1) === BLOCK.AIR;
+          if (hasFlowOpening) {
+            this.queueFluidUpdateAt(worldX, y, worldZ, type);
+          }
+        }
+      }
+    }
+  }
+
+  _writeBlockRaw(x, y, z, type) {
+    if (y <= 0 || y >= WORLD_HEIGHT) {
+      return false;
+    }
+
+    const chunkX = Math.floor(x / CHUNK_SIZE);
+    const chunkZ = Math.floor(z / CHUNK_SIZE);
+    const localX = mod(x, CHUNK_SIZE);
+    const localZ = mod(z, CHUNK_SIZE);
+    const chunk = this.getChunk(chunkX, chunkZ);
+    const current = chunk.getLocal(localX, y, localZ);
+    if (current === type) {
+      return false;
+    }
+
+    chunk.setLocal(localX, y, localZ, type);
+    let bucket = this.modifiedChunks.get(packChunkKey(chunkX, chunkZ));
+    if (!bucket) {
+      bucket = new Map();
+      this.modifiedChunks.set(packChunkKey(chunkX, chunkZ), bucket);
+    }
+    bucket.set(packLocalKey(localX, y, localZ), type);
+    this.markChunkAndTouchingNeighborsDirty(chunkX, chunkZ, localX, localZ);
+    return true;
+  }
+
+  canFluidFlowInto(x, y, z, type) {
+    if (y <= 0 || y >= WORLD_HEIGHT) {
+      return false;
+    }
+    const chunk = this.peekChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    if (!chunk) {
+      return false;
+    }
+    const existing = this.peekBlock(x, y, z);
+    return existing === BLOCK.AIR || existing === type;
+  }
+
+  setFluidBlock(x, y, z, type, level = 0, source = false, falling = false) {
+    if (!isFluidBlock(type) || y <= 0 || y >= WORLD_HEIGHT) {
+      return false;
+    }
+    const existing = this.peekBlock(x, y, z);
+    if (existing !== BLOCK.AIR && existing !== type) {
+      return false;
+    }
+
+    const key = packBlockPositionKey(x, y, z);
+    const nextState = {
+      type,
+      level: clamp(Math.floor(level), 0, this.getFluidMaxLevel(type)),
+      source: !!source,
+      falling: !!falling
+    };
+    let changed = false;
+
+    if (existing !== type) {
+      changed = this._writeBlockRaw(x, y, z, type) || changed;
+    }
+
+    const prevState = this.fluidStates.get(key);
+    if (
+      !prevState ||
+      prevState.type !== nextState.type ||
+      prevState.level !== nextState.level ||
+      !!prevState.source !== nextState.source ||
+      !!prevState.falling !== nextState.falling
+    ) {
+      this.fluidStates.set(key, nextState);
+      changed = true;
+    }
+
+    if (changed) {
+      this.queueFluidUpdatesAround(x, y, z);
+      this.resolveFluidInteractionsAround(x, y, z);
+      this.saveDirty = true;
+    }
+    return changed;
+  }
+
+  removeDynamicFluidAt(x, y, z, type = this.peekBlock(x, y, z)) {
+    if (!isFluidBlock(type)) {
+      return false;
+    }
+    const key = packBlockPositionKey(x, y, z);
+    let changed = false;
+    if (this.peekBlock(x, y, z) === type) {
+      changed = this._writeBlockRaw(x, y, z, BLOCK.AIR) || changed;
+    }
+    if (this.fluidStates.delete(key)) {
+      changed = true;
+    }
+    this.activeWaterUpdates.delete(key);
+    this.activeLavaUpdates.delete(key);
+    if (changed) {
+      this.queueFluidUpdatesAround(x, y, z);
+      this.saveDirty = true;
+    }
+    return changed;
+  }
+
+  updateFluidCell(x, y, z, type) {
+    if (!isFluidBlock(type)) {
+      return false;
+    }
+    if (this.peekBlock(x, y, z) !== type) {
+      this.clearFluidStateAt(x, y, z);
+      return false;
+    }
+
+    const state = this.getFluidStateAt(x, y, z, true);
+    if (!state) {
+      return false;
+    }
+
+    const maxLevel = this.getFluidMaxLevel(type);
+    const implicitSource = !!state.implicit;
+    const wasSource = !!state.source || implicitSource;
+    const aboveType = this.peekBlock(x, y + 1, z);
+    const belowType = this.peekBlock(x, y - 1, z);
+
+    let nextLevel = 0;
+    let nextSource = wasSource;
+    let nextFalling = false;
+
+    if (!wasSource) {
+      if (aboveType === type) {
+        nextLevel = 0;
+        nextFalling = true;
+      } else {
+        let adjacentSources = 0;
+        let bestLevel = Number.POSITIVE_INFINITY;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (this.peekBlock(x + dx, y, z + dz) !== type) continue;
+          const neighborState = this.getFluidStateAt(x + dx, y, z + dz, true);
+          if (!neighborState) continue;
+          if (neighborState.source || neighborState.implicit) {
+            adjacentSources += 1;
+          }
+          bestLevel = Math.min(bestLevel, (neighborState.level || 0) + 1);
+        }
+
+        const canBecomeSource =
+          type === BLOCK.WATER &&
+          belowType !== BLOCK.AIR &&
+          belowType !== BLOCK.LAVA &&
+          adjacentSources >= 2;
+
+        if (canBecomeSource) {
+          nextSource = true;
+          nextLevel = 0;
+        } else if (Number.isFinite(bestLevel) && bestLevel <= maxLevel) {
+          nextLevel = bestLevel;
+        } else {
+          return this.removeDynamicFluidAt(x, y, z, type);
+        }
+      }
+    }
+
+    if (implicitSource) {
+      this.fluidStates.delete(packBlockPositionKey(x, y, z));
+    } else {
+      this.fluidStates.set(packBlockPositionKey(x, y, z), {
+        type,
+        level: clamp(nextLevel, 0, maxLevel),
+        source: !!nextSource,
+        falling: !!nextFalling
+      });
+    }
+
+    let changed = false;
+    if (this.canFluidFlowInto(x, y - 1, z, type) && this.peekBlock(x, y - 1, z) === BLOCK.AIR) {
+      changed = this.setFluidBlock(x, y - 1, z, type, 0, false, true) || changed;
+    } else if (!nextFalling && nextLevel < maxLevel) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx;
+        const nz = z + dz;
+        const neighborType = this.peekBlock(nx, y, nz);
+        if (neighborType === BLOCK.AIR) {
+          changed = this.setFluidBlock(nx, y, nz, type, nextLevel + 1, false, false) || changed;
+        } else if (neighborType === type) {
+          const neighborState = this.getFluidStateAt(nx, y, nz, true);
+          if (
+            neighborState &&
+            !neighborState.source &&
+            !neighborState.implicit &&
+            (((neighborState.level || 0) > nextLevel + 1) || neighborState.falling)
+          ) {
+            changed = this.setFluidBlock(nx, y, nz, type, nextLevel + 1, false, false) || changed;
+          }
+        }
+      }
+    }
+
+    this.resolveFluidInteractionsAround(x, y, z);
+    return changed;
+  }
+
+  stepFluidSimulation(type, limit = 16) {
+    const queue = this.getFluidUpdateSet(type);
+    if (!queue || queue.size === 0 || limit <= 0) {
+      return false;
+    }
+    let processed = 0;
+    for (const key of Array.from(queue)) {
+      if (processed >= limit) {
+        break;
+      }
+      queue.delete(key);
+      const [x, y, z] = key.split("|").map(Number);
+      if (!this.peekChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE))) {
+        queue.add(key);
+        continue;
+      }
+      if (this.peekBlock(x, y, z) !== type) {
+        if (!isFluidBlock(this.peekBlock(x, y, z))) {
+          this.clearFluidStateAt(x, y, z);
+        }
+        continue;
+      }
+      this.updateFluidCell(x, y, z, type);
+      processed += 1;
+    }
+    return processed > 0;
+  }
+
   resolveFluidInteractionAt(x, y, z) {
-    const type = this.getBlock(x, y, z);
+    const type = this.peekBlock(x, y, z);
     if (!isFluidBlock(type)) {
       return false;
     }
@@ -4379,22 +4792,22 @@ class World {
     ];
 
     if (type === BLOCK.WATER) {
-      if (this.getBlock(x, y - 1, z) === BLOCK.LAVA) {
+      if (this.peekBlock(x, y - 1, z) === BLOCK.LAVA) {
         return this.setBlock(x, y - 1, z, BLOCK.OBSIDIAN);
       }
       for (const [dx, dy, dz] of horizontalNeighbors) {
-        if (this.getBlock(x + dx, y + dy, z + dz) === BLOCK.LAVA) {
+        if (this.peekBlock(x + dx, y + dy, z + dz) === BLOCK.LAVA) {
           return this.setBlock(x + dx, y + dy, z + dz, BLOCK.COBBLESTONE);
         }
       }
       return false;
     }
 
-    if (this.getBlock(x, y + 1, z) === BLOCK.WATER || this.getBlock(x, y - 1, z) === BLOCK.WATER) {
+    if (this.peekBlock(x, y + 1, z) === BLOCK.WATER || this.peekBlock(x, y - 1, z) === BLOCK.WATER) {
       return this.setBlock(x, y, z, BLOCK.OBSIDIAN);
     }
     for (const [dx, dy, dz] of horizontalNeighbors) {
-      if (this.getBlock(x + dx, y + dy, z + dz) === BLOCK.WATER) {
+      if (this.peekBlock(x + dx, y + dy, z + dz) === BLOCK.WATER) {
         return this.setBlock(x, y, z, BLOCK.COBBLESTONE);
       }
     }
@@ -4417,29 +4830,21 @@ class World {
   }
 
   setBlock(x, y, z, type) {
-    if (y <= 0 || y >= WORLD_HEIGHT) {
+    if (!this._writeBlockRaw(x, y, z, type)) {
       return false;
     }
 
-    const chunkX = Math.floor(x / CHUNK_SIZE);
-    const chunkZ = Math.floor(z / CHUNK_SIZE);
-    const localX = mod(x, CHUNK_SIZE);
-    const localZ = mod(z, CHUNK_SIZE);
-    const chunk = this.getChunk(chunkX, chunkZ);
-    const current = chunk.getLocal(localX, y, localZ);
-
-    if (current === type) {
-      return false;
+    if (isFluidBlock(type)) {
+      this.fluidStates.set(packBlockPositionKey(x, y, z), {
+        type,
+        level: 0,
+        source: true,
+        falling: false
+      });
+    } else {
+      this.clearFluidStateAt(x, y, z);
     }
-
-    chunk.setLocal(localX, y, localZ, type);
-    let bucket = this.modifiedChunks.get(packChunkKey(chunkX, chunkZ));
-    if (!bucket) {
-      bucket = new Map();
-      this.modifiedChunks.set(packChunkKey(chunkX, chunkZ), bucket);
-    }
-    bucket.set(packLocalKey(localX, y, localZ), type);
-    this.markChunkAndTouchingNeighborsDirty(chunkX, chunkZ, localX, localZ);
+    this.queueFluidUpdatesAround(x, y, z);
     this.resolveFluidInteractionsAround(x, y, z);
     this.saveDirty = true;
     return true;
@@ -6832,10 +7237,27 @@ class GreedyChunkMesher {
           light
         );
       }
-      indexArray.push(
-        startIndex, startIndex + 1, startIndex + 2,
-        startIndex, startIndex + 2, startIndex + 3
-      );
+      const edgeAX = quadVerts[1][0] - quadVerts[0][0];
+      const edgeAY = quadVerts[1][1] - quadVerts[0][1];
+      const edgeAZ = quadVerts[1][2] - quadVerts[0][2];
+      const edgeBX = quadVerts[2][0] - quadVerts[0][0];
+      const edgeBY = quadVerts[2][1] - quadVerts[0][1];
+      const edgeBZ = quadVerts[2][2] - quadVerts[0][2];
+      const faceNX = edgeAY * edgeBZ - edgeAZ * edgeBY;
+      const faceNY = edgeAZ * edgeBX - edgeAX * edgeBZ;
+      const faceNZ = edgeAX * edgeBY - edgeAY * edgeBX;
+      const windingMatchesNormal = faceNX * normal[0] + faceNY * normal[1] + faceNZ * normal[2] >= 0;
+      if (windingMatchesNormal) {
+        indexArray.push(
+          startIndex, startIndex + 1, startIndex + 2,
+          startIndex, startIndex + 2, startIndex + 3
+        );
+      } else {
+        indexArray.push(
+          startIndex, startIndex + 2, startIndex + 1,
+          startIndex, startIndex + 3, startIndex + 2
+        );
+      }
     };
 
     // Read directly from the current chunk whenever possible so chunk meshing
@@ -7095,6 +7517,8 @@ class WebGLVoxelRenderer {
     this._outline = this._createOutlineRenderer();
     this.entities = [];
     this.visibleOffsets = getChunkLoadOffsets(this.renderDistanceChunks);
+    this.runtimeInCave = false;
+    this.runtimeLowFps = false;
     this._entities = this._createEntityRenderer();
     this._zombie = this._createZombieRenderer();
     this._objEntities = this._createObjEntityRenderer();
@@ -7146,15 +7570,24 @@ class WebGLVoxelRenderer {
     this.mesher = new GreedyChunkMesher(world, atlas);
 
     gl.enable(gl.DEPTH_TEST);
-    // Disable face culling: our greedy mesher can produce mixed winding on some GPUs/drivers.
-    // Backface culling being wrong looks like "inside out" blocks.
-    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
   }
 
   setRenderDistance(distance) {
     this.renderDistanceChunks = clamp(distance, 1, 6);
     this.settings.renderDistanceChunks = this.renderDistanceChunks;
     this.visibleOffsets = getChunkLoadOffsets(this.renderDistanceChunks);
+  }
+
+  _getEffectiveRenderDistance() {
+    let distance = this.renderDistanceChunks;
+    if (this.runtimeInCave) {
+      distance -= this.runtimeLowFps ? 2 : 1;
+    } else if (this.runtimeLowFps && distance >= 4) {
+      distance -= 1;
+    }
+    return clamp(distance, 1, this.renderDistanceChunks);
   }
 
   setTargetBlock(target) {
@@ -7168,7 +7601,7 @@ class WebGLVoxelRenderer {
   }
 
   _withinDistance(dx, dz) {
-    const r = this.renderDistanceChunks + 0.5;
+    const r = this._getEffectiveRenderDistance() + 0.5;
     return dx * dx + dz * dz <= r * r;
   }
 
@@ -7204,7 +7637,22 @@ class WebGLVoxelRenderer {
     if (distSq <= 4) {
       return true;
     }
-    return this._getChunkViewDot(chunkX, chunkZ, lookDirXZ) >= -0.18;
+    let visibilityThreshold = -0.18;
+    if (this.runtimeInCave) {
+      visibilityThreshold = this.runtimeLowFps ? 0.22 : 0.06;
+    } else if (this.runtimeLowFps) {
+      visibilityThreshold = -0.04;
+    }
+    return this._getChunkViewDot(chunkX, chunkZ, lookDirXZ) >= visibilityThreshold;
+  }
+
+  _getMaxEntityRenderDistance() {
+    const preset = getPerformancePresetConfig(this.settings?.performancePreset);
+    let distance = preset.entityDistance;
+    if (this.settings?.graphicsMode === "fancy") {
+      distance += 4;
+    }
+    return distance;
   }
 
   _takeNearest(queue, keySet, playerChunkX, playerChunkZ) {
@@ -7339,7 +7787,10 @@ class WebGLVoxelRenderer {
         break;
       }
     }
-    const keepRadius = this.settings?.chunkLagFix === false ? this.renderDistanceChunks + 2 : this.renderDistanceChunks + 1;
+    const preset = getPerformancePresetConfig(this.settings?.performancePreset);
+    const keepRadius = this.settings?.chunkLagFix === false
+      ? this.renderDistanceChunks + 2
+      : this.renderDistanceChunks + (preset.cleanupBias >= 1 ? 0 : 1);
     this.world.unloadFarChunks(playerChunkX, playerChunkZ, keepRadius);
 
     // Drop GPU meshes for chunks we unloaded.
@@ -7411,10 +7862,8 @@ class WebGLVoxelRenderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas.texture);
     gl.uniform1i(this.uTex, 0);
 
-    // Keep culling off for chunk geometry until the greedy mesher winding is
-    // fully normalized. Turning it on here causes valid faces like grass/sand
-    // tops to disappear on some chunks.
-    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
     gl.disable(gl.BLEND);
     gl.depthMask(true);
 
@@ -7437,7 +7886,7 @@ class WebGLVoxelRenderer {
     gl.disable(gl.CULL_FACE);
 
     // Draw transparent chunks sorted back-to-front (chunk-level sort)
-    if (this.settings?.graphicsMode === "fancy") {
+    if (this.settings?.graphicsMode === "fancy" && !this.runtimeInCave && !this.runtimeLowFps) {
       const transparentDraw = [];
       for (const offset of this.visibleOffsets) {
         const cx = playerChunkX + offset.dx;
@@ -7631,7 +8080,15 @@ class WebGLVoxelRenderer {
 
     const draw = (proj, view, entities) => {
       if (!entities || entities.length === 0) return;
-      const sorted = entities.length > 1 ? [...entities].sort((a, b) => {
+      const maxEntityDistance = this._getMaxEntityRenderDistance();
+      const maxEntityDistSq = maxEntityDistance * maxEntityDistance;
+      const visibleEntities = entities.filter((entity) => {
+        const dx = entity.x - this.player.x;
+        const dy = entity.y - this.player.y;
+        const dz = entity.z - this.player.z;
+        return dx * dx + dy * dy + dz * dz <= maxEntityDistSq;
+      });
+      const sorted = visibleEntities.length > 1 ? [...visibleEntities].sort((a, b) => {
         const dax = a.x - this.player.x;
         const day = a.y - this.player.y;
         const daz = a.z - this.player.z;
@@ -7639,7 +8096,7 @@ class WebGLVoxelRenderer {
         const dby = b.y - this.player.y;
         const dbz = b.z - this.player.z;
         return dbx * dbx + dby * dby + dbz * dbz - (dax * dax + day * day + daz * daz);
-      }) : entities;
+      }) : visibleEntities;
       gl.useProgram(program);
       gl.uniformMatrix4fv(uProj, false, proj);
       gl.uniformMatrix4fv(uView, false, view);
@@ -7655,8 +8112,9 @@ class WebGLVoxelRenderer {
         const hasObjModel = !isItem && this.objModelLibrary?.hasModel(e.type);
         const hasEntityTexture = !isItem && !!(this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type));
         const canUseObjModel = hasObjModel && hasEntityTexture;
+        const canUseModelFallback = hasObjModel && e.type === "sheep";
         const canUseZombieModel = isZombie && !!this.entityTextures?.getImage("zombie");
-        if (canUseObjModel && this.settings?.mobModels !== false && e.type !== "sheep") {
+        if ((canUseObjModel || canUseModelFallback) && this.settings?.mobModels !== false) {
           continue;
         }
         // Keep zombies on the billboard path for now; it is more reliable than the
@@ -8067,10 +8525,14 @@ class WebGLVoxelRenderer {
       precision highp sampler2D;
       uniform sampler2D uTex;
       uniform vec4 uColor;
+      uniform float uUseTex;
       in vec2 vUV;
       out vec4 outColor;
       void main(){
-        vec4 col = texture(uTex, vUV) * uColor;
+        vec4 col = uColor;
+        if (uUseTex > 0.5) {
+          col *= texture(uTex, vUV);
+        }
         if (col.a < 0.12) discard;
         outColor = col;
       }`
@@ -8086,6 +8548,7 @@ class WebGLVoxelRenderer {
     const uYOffset = gl.getUniformLocation(program, "uYOffset");
     const uTex = gl.getUniformLocation(program, "uTex");
     const uColor = gl.getUniformLocation(program, "uColor");
+    const uUseTex = gl.getUniformLocation(program, "uUseTex");
 
     const buffers = new Map();
 
@@ -8121,7 +8584,8 @@ class WebGLVoxelRenderer {
       const bounds = buffer.bounds || { minX: -0.5, minY: 0, minZ: -0.5, maxX: 0.5, maxY: 1, maxZ: 0.5 };
       const modelHeight = Math.max(0.01, bounds.maxY - bounds.minY);
       const scale = ((def.modelHeight || def.height || 1) / modelHeight) * scaleMul;
-      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1f(uUseTex, tex ? 1 : 0);
+      gl.bindTexture(gl.TEXTURE_2D, tex || null);
       gl.uniform3f(uPos, entity.x, entity.y, entity.z);
       gl.uniform1f(uYaw, (entity.yaw || 0) + (def.yawOffset || 0));
       gl.uniform1f(uScale, scale);
@@ -8135,6 +8599,8 @@ class WebGLVoxelRenderer {
 
     const draw = (proj, view, entities) => {
       if (!entities || entities.length === 0) return;
+      const maxEntityDistance = this._getMaxEntityRenderDistance();
+      const maxEntityDistSq = maxEntityDistance * maxEntityDistance;
       gl.useProgram(program);
       gl.uniformMatrix4fv(uProj, false, proj);
       gl.uniformMatrix4fv(uView, false, view);
@@ -8144,17 +8610,22 @@ class WebGLVoxelRenderer {
 
       for (const e of entities) {
         if (!e || Number.isFinite(e.itemType ?? e.blockType)) continue;
-        if (e.type === "sheep") continue;
+        const dxToPlayer = e.x - this.player.x;
+        const dyToPlayer = e.y - this.player.y;
+        const dzToPlayer = e.z - this.player.z;
+        if (dxToPlayer * dxToPlayer + dyToPlayer * dyToPlayer + dzToPlayer * dzToPlayer > maxEntityDistSq) continue;
         const model = this.objModelLibrary?.getModel(e.type);
         if (!model) continue;
         const image = this.entityTextures?.getImage(e.type) || null;
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const buffer = getBuffer(e.type);
-        if (!buffer || !tex) continue;
+        if (!buffer) continue;
+        if (!tex && e.type !== "sheep") continue;
         const def = getMobDef(e.type);
         const walkFactor = clamp(Math.hypot(e.vx || 0, e.vz || 0) / Math.max(0.1, def.speed || 1), 0, 1);
         const bob = Math.sin((e.age || 0) * 8) * 0.02 * walkFactor;
-        const hurtTint = e.hurtTimer > 0 ? [1, 0.74, 0.74, 1] : [1, 1, 1, 1];
+        const baseTint = e.type === "sheep" && !tex ? [0.97, 0.97, 0.95, 1] : [1, 1, 1, 1];
+        const hurtTint = e.hurtTimer > 0 ? [1, 0.74, 0.74, 1] : baseTint;
 
         drawModel(buffer, tex, e, 1, hurtTint, bob);
 
@@ -8236,12 +8707,17 @@ export default function FreeCube2Game(engine) {
   let worldTime = 0; // seconds, loops
   let spawnTimer = 0;
   let worldTickTimer = 0;
+  let blockTickAccumulator = 0;
   let saveTimer = 0;
   let fps = 0;
   let fpsTimer = 0;
   let fpsSmoothed = 0;
+  let caveCheckTimer = 0;
+  let runtimePlayerInCave = false;
+  let targetScanTimer = 0;
   let currentTarget = null;
   let currentEntityTarget = null;
+  let renderEntities = [];
   let inventoryCursor = { type: BLOCK.AIR, count: 0 };
   let inventoryContext = "inventory";
   let inventoryCraftTypes = new Uint8Array(CRAFT_GRID_SMALL);
@@ -8267,6 +8743,16 @@ export default function FreeCube2Game(engine) {
   let runtimeLowFpsTimer = 0;
   let runtimeCompactCooldown = 0;
   let runtimeMaintenanceTimer = 0;
+  let waterFlowTimer = 0;
+  let lavaFlowTimer = 0;
+
+  playerSkinRefreshHandler = () => {
+    if (!ui) return;
+    setSettingsUI();
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
+  };
 
   const VOLUME_PRESETS = [0, 0.25, 0.5, 0.75, 1];
   const MUSIC_FADE_SECONDS = 2.8;
@@ -8368,7 +8854,7 @@ export default function FreeCube2Game(engine) {
     }
     let covered = 0;
     for (let y = py + 1; y <= Math.min(WORLD_HEIGHT - 1, py + 10); y += 1) {
-      const block = world.getBlock(px, y, pz);
+      const block = world.peekBlock(px, y, pz);
       if (block !== BLOCK.AIR && !isFluidBlock(block)) {
         covered += 1;
       }
@@ -8876,6 +9362,7 @@ export default function FreeCube2Game(engine) {
                   <button id="fc-video-mastervol" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-musicvol" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-mobs" class="fc-btn fc-video-btn" type="button"></button>
+                  <button id="fc-video-perf" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-fullscreen" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-lagfix" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-inv" class="fc-btn fc-video-btn" type="button"></button>
@@ -9039,6 +9526,7 @@ export default function FreeCube2Game(engine) {
     const videoMasterVolumeBtn = root.querySelector("#fc-video-mastervol");
     const videoMusicVolumeBtn = root.querySelector("#fc-video-musicvol");
     const videoMobModelsBtn = root.querySelector("#fc-video-mobs");
+    const videoPerformanceBtn = root.querySelector("#fc-video-perf");
     const videoFullscreenBtn = root.querySelector("#fc-video-fullscreen");
     const videoChunkLagBtn = root.querySelector("#fc-video-lagfix");
     const videoInvertYBtn = root.querySelector("#fc-video-inv");
@@ -9139,6 +9627,7 @@ export default function FreeCube2Game(engine) {
       videoMasterVolumeBtn,
       videoMusicVolumeBtn,
       videoMobModelsBtn,
+      videoPerformanceBtn,
       videoFullscreenBtn,
       videoChunkLagBtn,
       videoInvertYBtn,
@@ -9230,10 +9719,6 @@ export default function FreeCube2Game(engine) {
     }
     player.armorTypes[index] = type;
     player.armorCounts[index] = 1;
-  }
-
-  function packBlockPositionKey(x, y, z) {
-    return `${Math.floor(x)}|${Math.floor(y)}|${Math.floor(z)}`;
   }
 
   function getFurnaceStateByKey(key, create = false) {
@@ -10698,7 +11183,7 @@ export default function FreeCube2Game(engine) {
         item.vy = 0;
       }
 
-      const grounded = isCollidable(world.getBlock(Math.floor(item.x), Math.floor(item.y - 0.1), Math.floor(item.z)));
+      const grounded = isCollidable(world.peekBlock(Math.floor(item.x), Math.floor(item.y - 0.1), Math.floor(item.z)));
       if (grounded) {
         item.vx *= Math.pow(0.32, dt * 6);
         item.vz *= Math.pow(0.32, dt * 6);
@@ -11076,6 +11561,45 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function updateFluids(dt) {
+    if (!world) return;
+    if (world.activeWaterUpdates.size === 0 && world.activeLavaUpdates.size === 0) {
+      return;
+    }
+    const preset = getPerformancePresetConfig(settings.performancePreset);
+    waterFlowTimer += dt;
+    lavaFlowTimer += dt;
+
+    let waterSteps = 0;
+    while (waterFlowTimer >= WATER_FLOW_TICK_SECONDS && waterSteps < 3) {
+      waterFlowTimer -= WATER_FLOW_TICK_SECONDS;
+      world.stepFluidSimulation(BLOCK.WATER, preset.waterSteps);
+      waterSteps += 1;
+    }
+
+    let lavaSteps = 0;
+    while (lavaFlowTimer >= LAVA_FLOW_TICK_SECONDS && lavaSteps < 2) {
+      lavaFlowTimer -= LAVA_FLOW_TICK_SECONDS;
+      world.stepFluidSimulation(BLOCK.LAVA, preset.lavaSteps);
+      lavaSteps += 1;
+    }
+  }
+
+  function updateBlockTicks(dt) {
+    if (!world) return;
+    blockTickAccumulator = Math.min(
+      blockTickAccumulator + dt,
+      BLOCK_TICK_STEP_SECONDS * MAX_BLOCK_TICK_STEPS_PER_FRAME
+    );
+    let steps = 0;
+    while (blockTickAccumulator >= BLOCK_TICK_STEP_SECONDS && steps < MAX_BLOCK_TICK_STEPS_PER_FRAME) {
+      updateWorldRandomTicks(BLOCK_TICK_STEP_SECONDS);
+      updateFluids(BLOCK_TICK_STEP_SECONDS);
+      blockTickAccumulator -= BLOCK_TICK_STEP_SECONDS;
+      steps += 1;
+    }
+  }
+
   function isSpawnDistanceValid(x, z) {
     if (!player) return false;
     const dx = x - player.x;
@@ -11205,11 +11729,11 @@ export default function FreeCube2Game(engine) {
     const checkX = Math.floor(mob.x);
     const checkY = Math.floor(mob.y + Math.max(1, mob.height - 0.1));
     const checkZ = Math.floor(mob.z);
-    const bodyBlock = world.getBlock(checkX, Math.floor(mob.y + 0.1), checkZ);
+    const bodyBlock = world.peekBlock(checkX, Math.floor(mob.y + 0.1), checkZ);
     if (isFluidBlock(bodyBlock)) return false;
 
     for (let y = checkY; y < WORLD_HEIGHT; y += 1) {
-      const block = world.getBlock(checkX, y, checkZ);
+      const block = world.peekBlock(checkX, y, checkZ);
       if (block !== BLOCK.AIR && !isFluidBlock(block)) {
         return false;
       }
@@ -11266,13 +11790,13 @@ export default function FreeCube2Game(engine) {
 
   function updateSpawning(dt) {
     if (!world || !player) return;
+    spawnTimer -= dt;
+    if (spawnTimer > 0) return;
+
     const cycle = getDayCycleInfo(worldTime);
     const capRadius = getMobCapRadius();
     const capRadius2 = capRadius * capRadius;
     pruneMobPopulation(MAX_ACTIVE_MOBS, capRadius);
-
-    spawnTimer -= dt;
-    if (spawnTimer > 0) return;
 
     let hostiles = 0;
     let passives = 0;
@@ -11345,7 +11869,8 @@ export default function FreeCube2Game(engine) {
       const hasTexture = !!entityTextures?.getImage(type);
       const hasBillboard = !!entityTextures?.getBillboardImage(type);
       const hasModel = !!objModels?.hasModel(type);
-      if (texturesKnown && !hasTexture) {
+      const hasModelFallback = type === "sheep" && hasModel;
+      if (texturesKnown && !hasTexture && !hasModelFallback) {
         const key = `missing-texture:${type}`;
         if (!mobRenderWarnings.has(key)) {
           mobRenderWarnings.add(key);
@@ -11355,13 +11880,26 @@ export default function FreeCube2Game(engine) {
       if ((type === "zombie" || hasModel) && settings.mobModels !== false && (texturesKnown || hasBillboard || hasTexture || modelsKnown)) {
         const renderMode = type === "zombie"
           ? (hasTexture ? "3d-zombie" : hasBillboard ? "billboard-fallback" : texturesKnown ? "missing" : "loading-assets")
-          : hasModel && hasTexture ? "obj-model" : hasBillboard ? "billboard-fallback" : (texturesKnown || modelsKnown) ? "missing" : "loading-assets";
+          : hasModel && hasTexture ? "obj-model" : hasModelFallback ? "obj-color-fallback" : hasBillboard ? "billboard-fallback" : (texturesKnown || modelsKnown) ? "missing" : "loading-assets";
         const key = `mode:${type}:${renderMode}:${useWebGL ? "webgl" : "canvas"}`;
         if (!mobRenderWarnings.has(key)) {
           mobRenderWarnings.add(key);
           console.log(`[MobRender] ${type}: ${renderMode}`);
         }
       }
+    }
+  }
+
+  function syncRenderEntityList() {
+    renderEntities.length = 0;
+    for (const mob of mobs) {
+      renderEntities.push(mob);
+    }
+    for (const item of items) {
+      renderEntities.push(item);
+    }
+    if (glRenderer) {
+      glRenderer.entities = renderEntities;
     }
   }
 
@@ -11769,6 +12307,43 @@ export default function FreeCube2Game(engine) {
     return `${Math.round(ratio * 100)}%`;
   }
 
+  function getPerformancePresetLabel(value = settings?.performancePreset) {
+    switch (value) {
+      case "turbo":
+        return "Max FPS";
+      case "boost":
+        return "Boost";
+      default:
+        return "Balanced";
+    }
+  }
+
+  function getPerformancePresetConfig(value = settings?.performancePreset) {
+    switch (value) {
+      case "turbo":
+        return {
+          entityDistance: 24,
+          waterSteps: 10,
+          lavaSteps: 3,
+          cleanupBias: 1
+        };
+      case "boost":
+        return {
+          entityDistance: 32,
+          waterSteps: 14,
+          lavaSteps: 4,
+          cleanupBias: 0.5
+        };
+      default:
+        return {
+          entityDistance: 44,
+          waterSteps: 18,
+          lavaSteps: 5,
+          cleanupBias: 0
+        };
+    }
+  }
+
   function applyFullscreenSetting(nextFullscreen) {
     settings.fullscreen = !!nextFullscreen;
     const rootEl = document.documentElement;
@@ -11788,14 +12363,58 @@ export default function FreeCube2Game(engine) {
 
   function getChunkRuntimeConfig(loading = false) {
     const lagFix = settings.chunkLagFix !== false;
+    const preset = getPerformancePresetConfig(settings.performancePreset);
     if (loading) {
       return lagFix
         ? { genLimit: LOADING_CHUNK_GEN_LIMIT, genBudgetMs: LOADING_CHUNK_GEN_BUDGET_MS, meshLimit: LOADING_CHUNK_MESH_LIMIT, meshBudgetMs: LOADING_CHUNK_MESH_BUDGET_MS }
         : { genLimit: LOADING_CHUNK_GEN_LIMIT * 2, genBudgetMs: LOADING_CHUNK_GEN_BUDGET_MS * 2.2, meshLimit: LOADING_CHUNK_MESH_LIMIT * 2, meshBudgetMs: LOADING_CHUNK_MESH_BUDGET_MS * 1.9 };
     }
-    return lagFix
-      ? { genLimit: PLAY_CHUNK_GEN_LIMIT, genBudgetMs: PLAY_CHUNK_GEN_BUDGET_MS, meshLimit: PLAY_CHUNK_MESH_LIMIT, meshBudgetMs: PLAY_CHUNK_MESH_BUDGET_MS }
-      : { genLimit: PLAY_CHUNK_GEN_LIMIT + 2, genBudgetMs: PLAY_CHUNK_GEN_BUDGET_MS * 2.4, meshLimit: PLAY_CHUNK_MESH_LIMIT + 2, meshBudgetMs: PLAY_CHUNK_MESH_BUDGET_MS * 2.1 };
+    const cleanupBias = preset.cleanupBias || 0;
+    if (!lagFix) {
+      return {
+        genLimit: PLAY_CHUNK_GEN_LIMIT + 2,
+        genBudgetMs: PLAY_CHUNK_GEN_BUDGET_MS * 2.4,
+        meshLimit: PLAY_CHUNK_MESH_LIMIT + 2,
+        meshBudgetMs: PLAY_CHUNK_MESH_BUDGET_MS * 2.1
+      };
+    }
+
+    let genLimit = Math.max(1, Math.round(PLAY_CHUNK_GEN_LIMIT - cleanupBias * 0.25));
+    let genBudgetMs = Math.max(0.9, PLAY_CHUNK_GEN_BUDGET_MS - cleanupBias * 0.3);
+    let meshLimit = Math.max(1, Math.round(PLAY_CHUNK_MESH_LIMIT - cleanupBias * 0.5));
+    let meshBudgetMs = Math.max(1.1, PLAY_CHUNK_MESH_BUDGET_MS - cleanupBias * 0.35);
+
+    // Back chunk work off dynamically when frame rate dips to reduce visible hitching.
+    if (fpsSmoothed > 0 && fpsSmoothed < 58) {
+      genBudgetMs *= 0.8;
+      meshBudgetMs *= 0.72;
+      meshLimit = Math.max(1, meshLimit - 1);
+    }
+    if (fpsSmoothed > 0 && fpsSmoothed < 50) {
+      genBudgetMs *= 0.82;
+      meshBudgetMs *= 0.78;
+      genLimit = 1;
+      meshLimit = 1;
+    }
+    if (fpsSmoothed > 0 && fpsSmoothed < 42) {
+      genBudgetMs *= 0.75;
+      meshBudgetMs *= 0.75;
+    }
+    if (runtimePlayerInCave) {
+      genBudgetMs *= fpsSmoothed > 0 && fpsSmoothed < 52 ? 0.72 : 0.86;
+      meshBudgetMs *= fpsSmoothed > 0 && fpsSmoothed < 52 ? 0.68 : 0.84;
+      if (fpsSmoothed > 0 && fpsSmoothed < 52) {
+        genLimit = 1;
+        meshLimit = 1;
+      }
+    }
+
+    return {
+      genLimit,
+      genBudgetMs: Math.max(0.55, genBudgetMs),
+      meshLimit,
+      meshBudgetMs: Math.max(0.75, meshBudgetMs)
+    };
   }
 
   function setSettingsUI() {
@@ -11809,6 +12428,7 @@ export default function FreeCube2Game(engine) {
     ui.videoMasterVolumeBtn.textContent = `Master Volume: ${formatVolumeLabel(settings.masterVolume)}`;
     ui.videoMusicVolumeBtn.textContent = `Music Volume: ${formatVolumeLabel(settings.musicVolume)}`;
     ui.videoMobModelsBtn.textContent = `3D Mob Models: ${settings.mobModels !== false ? "ON" : "OFF"}`;
+    ui.videoPerformanceBtn.textContent = `Performance: ${getPerformancePresetLabel(settings.performancePreset)}`;
     ui.videoFullscreenBtn.textContent = `Fullscreen: ${(settings.fullscreen || !!document.fullscreenElement) ? "ON" : "OFF"}`;
     ui.videoChunkLagBtn.textContent = `Chunk Lag Fix: ${settings.chunkLagFix !== false ? "ON" : "OFF"}`;
     ui.videoInvertYBtn.textContent = `Invert Y: ${settings.invertY ? "ON" : "OFF"}`;
@@ -11920,6 +12540,7 @@ export default function FreeCube2Game(engine) {
       version: GAME_VERSION,
       seed: world.seed,
       modifiedChunks: serializeModifiedChunks(world.modifiedChunks),
+      fluidStates: serializeFluidStates(world.fluidStates),
       furnaces: serializeFurnaceStates(furnaceStates),
       player: player.serialize(),
       settings
@@ -12250,6 +12871,7 @@ export default function FreeCube2Game(engine) {
 
     world = new World(seed);
     world.modifiedChunks = deserializeModifiedChunks(save?.modifiedChunks || {});
+    world.fluidStates = deserializeFluidStates(save?.fluidStates || {});
     world.loadedFromStorage = !!save;
     furnaceStates = deserializeFurnaceStates(save?.furnaces || {});
     settings = { ...DEFAULT_SETTINGS, ...settings, ...(save?.settings || {}) };
@@ -12263,6 +12885,7 @@ export default function FreeCube2Game(engine) {
     settings.fullscreen = !!settings.fullscreen;
     settings.masterVolume = clamp(Number.isFinite(settings.masterVolume) ? settings.masterVolume : DEFAULT_SETTINGS.masterVolume, 0, 1);
     settings.musicVolume = clamp(Number.isFinite(settings.musicVolume) ? settings.musicVolume : DEFAULT_SETTINGS.musicVolume, 0, 1);
+    settings.performancePreset = PERFORMANCE_PRESETS.includes(settings.performancePreset) ? settings.performancePreset : DEFAULT_SETTINGS.performancePreset;
     settings.customResourcePacks = getCustomResourcePacks(settings);
     settings.texturePack = getAvailableResourcePackNames(settings).includes(settings.texturePack) ? settings.texturePack : DEFAULT_SETTINGS.texturePack;
     settings.playerSkinPreset = isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
@@ -12304,6 +12927,13 @@ export default function FreeCube2Game(engine) {
     }
     player.ensureSafePosition(world);
     activeFurnaceKey = null;
+    waterFlowTimer = 0;
+    lavaFlowTimer = 0;
+    blockTickAccumulator = 0;
+    caveCheckTimer = 0;
+    runtimePlayerInCave = false;
+    targetScanTimer = 0;
+    renderEntities.length = 0;
     setBossBar(false);
   }
 
@@ -12375,6 +13005,10 @@ export default function FreeCube2Game(engine) {
     runtimeLowFpsTimer = 0;
     runtimeCompactCooldown = 0;
     runtimeMaintenanceTimer = 0;
+    caveCheckTimer = 0;
+    runtimePlayerInCave = false;
+    targetScanTimer = 0;
+    renderEntities.length = 0;
     loadingStartChunk = { x: Math.floor(player.x / CHUNK_SIZE), z: Math.floor(player.z / CHUNK_SIZE) };
     ensureActiveRenderer();
     logMobRenderDiagnostics("world-start");
@@ -12427,6 +13061,10 @@ export default function FreeCube2Game(engine) {
     runtimeLowFpsTimer = 0;
     runtimeCompactCooldown = 0;
     runtimeMaintenanceTimer = 0;
+    caveCheckTimer = 0;
+    runtimePlayerInCave = false;
+    targetScanTimer = 0;
+    renderEntities.length = 0;
     resetInventoryDragState();
     ensureUI();
     ui.showScreen("title");
@@ -12735,7 +13373,10 @@ export default function FreeCube2Game(engine) {
 
     const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
     const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
-    const keepRadius = settings.chunkLagFix === false ? settings.renderDistanceChunks + 2 : settings.renderDistanceChunks + 1;
+    const preset = getPerformancePresetConfig(settings.performancePreset);
+    const keepRadius = settings.chunkLagFix === false
+      ? settings.renderDistanceChunks + 2
+      : settings.renderDistanceChunks + (preset.cleanupBias >= 1 ? 0 : 1);
     world.unloadFarChunks(playerChunkX, playerChunkZ, keepRadius);
 
     for (const [key, record] of glRenderer.chunkMeshes) {
@@ -12794,7 +13435,8 @@ export default function FreeCube2Game(engine) {
       runtimeMaintenanceTimer = 0;
     }
 
-    const lowFpsThreshold = settings.chunkLagFix === false ? 34 : 48;
+    const preset = getPerformancePresetConfig(settings.performancePreset);
+    const lowFpsThreshold = (settings.chunkLagFix === false ? 34 : 48) + Math.round(preset.cleanupBias * 6);
     if (fpsSmoothed > 0 && fpsSmoothed < lowFpsThreshold) {
       runtimeLowFpsTimer += dt;
     } else {
@@ -13233,6 +13875,13 @@ export default function FreeCube2Game(engine) {
       setSettingsUI();
     });
 
+    ui.videoPerformanceBtn.addEventListener("click", () => {
+      const currentIndex = Math.max(0, PERFORMANCE_PRESETS.indexOf(settings.performancePreset));
+      settings.performancePreset = PERFORMANCE_PRESETS[(currentIndex + 1) % PERFORMANCE_PRESETS.length];
+      markWorldDirty();
+      setSettingsUI();
+    });
+
     ui.videoFullscreenBtn.addEventListener("click", () => {
       applyFullscreenSetting(!(settings.fullscreen || !!document.fullscreenElement));
     });
@@ -13437,6 +14086,7 @@ export default function FreeCube2Game(engine) {
         setMiningProgress(0);
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
+        updateBlockTicks(dt);
         updateFurnaces(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
@@ -13452,6 +14102,7 @@ export default function FreeCube2Game(engine) {
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
         updateInventoryCursorPosition();
+        updateBlockTicks(dt);
         updateFurnaces(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
@@ -13463,8 +14114,9 @@ export default function FreeCube2Game(engine) {
         dropSelectedItem();
       }
 
+      let look = { x: 0, y: 0 };
       if (input.locked) {
-        const look = input.consumeLook();
+        look = input.consumeLook();
         player.applyLook(look.x, look.y, settings);
         player.update(dt, input, world, settings);
         if (player.pendingFallDamage > 0) {
@@ -13472,25 +14124,48 @@ export default function FreeCube2Game(engine) {
           player.pendingFallDamage = 0;
         }
       } else {
-        input.consumeLook();
+        look = input.consumeLook();
         player.isSprinting = false;
         player.isCrouching = false;
       }
 
-      updateWorldRandomTicks(dt);
+      updateBlockTicks(dt);
       player.ensureSafePosition(world);
       updatePlayerVitals(dt);
 
+      caveCheckTimer = Math.max(0, caveCheckTimer - dt);
+      if (caveCheckTimer <= 0) {
+        runtimePlayerInCave = isPlayerInCave();
+        caveCheckTimer = 0.25;
+      }
+
       if (useWebGL && glRenderer && atlas.texture) {
+        glRenderer.runtimeInCave = runtimePlayerInCave;
+        glRenderer.runtimeLowFps = fpsSmoothed > 0 && fpsSmoothed < (runtimePlayerInCave ? 56 : 50);
         const chunkConfig = getChunkRuntimeConfig(false);
         glRenderer.ensureVisibleChunks(chunkConfig.genLimit, chunkConfig.genBudgetMs);
         glRenderer.updateQueue(chunkConfig.meshLimit, chunkConfig.meshBudgetMs);
         glRenderer.updateCamera();
       }
 
-      const blockTarget = input.locked ? world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH) : null;
-      currentEntityTarget = input.locked ? findTargetMob(blockTarget) : null;
-      currentTarget = currentEntityTarget ? null : blockTarget;
+      targetScanTimer = Math.max(0, targetScanTimer - dt);
+      if (!input.locked) {
+        currentTarget = null;
+        currentEntityTarget = null;
+      } else {
+        const shouldRefreshTargets =
+          targetScanTimer <= 0 ||
+          input.buttonsDown[0] ||
+          input.buttonsDown[2] ||
+          Math.abs(look.x) > 0.0001 ||
+          Math.abs(look.y) > 0.0001;
+        if (shouldRefreshTargets) {
+          const blockTarget = world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH);
+          currentEntityTarget = findTargetMob(blockTarget);
+          currentTarget = currentEntityTarget ? null : blockTarget;
+          targetScanTimer = TARGET_SCAN_INTERVAL_SECONDS;
+        }
+      }
       if (useWebGL && glRenderer) glRenderer.setTargetBlock(currentTarget);
       updateCombat();
       updateMining(dt);
@@ -13574,9 +14249,7 @@ export default function FreeCube2Game(engine) {
         mobs = nextMobs;
         world.saveDirty = true;
       }
-      if (useWebGL && glRenderer) {
-        glRenderer.entities = mobs.concat(items);
-      }
+      syncRenderEntityList();
       if (canvasRenderer) {
         canvasRenderer.mobs = mobs;
         canvasRenderer.items = items;
