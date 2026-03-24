@@ -1,4 +1,4 @@
-const GAME_VERSION = "5.7.0";
+const GAME_VERSION = "5.7.0 (beta)";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
 const CHUNK_SIZE = 16;
