@@ -1,10 +1,17 @@
-const GAME_VERSION = "5.7.0 (beta)";
+const GAME_VERSION = "6.5.4 (beta)";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 112;
 const SEA_LEVEL = 30;
 const LAVA_LEVEL = 8;
+const LIGHT_LEVEL_MAX = 15;
+const TORCH_LIGHT_LEVEL = 14;
+const WEATHER_TYPES = {
+  CLEAR: "clear",
+  RAIN: "rain",
+  THUNDER: "thunder"
+};
 const PLAYER_HEIGHT = 1.8;
 const PLAYER_EYE_HEIGHT = 1.62;
 const PLAYER_RADIUS = 0.32;
@@ -20,6 +27,7 @@ const DEFAULT_SETTINGS = {
   showFps: true,
   viewBobbing: true,
   graphicsMode: "fast",
+  shadows: true,
   chunkLagFix: true,
   fullscreen: false,
   masterVolume: 1,
@@ -30,6 +38,11 @@ const DEFAULT_SETTINGS = {
   playerSkinPreset: "steve_large",
   playerSkinDataUrl: "",
   customResourcePacks: []
+};
+const DEFAULT_GAMERULES = {
+  doDaylightCycle: true,
+  doWeatherCycle: true,
+  keepInventory: true
 };
 
 const PERFORMANCE_PRESETS = ["balanced", "boost", "turbo"];
@@ -106,6 +119,9 @@ const WORLD_EXPORT_FORMAT_VERSION = 2;
 const LEGACY_WORLD_INDEX_KEYS = ["freecube2-worlds-index-v1"];
 const LEGACY_WORLD_SAVE_PREFIXES = ["freecube2-world-save-v1:"];
 const LEGACY_PURGE_MARKER_KEY = `freecube2-storage-purge-complete-v${STORAGE_NAMESPACE_VERSION}`;
+const CUBECRAFT_USERNAME_KEY = "cubecraft_username";
+const MULTIPLAYER_ENABLED = false;
+const DEFAULT_MULTIPLAYER_SERVER_URL = "ws://localhost:3000";
 const LEGACY_SAVE_KEYS = [
   "freecube2-static-save-v4",
   "freecube2-static-save-v5"
@@ -166,6 +182,55 @@ function packBlockPositionKey(x, y, z) {
 }
 
 let playerSkinRefreshHandler = null;
+
+function normalizeCubeCraftUsername(value, fallback = "") {
+  const trimmed = String(value ?? "").replace(/\s+/g, " ").trim();
+  const compact = trimmed.slice(0, 16);
+  return compact || fallback;
+}
+
+function getStoredCubeCraftUsername() {
+  try {
+    return normalizeCubeCraftUsername(localStorage.getItem(CUBECRAFT_USERNAME_KEY), "");
+  } catch (error) {
+    console.warn("Username storage read failed:", error.message);
+    return "";
+  }
+}
+
+function setStoredCubeCraftUsername(value) {
+  const normalized = normalizeCubeCraftUsername(value, "");
+  if (!normalized) return "";
+  try {
+    localStorage.setItem(CUBECRAFT_USERNAME_KEY, normalized);
+  } catch (error) {
+    console.warn("Username storage write failed:", error.message);
+  }
+  return normalized;
+}
+
+function getWebSocketURL(url) {
+  const raw = String(url || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw.startsWith("wss://") || raw.startsWith("ws://")) {
+    return raw;
+  }
+  if (raw.startsWith("https://")) {
+    return raw.replace(/^https:\/\//, "wss://");
+  }
+  if (raw.startsWith("http://")) {
+    return raw.replace(/^http:\/\//, "ws://");
+  }
+  if (raw.startsWith("file://")) {
+    return DEFAULT_MULTIPLAYER_SERVER_URL;
+  }
+  if (raw.startsWith("localhost") || raw.startsWith("127.0.0.1")) {
+    return `ws://${raw.replace(/^ws:\/\//, "").replace(/^wss:\/\//, "")}`;
+  }
+  return raw;
+}
 
 function downloadTextFile(filename, content, mimeType = "application/json") {
   const blob = new Blob([content], { type: mimeType });
@@ -353,7 +418,7 @@ class WorldStore {
       this.index.selectedWorldId = worldId;
     }
     this.saveIndex();
-    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, fluidStates: {}, player: null, settings: null });
+    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, fluidStates: {}, player: null, settings: null, worldState: null });
     return worldId;
   }
 
@@ -450,7 +515,8 @@ class WorldStore {
         fluidStates: save.fluidStates && typeof save.fluidStates === "object" ? save.fluidStates : {},
         furnaces: save.furnaces && typeof save.furnaces === "object" ? save.furnaces : {},
         player: save.player && typeof save.player === "object" ? save.player : null,
-        settings: save.settings && typeof save.settings === "object" ? save.settings : null
+        settings: save.settings && typeof save.settings === "object" ? save.settings : null,
+        worldState: save.worldState && typeof save.worldState === "object" ? save.worldState : null
       }
     };
   }
@@ -486,7 +552,8 @@ class WorldStore {
       fluidStates: payloadCandidate.fluidStates && typeof payloadCandidate.fluidStates === "object" ? payloadCandidate.fluidStates : {},
       furnaces: payloadCandidate.furnaces && typeof payloadCandidate.furnaces === "object" ? payloadCandidate.furnaces : {},
       player: payloadCandidate.player && typeof payloadCandidate.player === "object" ? payloadCandidate.player : null,
-      settings: payloadCandidate.settings && typeof payloadCandidate.settings === "object" ? payloadCandidate.settings : null
+      settings: payloadCandidate.settings && typeof payloadCandidate.settings === "object" ? payloadCandidate.settings : null,
+      worldState: payloadCandidate.worldState && typeof payloadCandidate.worldState === "object" ? payloadCandidate.worldState : null
     });
     return worldId;
   }
@@ -599,6 +666,14 @@ function random3(x, y, z, seed) {
   return hash4(x, y, z, seed) / 4294967295;
 }
 
+function createSeededRng(seed) {
+  let state = (seed >>> 0) || 1;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967295;
+  };
+}
+
 class PerlinNoise {
   constructor(seed = 12345) {
     this.seed = seed;
@@ -694,7 +769,10 @@ const BLOCK = {
   EMERALD_ORE: 19,
   LAVA: 20,
   COBBLESTONE: 21,
-  OBSIDIAN: 22
+  OBSIDIAN: 22,
+  TORCH: 23,
+  WHITE_WOOL: 24,
+  BED: 25
 };
 
 const ITEM = {
@@ -748,6 +826,9 @@ const BLOCK_BREAK_TIME = {
   [BLOCK.EMERALD_ORE]: 2.25,
   [BLOCK.COBBLESTONE]: 1.6,
   [BLOCK.OBSIDIAN]: 8.5,
+  [BLOCK.TORCH]: 0.12,
+  [BLOCK.WHITE_WOOL]: 0.52,
+  [BLOCK.BED]: 0.42,
   [BLOCK.WOOD]: 1.05,
   [BLOCK.PLANKS]: 0.85,
   [BLOCK.CRAFTING_TABLE]: 0.95,
@@ -1091,8 +1172,95 @@ const BLOCK_INFO = {
       side: rgb(42, 26, 64),
       bottom: rgb(31, 20, 47)
     }
+  },
+  [BLOCK.TORCH]: {
+    name: "Torch",
+    collidable: false,
+    transparent: true,
+    alpha: 1,
+    palette: {
+      top: rgb(255, 205, 92),
+      side: rgb(194, 124, 48),
+      bottom: rgb(120, 82, 34)
+    }
+  },
+  [BLOCK.WHITE_WOOL]: {
+    name: "White Wool",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(232, 232, 232),
+      side: rgb(216, 216, 216),
+      bottom: rgb(198, 198, 198)
+    }
+  },
+  [BLOCK.BED]: {
+    name: "Bed",
+    collidable: true,
+    transparent: false,
+    alpha: 1,
+    palette: {
+      top: rgb(196, 46, 46),
+      side: rgb(154, 88, 58),
+      bottom: rgb(118, 72, 44)
+    }
   }
 };
+
+const TORCH_TEXTURE_SOURCE = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="none"/>
+    <rect x="7" y="5" width="2" height="8" fill="#7a4d1f"/>
+    <rect x="6" y="4" width="4" height="2" fill="#c78335"/>
+    <rect x="5" y="2" width="6" height="3" fill="#ffd66c"/>
+    <rect x="6" y="1" width="4" height="2" fill="#fff1a8"/>
+  </svg>
+`)}`;
+const WHITE_WOOL_TEXTURE_SOURCE = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="#dadada"/>
+    <rect x="0" y="0" width="16" height="4" fill="#efefef"/>
+    <rect x="0" y="4" width="16" height="4" fill="#dedede"/>
+    <rect x="0" y="8" width="16" height="4" fill="#d2d2d2"/>
+    <rect x="0" y="12" width="16" height="4" fill="#c6c6c6"/>
+    <rect x="2" y="2" width="4" height="2" fill="#f7f7f7"/>
+    <rect x="9" y="5" width="5" height="2" fill="#ebebeb"/>
+    <rect x="3" y="10" width="6" height="2" fill="#e3e3e3"/>
+    <rect x="10" y="12" width="4" height="2" fill="#d8d8d8"/>
+  </svg>
+`)}`;
+const BED_TOP_TEXTURE_SOURCE = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="#8e4f2c"/>
+    <rect x="0" y="0" width="7" height="16" fill="#f4f4f4"/>
+    <rect x="7" y="0" width="9" height="16" fill="#bf3131"/>
+    <rect x="0" y="0" width="16" height="2" fill="#fefefe" opacity="0.45"/>
+    <rect x="0" y="13" width="16" height="3" fill="#6f3e22"/>
+    <rect x="2" y="3" width="3" height="8" fill="#ffffff"/>
+    <rect x="9" y="3" width="5" height="8" fill="#d84343"/>
+    <rect x="8" y="11" width="7" height="2" fill="#962626"/>
+  </svg>
+`)}`;
+const BED_SIDE_TEXTURE_SOURCE = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="#7a4728"/>
+    <rect x="0" y="0" width="16" height="4" fill="#c43a3a"/>
+    <rect x="0" y="4" width="16" height="2" fill="#e15a5a"/>
+    <rect x="0" y="6" width="16" height="5" fill="#915c36"/>
+    <rect x="0" y="11" width="3" height="5" fill="#5f351f"/>
+    <rect x="13" y="11" width="3" height="5" fill="#5f351f"/>
+    <rect x="3" y="11" width="10" height="2" fill="#744225"/>
+  </svg>
+`)}`;
+const BED_BOTTOM_TEXTURE_SOURCE = `data:image/svg+xml,${encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="#7a4728"/>
+    <rect x="0" y="0" width="16" height="2" fill="#95603b"/>
+    <rect x="1" y="2" width="14" height="12" fill="#84512f"/>
+    <rect x="0" y="14" width="16" height="2" fill="#60361f"/>
+  </svg>
+`)}`;
 
 const BLOCK_TEXTURE_PATHS = {
   [BLOCK.GRASS]: {
@@ -1204,6 +1372,21 @@ const BLOCK_TEXTURE_PATHS = {
     top: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
     side: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
     bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png"
+  },
+  [BLOCK.TORCH]: {
+    top: TORCH_TEXTURE_SOURCE,
+    side: TORCH_TEXTURE_SOURCE,
+    bottom: TORCH_TEXTURE_SOURCE
+  },
+  [BLOCK.WHITE_WOOL]: {
+    top: WHITE_WOOL_TEXTURE_SOURCE,
+    side: WHITE_WOOL_TEXTURE_SOURCE,
+    bottom: WHITE_WOOL_TEXTURE_SOURCE
+  },
+  [BLOCK.BED]: {
+    top: BED_TOP_TEXTURE_SOURCE,
+    side: BED_SIDE_TEXTURE_SOURCE,
+    bottom: BED_BOTTOM_TEXTURE_SOURCE
   }
 };
 
@@ -1319,6 +1502,16 @@ const TEXTURE_PACKS = {
       top: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
       side: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png",
       bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/obsidian.png"
+    },
+    [BLOCK.WHITE_WOOL]: {
+      top: "assets/32px Seamless MC Texture Gigantopack/all textures/wool_colored_white (48).png",
+      side: "assets/32px Seamless MC Texture Gigantopack/all textures/wool_colored_white (48).png",
+      bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/wool_colored_white (48).png"
+    },
+    [BLOCK.BED]: {
+      top: BED_TOP_TEXTURE_SOURCE,
+      side: BED_SIDE_TEXTURE_SOURCE,
+      bottom: BED_BOTTOM_TEXTURE_SOURCE
     }
   }
 };
@@ -1767,7 +1960,11 @@ function resolveItemTypeByName(name) {
     diamond: ITEM.DIAMOND,
     emerald: ITEM.EMERALD,
     redstone: ITEM.REDSTONE_DUST,
-    redstone_dust: ITEM.REDSTONE_DUST
+    redstone_dust: ITEM.REDSTONE_DUST,
+    torch: BLOCK.TORCH,
+    wool: BLOCK.WHITE_WOOL,
+    white_wool: BLOCK.WHITE_WOOL,
+    bed: BLOCK.BED
   };
   return aliases[key] || BLOCK.AIR;
 }
@@ -2072,6 +2269,137 @@ function getDayCycleInfo(time = 0) {
 
 function isNightTime(time = 0) {
   return getDayCycleInfo(time).isNight;
+}
+
+function normalizeGamerules(value) {
+  return {
+    doDaylightCycle: value?.doDaylightCycle !== false,
+    doWeatherCycle: value?.doWeatherCycle !== false,
+    keepInventory: value?.keepInventory !== false
+  };
+}
+
+function getTimeSecondsFromMinecraftTicks(ticks = 0) {
+  return (Number(ticks) || 0) / 24000 * MINECRAFT_DAY_LENGTH_SECONDS;
+}
+
+function getWorldTimePreset(name = "day") {
+  const key = String(name || "").trim().toLowerCase();
+  switch (key) {
+    case "day":
+      return getTimeSecondsFromMinecraftTicks(1000);
+    case "noon":
+      return getTimeSecondsFromMinecraftTicks(6000);
+    case "night":
+      return getTimeSecondsFromMinecraftTicks(13000);
+    case "midnight":
+      return getTimeSecondsFromMinecraftTicks(18000);
+    case "sunrise":
+      return getTimeSecondsFromMinecraftTicks(23000);
+    default:
+      return null;
+  }
+}
+
+function normalizeWorldTimeSeconds(value = 0) {
+  return mod(Number(value) || 0, MINECRAFT_DAY_LENGTH_SECONDS);
+}
+
+function normalizeWeatherType(value, fallback = WEATHER_TYPES.CLEAR) {
+  const lower = String(value || "").trim().toLowerCase();
+  if (lower === WEATHER_TYPES.RAIN || lower === WEATHER_TYPES.THUNDER || lower === WEATHER_TYPES.CLEAR) {
+    return lower;
+  }
+  return fallback;
+}
+
+function getRandomWeatherDurationSeconds(type = WEATHER_TYPES.CLEAR) {
+  switch (normalizeWeatherType(type)) {
+    case WEATHER_TYPES.THUNDER:
+      return 180 + Math.random() * 600;
+    case WEATHER_TYPES.RAIN:
+      return 600 + Math.random() * 600;
+    default:
+      return 600 + Math.random() * 8400;
+  }
+}
+
+function createWeatherState(type = WEATHER_TYPES.CLEAR, durationSeconds = null) {
+  const normalizedType = normalizeWeatherType(type);
+  return {
+    type: normalizedType,
+    timer: Math.max(1, Number(durationSeconds) || getRandomWeatherDurationSeconds(normalizedType)),
+    flash: 0,
+    lightningTimer: normalizedType === WEATHER_TYPES.THUNDER ? 2 + Math.random() * 6 : 0
+  };
+}
+
+function createDefaultWorldState() {
+  return {
+    time: 0,
+    weather: createWeatherState(WEATHER_TYPES.CLEAR),
+    gamerules: normalizeGamerules(),
+    worldSpawnPoint: null
+  };
+}
+
+function normalizeSpawnPoint(value, fallback = null) {
+  if (!value || typeof value !== "object") {
+    return fallback;
+  }
+  if (![value.x, value.y, value.z].every(Number.isFinite)) {
+    return fallback;
+  }
+  return {
+    x: Number(value.x),
+    y: Number(value.y),
+    z: Number(value.z),
+    bedKey: typeof value.bedKey === "string" ? value.bedKey : "",
+    source: typeof value.source === "string" ? value.source : ""
+  };
+}
+
+function normalizeSavedWorldState(value, fallbackSpawn = null) {
+  const state = value && typeof value === "object" ? value : {};
+  const weather = state.weather && typeof state.weather === "object"
+    ? createWeatherState(state.weather.type, state.weather.timer)
+    : createWeatherState();
+  weather.flash = 0;
+  weather.lightningTimer = weather.type === WEATHER_TYPES.THUNDER
+    ? Math.max(0.2, Number(state.weather?.lightningTimer) || 2 + Math.random() * 6)
+    : 0;
+  return {
+    time: normalizeWorldTimeSeconds(state.time || 0),
+    weather,
+    gamerules: normalizeGamerules(state.gamerules),
+    worldSpawnPoint: normalizeSpawnPoint(state.worldSpawnPoint, fallbackSpawn)
+  };
+}
+
+function getWeatherSkyDarkness(type) {
+  switch (normalizeWeatherType(type)) {
+    case WEATHER_TYPES.THUNDER:
+      return 0.3;
+    case WEATHER_TYPES.RAIN:
+      return 0.16;
+    default:
+      return 0;
+  }
+}
+
+function getEffectiveDaylight(cycle, weatherType = WEATHER_TYPES.CLEAR) {
+  return clamp((cycle?.daylight ?? 1) - getWeatherSkyDarkness(weatherType), 0.08, 1);
+}
+
+function getWeatherLabel(type) {
+  switch (normalizeWeatherType(type)) {
+    case WEATHER_TYPES.RAIN:
+      return "Rain";
+    case WEATHER_TYPES.THUNDER:
+      return "Thunder";
+    default:
+      return "Clear";
+  }
 }
 
 class TextureLibrary {
@@ -2471,6 +2799,20 @@ const CRAFTING_RECIPES = [
   },
   {
     pattern: [
+      [ITEM.COAL],
+      [ITEM.STICK]
+    ],
+    result: { itemType: BLOCK.TORCH, count: 4 }
+  },
+  {
+    pattern: [
+      [BLOCK.WHITE_WOOL, BLOCK.WHITE_WOOL, BLOCK.WHITE_WOOL],
+      [BLOCK.PLANKS, BLOCK.PLANKS, BLOCK.PLANKS]
+    ],
+    result: { itemType: BLOCK.BED, count: 1 }
+  },
+  {
+    pattern: [
       [BLOCK.PLANKS, BLOCK.PLANKS, BLOCK.PLANKS],
       [0, ITEM.STICK, 0],
       [0, ITEM.STICK, 0]
@@ -2615,8 +2957,22 @@ const SMELTING_RECIPES = {
   [BLOCK.GOLD_ORE]: ITEM.GOLD_INGOT
 };
 
+const ORE_VEIN_SETTINGS = [
+  { type: BLOCK.COAL_ORE, minY: 8, maxY: 96, veinsPerChunk: 12, minSize: 5, maxSize: 17, chance: 0.92 },
+  { type: BLOCK.IRON_ORE, minY: 6, maxY: 64, veinsPerChunk: 9, minSize: 4, maxSize: 10, chance: 0.84 },
+  { type: BLOCK.GOLD_ORE, minY: 4, maxY: 32, veinsPerChunk: 6, minSize: 3, maxSize: 9, chance: 0.66 },
+  { type: BLOCK.REDSTONE_ORE, minY: 4, maxY: 18, veinsPerChunk: 7, minSize: 4, maxSize: 10, chance: 0.72 },
+  { type: BLOCK.DIAMOND_ORE, minY: 4, maxY: 16, veinsPerChunk: 4, minSize: 1, maxSize: 8, chance: 0.52 },
+  { type: BLOCK.EMERALD_ORE, minY: 4, maxY: 40, veinsPerChunk: 3, minSize: 1, maxSize: 5, chance: 0.34, highlandsOnly: true }
+];
+
+const CAVE_WORM_CHUNK_RADIUS = 1;
+const CAVE_WORM_MIN_LENGTH = 30;
+const CAVE_WORM_MAX_LENGTH = 100;
+
 const MOB_LOOT_TABLES = {
   sheep: [
+    { itemType: BLOCK.WHITE_WOOL, min: 1, max: 2 },
     { itemType: ITEM.RAW_MUTTON, min: 1, max: 2 }
   ],
   chicken: [
@@ -3413,7 +3769,7 @@ function renderPlayerPreviewWebGL(canvas, skinOverride = null) {
 
 function renderPlayerPreviewCanvas(canvas, armorItems = {}, skinOverride = null) {
   if (!canvas) return;
-  if (renderPlayerPreviewWebGL(canvas, skinOverride)) {
+  if (canvas.dataset.previewMode !== "2d" && renderPlayerPreviewWebGL(canvas, skinOverride)) {
     return;
   }
   const ctx = canvas.getContext("2d");
@@ -3694,6 +4050,19 @@ function renderPlayerPreviewCanvas(canvas, armorItems = {}, skinOverride = null)
   }
 }
 
+function getOrCreatePlayerPreviewCanvas(container) {
+  if (!container) return null;
+  let canvas = container.querySelector("canvas.fc-inv-player-canvas");
+  if (!canvas) {
+    container.innerHTML = "";
+    canvas = document.createElement("canvas");
+    canvas.className = "fc-inv-player-canvas";
+    container.appendChild(canvas);
+  }
+  canvas.dataset.previewMode = "2d";
+  return canvas;
+}
+
 const FACE_DEFS = [
   {
     id: "north",
@@ -3791,6 +4160,30 @@ function isSolidForMeshing(blockType) {
 
 function isCollidable(blockType) {
   return !!BLOCK_INFO[blockType]?.collidable;
+}
+
+function getBlockLightEmission(blockType) {
+  if (blockType === BLOCK.TORCH) {
+    return TORCH_LIGHT_LEVEL;
+  }
+  if (blockType === BLOCK.LAVA) {
+    return LIGHT_LEVEL_MAX;
+  }
+  return 0;
+}
+
+function blocksLightPropagation(blockType) {
+  if (blockType === BLOCK.AIR || isFluidBlock(blockType)) {
+    return false;
+  }
+  if (blockType === BLOCK.TORCH) {
+    return false;
+  }
+  const info = BLOCK_INFO[blockType];
+  if (!info) {
+    return true;
+  }
+  return info.collidable && !info.transparent;
 }
 
 function shouldRenderFace(blockType, neighborType) {
@@ -4090,6 +4483,8 @@ class Chunk {
     this.chunkX = chunkX;
     this.chunkZ = chunkZ;
     this.blocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * WORLD_HEIGHT);
+    this.skyLight = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * WORLD_HEIGHT);
+    this.blockLight = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * WORLD_HEIGHT);
     this.generated = false;
     this.meshDirty = true;
     this.mesh = [];
@@ -4125,6 +4520,178 @@ class Chunk {
     }
   }
 
+  getSkyLightLocal(x, y, z) {
+    if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= CHUNK_SIZE) {
+      return 0;
+    }
+    return this.skyLight[this.index(x, y, z)] || 0;
+  }
+
+  getBlockLightLocal(x, y, z) {
+    if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= WORLD_HEIGHT || z < 0 || z >= CHUNK_SIZE) {
+      return 0;
+    }
+    return this.blockLight[this.index(x, y, z)] || 0;
+  }
+
+  setSkyLightLocal(x, y, z, level) {
+    this.skyLight[this.index(x, y, z)] = clamp(Math.floor(level), 0, LIGHT_LEVEL_MAX);
+  }
+
+  setBlockLightLocal(x, y, z, level) {
+    this.blockLight[this.index(x, y, z)] = clamp(Math.floor(level), 0, LIGHT_LEVEL_MAX);
+  }
+
+  carveNoiseCaves(baseX, baseZ) {
+    for (let lx = 0; lx < CHUNK_SIZE; lx += 1) {
+      for (let lz = 0; lz < CHUNK_SIZE; lz += 1) {
+        const worldX = baseX + lx;
+        const worldZ = baseZ + lz;
+        const column = this.world.terrain.describeColumn(worldX, worldZ);
+        const surfaceY = column.height;
+        for (let y = 6; y < surfaceY - 4; y += 1) {
+          const current = this.getLocal(lx, y, lz);
+          if (current === BLOCK.AIR || isFluidBlock(current) || current === BLOCK.BEDROCK) {
+            continue;
+          }
+          if (!this.world.terrain.shouldCarveCave(worldX, y, worldZ, surfaceY)) {
+            continue;
+          }
+          this.setLocalRaw(
+            lx,
+            y,
+            lz,
+            this.world.terrain.shouldFillCaveWithLava(worldX, y, worldZ, surfaceY) ? BLOCK.LAVA : BLOCK.AIR
+          );
+        }
+      }
+    }
+  }
+
+  carveWormSphere(worldX, worldY, worldZ, radius) {
+    const minX = Math.floor(worldX - radius);
+    const maxX = Math.ceil(worldX + radius);
+    const minY = Math.max(4, Math.floor(worldY - radius));
+    const maxY = Math.min(WORLD_HEIGHT - 2, Math.ceil(worldY + radius));
+    const minZ = Math.floor(worldZ - radius);
+    const maxZ = Math.ceil(worldZ + radius);
+    const radiusSq = radius * radius;
+
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let z = minZ; z <= maxZ; z += 1) {
+          const dx = x + 0.5 - worldX;
+          const dy = y + 0.5 - worldY;
+          const dz = z + 0.5 - worldZ;
+          if (dx * dx + dy * dy + dz * dz > radiusSq) {
+            continue;
+          }
+          if (x < this.chunkX * CHUNK_SIZE || x >= this.chunkX * CHUNK_SIZE + CHUNK_SIZE || z < this.chunkZ * CHUNK_SIZE || z >= this.chunkZ * CHUNK_SIZE + CHUNK_SIZE) {
+            continue;
+          }
+          const surfaceY = this.world.terrain.describeColumn(x, z).height;
+          if (y >= surfaceY - 3) {
+            continue;
+          }
+          const localX = x - this.chunkX * CHUNK_SIZE;
+          const localZ = z - this.chunkZ * CHUNK_SIZE;
+          const current = this.getLocal(localX, y, localZ);
+          if (current === BLOCK.AIR || isFluidBlock(current) || current === BLOCK.BEDROCK) {
+            continue;
+          }
+          this.setLocalRaw(
+            localX,
+            y,
+            localZ,
+            this.world.terrain.shouldFillCaveWithLava(x, y, z, surfaceY) ? BLOCK.LAVA : BLOCK.AIR
+          );
+        }
+      }
+    }
+  }
+
+  carveWormTunnels(baseX, baseZ) {
+    for (let sourceChunkX = this.chunkX - CAVE_WORM_CHUNK_RADIUS; sourceChunkX <= this.chunkX + CAVE_WORM_CHUNK_RADIUS; sourceChunkX += 1) {
+      for (let sourceChunkZ = this.chunkZ - CAVE_WORM_CHUNK_RADIUS; sourceChunkZ <= this.chunkZ + CAVE_WORM_CHUNK_RADIUS; sourceChunkZ += 1) {
+        const wormCount = 1 + Math.floor(random3(sourceChunkX, 0, sourceChunkZ, this.world.seed + 8801) * 3);
+        for (let wormIndex = 0; wormIndex < wormCount; wormIndex += 1) {
+          const rng = createSeededRng(hash4(sourceChunkX, wormIndex, sourceChunkZ, this.world.seed + 8807));
+          let x = sourceChunkX * CHUNK_SIZE + rng() * CHUNK_SIZE;
+          let y = 10 + rng() * (WORLD_HEIGHT - 28);
+          let z = sourceChunkZ * CHUNK_SIZE + rng() * CHUNK_SIZE;
+          let dirX = rng() * 2 - 1;
+          let dirY = (rng() * 2 - 1) * 0.42;
+          let dirZ = rng() * 2 - 1;
+          const length = CAVE_WORM_MIN_LENGTH + Math.floor(rng() * (CAVE_WORM_MAX_LENGTH - CAVE_WORM_MIN_LENGTH + 1));
+
+          for (let step = 0; step < length; step += 1) {
+            const radius = 2 + rng() * 2.2;
+            this.carveWormSphere(x, y, z, radius);
+
+            dirX += (rng() * 2 - 1) * 0.34;
+            dirY += (rng() * 2 - 1) * 0.18;
+            dirZ += (rng() * 2 - 1) * 0.34;
+            const len = Math.hypot(dirX, dirY, dirZ) || 1;
+            dirX /= len;
+            dirY /= len;
+            dirZ /= len;
+
+            x += dirX * 1.55;
+            y = clamp(y + dirY * 1.15, 5, WORLD_HEIGHT - 7);
+            z += dirZ * 1.55;
+          }
+        }
+      }
+    }
+  }
+
+  generateOreVeins(baseX, baseZ) {
+    for (const ore of ORE_VEIN_SETTINGS) {
+      const rng = createSeededRng(hash4(this.chunkX, ore.type, this.chunkZ, this.world.seed + 9901));
+      const attempts = ore.veinsPerChunk;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (rng() > ore.chance) {
+          continue;
+        }
+        const startLocalX = Math.floor(rng() * CHUNK_SIZE);
+        const startLocalZ = Math.floor(rng() * CHUNK_SIZE);
+        const startWorldX = baseX + startLocalX;
+        const startWorldZ = baseZ + startLocalZ;
+        const column = this.world.terrain.describeColumn(startWorldX, startWorldZ);
+        if (ore.highlandsOnly && column.biome !== "mountains" && column.biome !== "cliff") {
+          continue;
+        }
+        const maxY = Math.min(ore.maxY, column.height - 4);
+        if (maxY < ore.minY) {
+          continue;
+        }
+        let localX = startLocalX;
+        let localY = ore.minY + Math.floor(rng() * (maxY - ore.minY + 1));
+        let localZ = startLocalZ;
+        const size = ore.minSize + Math.floor(rng() * (ore.maxSize - ore.minSize + 1));
+
+        for (let step = 0; step < size; step += 1) {
+          const radius = step === 0 ? 1 : (rng() > 0.7 ? 1 : 0);
+          for (let dx = -radius; dx <= radius; dx += 1) {
+            for (let dy = -radius; dy <= radius; dy += 1) {
+              for (let dz = -radius; dz <= radius; dz += 1) {
+                const x = clamp(localX + dx, 0, CHUNK_SIZE - 1);
+                const y = clamp(localY + dy, 1, WORLD_HEIGHT - 2);
+                const z = clamp(localZ + dz, 0, CHUNK_SIZE - 1);
+                if (this.getLocal(x, y, z) === BLOCK.STONE) {
+                  this.setLocalRaw(x, y, z, ore.type);
+                }
+              }
+            }
+          }
+          localX = clamp(localX + Math.floor(rng() * 3) - 1, 0, CHUNK_SIZE - 1);
+          localY = clamp(localY + Math.floor(rng() * 3) - 1, ore.minY, maxY);
+          localZ = clamp(localZ + Math.floor(rng() * 3) - 1, 0, CHUNK_SIZE - 1);
+        }
+      }
+    }
+  }
+
   generate() {
     if (this.generated) {
       return;
@@ -4150,7 +4717,7 @@ class Chunk {
           } else if (y <= 4 && random3(worldX, y, worldZ, this.world.seed + 4041) > y * 0.22) {
             type = BLOCK.BEDROCK;
           } else if (y < stoneCeiling) {
-            type = this.world.terrain.sampleOreBlock(worldX, y, worldZ);
+            type = BLOCK.STONE;
           } else if (y < surfaceY) {
             type = column.filler;
           } else if (y === surfaceY) {
@@ -4159,24 +4726,15 @@ class Chunk {
             type = BLOCK.WATER;
           }
 
-          if (
-            type !== BLOCK.AIR &&
-            !isFluidBlock(type) &&
-            type !== BLOCK.BEDROCK &&
-            y >= 6 &&
-            y < surfaceY - 4 &&
-            this.world.terrain.shouldCarveCave(worldX, y, worldZ, surfaceY)
-          ) {
-            type = this.world.terrain.shouldFillCaveWithLava(worldX, y, worldZ, surfaceY)
-              ? BLOCK.LAVA
-              : BLOCK.AIR;
-          }
-
           this.setLocalRaw(lx, y, lz, type);
         }
 
       }
     }
+
+    this.carveNoiseCaves(baseX, baseZ);
+    this.carveWormTunnels(baseX, baseZ);
+    this.generateOreVeins(baseX, baseZ);
 
     this.decorateTrees(baseX, baseZ);
     this.decorateVillage(baseX, baseZ);
@@ -4395,6 +4953,7 @@ class World {
       chunk = new Chunk(this, chunkX, chunkZ);
       this.chunks.set(key, chunk);
       chunk.generate();
+      this.recalculateLightingRegion(chunkX, chunkZ, 1);
       this.queueFluidUpdatesForChunk(chunkX, chunkZ);
       this.markChunkAndNeighborsDirty(chunkX, chunkZ);
     }
@@ -4435,6 +4994,116 @@ class World {
     if (localZ === CHUNK_SIZE - 1) this.markChunkDirty(chunkX, chunkZ + 1);
   }
 
+  recalculateLightingRegion(centerChunkX, centerChunkZ, radius = 1) {
+    const chunks = [];
+    const chunkKeys = new Set();
+
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        const chunkX = centerChunkX + dx;
+        const chunkZ = centerChunkZ + dz;
+        const chunk = this.peekChunk(chunkX, chunkZ);
+        if (!chunk) continue;
+        chunks.push(chunk);
+        chunkKeys.add(packChunkKey(chunkX, chunkZ));
+        chunk.skyLight.fill(0);
+        chunk.blockLight.fill(0);
+      }
+    }
+    if (chunks.length === 0) {
+      return;
+    }
+
+    for (const chunk of chunks) {
+      for (let lx = 0; lx < CHUNK_SIZE; lx += 1) {
+        for (let lz = 0; lz < CHUNK_SIZE; lz += 1) {
+          let light = LIGHT_LEVEL_MAX;
+          for (let y = WORLD_HEIGHT - 1; y >= 0; y -= 1) {
+            const type = chunk.getLocal(lx, y, lz);
+            if (blocksLightPropagation(type)) {
+              light = 0;
+              chunk.setSkyLightLocal(lx, y, lz, 0);
+            } else {
+              chunk.setSkyLightLocal(lx, y, lz, light);
+            }
+          }
+        }
+      }
+    }
+
+    const queue = [];
+    let queueIndex = 0;
+    const enqueue = (worldX, y, worldZ, level) => {
+      if (level <= 0 || y < 0 || y >= WORLD_HEIGHT) {
+        return;
+      }
+      const chunkX = Math.floor(worldX / CHUNK_SIZE);
+      const chunkZ = Math.floor(worldZ / CHUNK_SIZE);
+      const key = packChunkKey(chunkX, chunkZ);
+      if (!chunkKeys.has(key)) {
+        return;
+      }
+      const chunk = this.peekChunk(chunkX, chunkZ);
+      if (!chunk) {
+        return;
+      }
+      const localX = mod(worldX, CHUNK_SIZE);
+      const localZ = mod(worldZ, CHUNK_SIZE);
+      const index = chunk.index(localX, y, localZ);
+      if ((chunk.blockLight[index] || 0) >= level) {
+        return;
+      }
+      chunk.blockLight[index] = clamp(level, 0, LIGHT_LEVEL_MAX);
+      queue.push({ x: worldX, y, z: worldZ, level });
+    };
+
+    for (const chunk of chunks) {
+      const baseX = chunk.chunkX * CHUNK_SIZE;
+      const baseZ = chunk.chunkZ * CHUNK_SIZE;
+      const maxY = clamp((chunk.meshMaxY || SEA_LEVEL) + 2, 1, WORLD_HEIGHT - 1);
+      for (let y = 1; y <= maxY; y += 1) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx += 1) {
+          for (let lz = 0; lz < CHUNK_SIZE; lz += 1) {
+            const emission = getBlockLightEmission(chunk.getLocal(lx, y, lz));
+            if (emission > 0) {
+              enqueue(baseX + lx, y, baseZ + lz, emission);
+            }
+          }
+        }
+      }
+    }
+
+    while (queueIndex < queue.length) {
+      const entry = queue[queueIndex++];
+      if (entry.level <= 1) {
+        continue;
+      }
+      for (const [dx, dy, dz] of [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1]
+      ]) {
+        const nx = entry.x + dx;
+        const ny = entry.y + dy;
+        const nz = entry.z + dz;
+        if (ny < 0 || ny >= WORLD_HEIGHT) {
+          continue;
+        }
+        if (blocksLightPropagation(this.peekBlock(nx, ny, nz))) {
+          continue;
+        }
+        enqueue(nx, ny, nz, entry.level - 1);
+      }
+    }
+
+    for (const chunk of chunks) {
+      chunk.meshDirty = true;
+    }
+  }
+
   getBlock(x, y, z) {
     if (y < 0 || y >= WORLD_HEIGHT) {
       return BLOCK.AIR;
@@ -4457,6 +5126,44 @@ class World {
       return BLOCK.AIR;
     }
     return chunk.getLocal(mod(x, CHUNK_SIZE), y, mod(z, CHUNK_SIZE));
+  }
+
+  getSkyLightAt(x, y, z) {
+    if (y < 0 || y >= WORLD_HEIGHT) {
+      return 0;
+    }
+    const chunk = this.peekChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    if (!chunk) {
+      return 0;
+    }
+    return chunk.getSkyLightLocal(mod(x, CHUNK_SIZE), y, mod(z, CHUNK_SIZE));
+  }
+
+  getBlockLightAt(x, y, z) {
+    if (y < 0 || y >= WORLD_HEIGHT) {
+      return 0;
+    }
+    const chunk = this.peekChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    if (!chunk) {
+      return 0;
+    }
+    return chunk.getBlockLightLocal(mod(x, CHUNK_SIZE), y, mod(z, CHUNK_SIZE));
+  }
+
+  getCombinedLightAt(x, y, z) {
+    return Math.max(this.getSkyLightAt(x, y, z), this.getBlockLightAt(x, y, z));
+  }
+
+  getFaceLightLevel(x, y, z, faceId) {
+    const face = FACE_BY_ID[faceId];
+    if (!face) {
+      return LIGHT_LEVEL_MAX;
+    }
+    return this.getCombinedLightAt(x + face.offset.x, y + face.offset.y, z + face.offset.z);
+  }
+
+  getFaceLightScale(x, y, z, faceId) {
+    return 0.22 + (this.getFaceLightLevel(x, y, z, faceId) / LIGHT_LEVEL_MAX) * 0.78;
   }
 
   getFluidUpdateSet(type) {
@@ -4627,6 +5334,9 @@ class World {
     if (changed) {
       this.queueFluidUpdatesAround(x, y, z);
       this.resolveFluidInteractionsAround(x, y, z);
+      if (getBlockLightEmission(type) > 0) {
+        this.recalculateLightingRegion(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE), 1);
+      }
       this.saveDirty = true;
     }
     return changed;
@@ -4648,6 +5358,9 @@ class World {
     this.activeLavaUpdates.delete(key);
     if (changed) {
       this.queueFluidUpdatesAround(x, y, z);
+      if (getBlockLightEmission(type) > 0) {
+        this.recalculateLightingRegion(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE), 1);
+      }
       this.saveDirty = true;
     }
     return changed;
@@ -4680,7 +5393,7 @@ class World {
     if (!wasSource) {
       if (aboveType === type) {
         nextLevel = 0;
-        nextFalling = true;
+        nextFalling = this.canFluidFlowInto(x, y - 1, z, type) && this.peekBlock(x, y - 1, z) === BLOCK.AIR;
       } else {
         let adjacentSources = 0;
         let bestLevel = Number.POSITIVE_INFINITY;
@@ -4846,6 +5559,7 @@ class World {
     }
     this.queueFluidUpdatesAround(x, y, z);
     this.resolveFluidInteractionsAround(x, y, z);
+    this.recalculateLightingRegion(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE), 1);
     this.saveDirty = true;
     return true;
   }
@@ -4878,12 +5592,14 @@ class World {
               worldZ + face.offset.z
             );
             if (shouldRenderFace(type, neighborType)) {
+              const lightLevel = this.getFaceLightLevel(worldX, y, worldZ, face.id);
               faces.push({
                 x: worldX,
                 y,
                 z: worldZ,
                 type,
-                faceId: face.id
+                faceId: face.id,
+                lightLevel
               });
             }
           }
@@ -5092,6 +5808,7 @@ class BrowserInput {
     this.buttonsDown = [false, false, false];
     this.buttonsPressed = new Set();
     this.pressedKeys = new Set();
+    this.downKeys = new Set();
     this.actionUnlockAt = 0;
     this.pointerLockEnabled = false;
     this._lostPointerLock = false;
@@ -5107,6 +5824,7 @@ class BrowserInput {
       this.buttonsDown = [false, false, false];
       this.buttonsPressed.clear();
       this.pressedKeys.clear();
+      this.downKeys.clear();
     };
 
     this.resetState = (resetEngine = false) => {
@@ -5152,9 +5870,14 @@ class BrowserInput {
         return;
       }
       this.pressedKeys.add(event.key);
+      this.downKeys.add(event.key);
       if ([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
         event.preventDefault();
       }
+    };
+
+    this.onKeyUp = (event) => {
+      this.downKeys.delete(event.key);
     };
 
     this.onBlur = () => {
@@ -5193,6 +5916,7 @@ class BrowserInput {
     window.addEventListener("mouseup", this.onMouseUp);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     window.addEventListener("keydown", this.onKeyDown);
+    window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("blur", this.onBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     document.addEventListener("pointerlockchange", this.onPointerLockChange);
@@ -5214,7 +5938,7 @@ class BrowserInput {
   }
 
   isDown(key) {
-    return this.engine.input.isDown(key);
+    return this.downKeys.has(key) || this.engine.input.isDown(key);
   }
 
   getMousePosition() {
@@ -5296,6 +6020,7 @@ class Player {
     this.isSprinting = false;
     this.sprintToggled = false;
     this.isCrouching = false;
+    this.spawnPoint = null;
   }
 
   initializeInventory() {
@@ -5698,7 +6423,8 @@ class Player {
       health: this.health,
       hunger: this.hunger,
       xp: this.xp,
-      xpLevel: this.xpLevel
+      xpLevel: this.xpLevel,
+      spawnPoint: this.spawnPoint ? { ...this.spawnPoint } : null
     };
   }
 
@@ -5746,6 +6472,7 @@ class Player {
       this.sprintToggled = !!data.sprintToggled;
       this.isCrouching = false;
       this.isSprinting = false;
+      this.spawnPoint = normalizeSpawnPoint(data.spawnPoint, null);
       return true;
     }
 
@@ -6323,9 +7050,18 @@ class VoxelRenderer {
     const ctx = this.ctx;
     const horizon = clamp(this.height * (0.56 + this.player.pitch * 0.17), this.height * 0.18, this.height * 0.84);
     const cycle = getDayCycleInfo(worldTime);
-    const skyTop = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), cycle.darkness * 0.92);
-    const skyMid = mixRgb(rgb(143, 209, 255), rgb(48, 72, 118), cycle.darkness * 0.82);
-    const skyBot = mixRgb(rgb(216, 243, 255), rgb(106, 118, 160), cycle.darkness * 0.64);
+    const effectiveDaylight = getEffectiveDaylight(cycle, weather.type);
+    const effectiveDarkness = 1 - effectiveDaylight;
+    const weatherDarkness = getWeatherSkyDarkness(weather.type);
+    const flash = clamp(weather.flash || 0, 0, 1);
+    let skyTop = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), effectiveDarkness * 0.92);
+    let skyMid = mixRgb(rgb(143, 209, 255), rgb(48, 72, 118), effectiveDarkness * 0.82);
+    let skyBot = mixRgb(rgb(216, 243, 255), rgb(106, 118, 160), effectiveDarkness * 0.64);
+    if (flash > 0.001) {
+      skyTop = mixRgb(skyTop, rgb(232, 238, 255), flash * 0.5);
+      skyMid = mixRgb(skyMid, rgb(228, 236, 255), flash * 0.42);
+      skyBot = mixRgb(skyBot, rgb(220, 228, 248), flash * 0.32);
+    }
 
     const sky = ctx.createLinearGradient(0, 0, 0, horizon);
     sky.addColorStop(0, rgba(skyTop, 1));
@@ -6335,8 +7071,8 @@ class VoxelRenderer {
     ctx.fillRect(0, 0, this.width, horizon);
 
     const haze = ctx.createLinearGradient(0, horizon, 0, this.height);
-    haze.addColorStop(0, rgba(mixRgb(rgb(204, 228, 216), rgb(70, 86, 116), cycle.darkness * 0.7), 0.96));
-    haze.addColorStop(1, rgba(mixRgb(rgb(92, 156, 106), rgb(32, 44, 66), cycle.darkness * 0.78), 0.92));
+    haze.addColorStop(0, rgba(mixRgb(rgb(204, 228, 216), rgb(70, 86, 116), effectiveDarkness * 0.7 + weatherDarkness * 0.25), 0.96));
+    haze.addColorStop(1, rgba(mixRgb(rgb(92, 156, 106), rgb(32, 44, 66), effectiveDarkness * 0.78 + weatherDarkness * 0.3), 0.92));
     ctx.fillStyle = haze;
     ctx.fillRect(0, horizon, this.width, this.height - horizon);
 
@@ -6344,11 +7080,11 @@ class VoxelRenderer {
     const sunY = this.height * 0.18;
     const sunSize = 20 * this.uiScale();
     if (!cycle.isNight || cycle.phase === "Sunrise" || cycle.phase === "Sunset") {
-      ctx.fillStyle = rgba(this.sunColor, 0.18 * cycle.daylight);
+      ctx.fillStyle = rgba(this.sunColor, 0.18 * effectiveDaylight);
       ctx.beginPath();
       ctx.arc(sunX, sunY, sunSize * 2.6, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = rgba(this.sunColor, 0.98 * cycle.daylight);
+      ctx.fillStyle = rgba(this.sunColor, 0.98 * effectiveDaylight);
       ctx.beginPath();
       ctx.arc(sunX, sunY, sunSize, 0, Math.PI * 2);
       ctx.fill();
@@ -6368,7 +7104,7 @@ class VoxelRenderer {
       const y = this.height * (0.16 + index * 0.044);
       const width = (80 + index * 18) * this.uiScale();
       const height = (18 + index * 4) * this.uiScale();
-      ctx.fillStyle = `rgba(255,255,255,${0.42 - cycle.darkness * 0.18})`;
+      ctx.fillStyle = `rgba(255,255,255,${clamp(0.42 - effectiveDarkness * 0.18 - weatherDarkness * 0.24, 0.1, 0.42)})`;
       ctx.beginPath();
       ctx.ellipse(offset, y, width, height, 0, 0, Math.PI * 2);
       ctx.ellipse(offset + width * 0.46, y - height * 0.18, width * 0.76, height * 0.88, 0, 0, Math.PI * 2);
@@ -6380,18 +7116,27 @@ class VoxelRenderer {
   computeFaceStyle(face, depth) {
     const baseColor = getFaceColor(face.type, face.faceId);
     const faceDef = FACE_BY_ID[face.faceId];
-    const jitter = 0.95 + random3(face.x, face.y, face.z, face.type * 97 + face.faceId.length) * 0.1;
-    const lit = scaleRgb(baseColor, faceDef.light * jitter);
-    const fog = clamp((depth - 10) / ((this.renderDistanceChunks + 0.75) * CHUNK_SIZE), 0, 1) * 0.78;
+    const shadowsEnabled = this.settings?.shadows !== false;
+    const jitter = shadowsEnabled
+      ? 0.95 + random3(face.x, face.y, face.z, face.type * 97 + face.faceId.length) * 0.1
+      : 1;
+    const dynamicLight = shadowsEnabled
+      ? 0.22 + ((face.lightLevel || LIGHT_LEVEL_MAX) / LIGHT_LEVEL_MAX) * 0.78
+      : 1;
+    const lit = scaleRgb(baseColor, faceDef.light * dynamicLight * jitter);
+    const fog = shadowsEnabled
+      ? clamp((depth - 10) / ((this.renderDistanceChunks + 0.75) * CHUNK_SIZE), 0, 1) * 0.78
+      : 0;
     const texture = this.textures?.getBlockFaceTexture(face.type, face.faceId, this.settings) || null;
     const alpha = BLOCK_INFO[face.type].alpha;
+    const tintAlpha = texture ? (shadowsEnabled ? 0.18 : 0) : alpha;
     return {
       texture,
-      tint: rgba(lit, texture ? 0.18 : alpha),
+      tint: tintAlpha > 0 ? rgba(lit, tintAlpha) : "",
       fill: rgba(mixRgb(lit, this.skyFog, fog), alpha),
       stroke: rgba(scaleRgb(lit, 0.7), alpha < 1 ? Math.min(1, alpha + 0.18) : 0.34),
-      shadowAlpha: clamp((1 - faceDef.light * jitter) * 0.45, 0.02, 0.28),
-      fogAlpha: fog * 0.68,
+      shadowAlpha: shadowsEnabled ? clamp((1 - faceDef.light * jitter) * 0.45, 0.02, 0.28) : 0,
+      fogAlpha: shadowsEnabled ? fog * 0.68 : 0,
       alpha,
       lineWidth: texture ? 0 : depth < 11 ? Math.max(1, this.uiScale()) : 0
     };
@@ -6573,14 +7318,18 @@ class VoxelRenderer {
     if (style.texture) {
       const flipV = face.faceId !== "top" && face.faceId !== "bottom";
       this.drawTexturedQuad(style.texture, points, style.alpha, flipV);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = style.tint;
-      this.withQuadPath(points);
-      ctx.fill();
-      ctx.fillStyle = `rgba(0,0,0,${style.shadowAlpha})`;
-      this.withQuadPath(points);
-      ctx.fill();
+      if (style.tint) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = style.tint;
+        this.withQuadPath(points);
+        ctx.fill();
+      }
+      if (style.shadowAlpha > 0.001) {
+        ctx.fillStyle = `rgba(0,0,0,${style.shadowAlpha})`;
+        this.withQuadPath(points);
+        ctx.fill();
+      }
       if (style.fogAlpha > 0.01) {
         ctx.fillStyle = `rgba(${this.skyFog[0]},${this.skyFog[1]},${this.skyFog[2]},${style.fogAlpha})`;
         this.withQuadPath(points);
@@ -7310,13 +8059,18 @@ class GreedyChunkMesher {
               const bType = getBlock(bCoord[0], bCoord[1], bCoord[2]);
               const blockType = dir === 1 ? aType : bType;
               const neighborType = dir === 1 ? bType : aType;
+              const blockCoord = dir === 1 ? aCoord : bCoord;
 
               const index = iu * maskSizeV + iv;
               if (blockType !== BLOCK.AIR && shouldRenderFace(blockType, neighborType)) {
+                const useFaceLighting = this.atlas?.settings?.shadows !== false;
                 mask[index] = {
                   blockType,
                   layer: this.atlas.getLayerForBlockFace(blockType, faceId),
-                  transparent: !!BLOCK_INFO[blockType]?.transparent
+                  transparent: !!BLOCK_INFO[blockType]?.transparent,
+                  light: useFaceLighting
+                    ? this.world.getFaceLightScale(baseX + blockCoord[0], blockCoord[1], baseZ + blockCoord[2], faceId)
+                    : 1
                 };
               } else {
                 mask[index] = null;
@@ -7335,7 +8089,7 @@ class GreedyChunkMesher {
               let width = 1;
               while (iv + width < maskSizeV) {
                 const next = mask[index + width];
-                if (!next || next.blockType !== cell.blockType || next.layer !== cell.layer || next.transparent !== cell.transparent) {
+                if (!next || next.blockType !== cell.blockType || next.layer !== cell.layer || next.transparent !== cell.transparent || Math.abs(next.light - cell.light) > 0.001) {
                   break;
                 }
                 width += 1;
@@ -7345,7 +8099,7 @@ class GreedyChunkMesher {
               outer: while (iu + height < maskSizeU) {
                 for (let k = 0; k < width; k += 1) {
                   const next = mask[index + k + height * maskSizeV];
-                  if (!next || next.blockType !== cell.blockType || next.layer !== cell.layer || next.transparent !== cell.transparent) {
+                  if (!next || next.blockType !== cell.blockType || next.layer !== cell.layer || next.transparent !== cell.transparent || Math.abs(next.light - cell.light) > 0.001) {
                     break outer;
                   }
                 }
@@ -7410,7 +8164,7 @@ class GreedyChunkMesher {
 
               const targetVertices = cell.transparent ? verticesTrans : verticesOpaque;
               const targetIndices = cell.transparent ? indicesTrans : indicesOpaque;
-              pushQuad(targetVertices, targetIndices, quad, normal, uv, cell.layer, light);
+              pushQuad(targetVertices, targetIndices, quad, normal, uv, cell.layer, light * cell.light);
 
               for (let hu = 0; hu < height; hu += 1) {
                 for (let wv = 0; wv < width; wv += 1) {
@@ -8692,6 +9446,7 @@ export default function FreeCube2Game(engine) {
   let player = null;
   let input = null;
   let settings = { ...DEFAULT_SETTINGS };
+  let playerUsername = "";
   let activeWorldId = null;
   let selectedWorldId = null;
   let mode = "menu"; // menu | loading | playing | paused
@@ -8705,6 +9460,10 @@ export default function FreeCube2Game(engine) {
   let hud = { visible: true, last: null, timer: 0 };
   let boss = { active: false, name: "Boss", health: 1 };
   let worldTime = 0; // seconds, loops
+  let weather = createWeatherState();
+  let gamerules = normalizeGamerules();
+  let worldSpawnPoint = null;
+  let sleepState = { active: false, timer: 0, duration: 5, bedKey: "", bedPosition: null };
   let spawnTimer = 0;
   let worldTickTimer = 0;
   let blockTickAccumulator = 0;
@@ -8733,6 +9492,10 @@ export default function FreeCube2Game(engine) {
 
   let ui = null;
   let loadingStartChunk = null;
+  let webglContextLost = false;
+  let webglContextRestored = false;
+  let runtimeFault = null;
+  let runtimeRepairPromise = null;
   let musicPool = new Map();
   let currentMusicAudio = null;
   let currentMusicGain = 0;
@@ -8745,10 +9508,45 @@ export default function FreeCube2Game(engine) {
   let runtimeMaintenanceTimer = 0;
   let waterFlowTimer = 0;
   let lavaFlowTimer = 0;
+  let debugState = {
+    visible: false,
+    chunkBorders: false,
+    hitboxes: false,
+    advancedTooltips: false,
+    frameGraph: false,
+    pieChart: false,
+    helpUntil: 0,
+    chordUntil: 0,
+    metrics: {
+      frameMs: 16.7,
+      updateMs: 0,
+      renderMs: 0,
+      chunkMs: 0,
+      uiMs: 0,
+      worldMs: 0
+    },
+    frameSamples: Array.from({ length: 90 }, () => 16.7)
+  };
+  let multiplayerState = {
+    directConnectUrl: DEFAULT_MULTIPLAYER_SERVER_URL,
+    selectedServerId: "",
+    lanServers: [],
+    savedServers: [
+      {
+        id: "localhost-dev",
+        name: "Local Development Server",
+        subtitle: "Dedicated FreeCube2 server",
+        address: DEFAULT_MULTIPLAYER_SERVER_URL,
+        playersLabel: "0/8",
+        signalLabel: "DEV"
+      }
+    ]
+  };
 
   playerSkinRefreshHandler = () => {
     if (!ui) return;
     setSettingsUI();
+    setProfileSetupUI();
     if (inventoryOpen) {
       renderInventoryUI();
     }
@@ -8756,6 +9554,7 @@ export default function FreeCube2Game(engine) {
 
   const VOLUME_PRESETS = [0, 0.25, 0.5, 0.75, 1];
   const MUSIC_FADE_SECONDS = 2.8;
+  const AUTO_REPAIR_DELAY_MS = 2000;
 
   function formatVolumeLabel(value) {
     return `${Math.round(clamp(value, 0, 1) * 100)}%`;
@@ -9086,6 +9885,25 @@ export default function FreeCube2Game(engine) {
         #freecube2-crosshair::after{width:2px;height:18px}
         #freecube2-mining{position:fixed;left:50%;top:50%;transform:translate(-50%, 46px);width:180px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden;display:none}
         #freecube2-mining-bar{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
+        #freecube2-weather-overlay{position:fixed;inset:0;display:none;pointer-events:none;opacity:0;transition:opacity 0.35s ease;z-index:999}
+        #freecube2-weather-overlay.rain{display:block;background-image:repeating-linear-gradient(115deg, rgba(174,216,255,0.16) 0 2px, transparent 2px 16px);background-size:260px 260px;animation:fc-rain-fall 0.42s linear infinite}
+        #freecube2-weather-overlay.thunder{display:block;background-image:repeating-linear-gradient(115deg, rgba(210,232,255,0.22) 0 2px, transparent 2px 14px);background-size:220px 220px;animation:fc-rain-fall 0.28s linear infinite}
+        #freecube2-lightning-flash{position:fixed;inset:0;display:none;background:#eef7ff;opacity:0;pointer-events:none;transition:opacity 0.15s linear;z-index:1001}
+        #freecube2-debug-canvas{position:fixed;inset:0;width:100%;height:100%;display:none;pointer-events:none;z-index:1001}
+        #freecube2-debug-panel{position:fixed;left:10px;top:42px;display:none;max-width:min(440px,64vw);padding:10px 12px;background:rgba(8,12,20,0.76);border:1px solid rgba(255,255,255,0.14);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,0.28);color:#dbf7db;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;z-index:1002}
+        #freecube2-debug-graphs{display:none;grid-template-columns:1fr 140px;gap:10px;margin-top:10px}
+        #freecube2-debug-graph{width:100%;height:72px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:8px}
+        #freecube2-debug-pie{display:none;align-items:center;justify-content:center;flex-direction:column;gap:8px}
+        #freecube2-debug-pie-chart{width:98px;height:98px;border-radius:999px;background:conic-gradient(#7fe1ff 0deg 120deg,#63b4ff 120deg 220deg,#9cf2ba 220deg 300deg,#f5dc86 300deg 360deg);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.1)}
+        #freecube2-debug-pie-legend{display:grid;gap:4px;color:rgba(234,245,255,0.9);font:11px/1.25 ui-monospace,Menlo,Consolas,monospace}
+        #freecube2-debug-help{position:fixed;right:10px;top:42px;display:none;max-width:min(420px,72vw);padding:10px 12px;background:rgba(8,12,20,0.82);border:1px solid rgba(255,255,255,0.12);border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,0.3);color:rgba(236,245,255,0.96);font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;z-index:1002}
+        #freecube2-sleep-overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(6,10,20,0.58);z-index:1004;pointer-events:none}
+        .fc-sleep-card{display:flex;flex-direction:column;align-items:center;gap:12px;min-width:min(340px,84vw);padding:24px 28px;border-radius:20px;background:rgba(9,14,28,0.92);border:1px solid rgba(255,255,255,0.15);box-shadow:0 18px 48px rgba(0,0,0,0.38)}
+        .fc-sleep-title{color:#f4f8ff;font:900 22px/1 ui-monospace,Menlo,Consolas,monospace}
+        .fc-sleep-copy{color:rgba(220,233,255,0.88);font:13px/1.35 ui-monospace,Menlo,Consolas,monospace;text-align:center}
+        .fc-sleep-bar{width:min(260px,72vw);height:12px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
+        .fc-sleep-bar > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(148,226,255,0.96), rgba(255,244,166,0.96))}
+        @keyframes fc-rain-fall{0%{background-position:0 0}100%{background-position:-42px 112px}}
         #freecube2-hotbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:8px;padding:10px 12px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.14);border-radius:10px}
         #freecube2-inventory{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);display:none;pointer-events:auto;z-index:1002}
         .fc-inv-panel{min-width:min(664px,94vw);padding:18px;background:#c6c6c6;border:4px solid #1f1f1f;box-shadow:inset 4px 4px 0 #ffffff,inset -4px -4px 0 #555555,0 18px 48px rgba(0,0,0,0.42);image-rendering:pixelated}
@@ -9149,12 +9967,20 @@ export default function FreeCube2Game(engine) {
         .fc-furnace-progress{width:54px;height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);overflow:hidden}
         .fc-furnace-progress > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(255,255,255,0.96), rgba(90,200,255,0.96))}
         .fc-furnace-slot-output{grid-column:4;grid-row:1 / span 2}
+        #freecube2-autorepair-banner{position:fixed;left:50%;top:14px;transform:translateX(-50%);display:none;align-items:center;gap:10px;padding:10px 16px;border-radius:999px;background:rgba(12,20,34,0.92);border:1px solid rgba(148,233,255,0.4);box-shadow:0 16px 40px rgba(0,0,0,0.34);color:#eefcff;font:800 13px/1 ui-monospace,Menlo,Consolas,monospace;z-index:1005;pointer-events:auto}
+        #freecube2-autorepair-banner .fc-repair-dot{width:10px;height:10px;border-radius:999px;background:#91ecff;box-shadow:0 0 12px rgba(145,236,255,0.9)}
+        #freecube2-autorepair-center{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(7,12,20,0.22);z-index:1005;pointer-events:auto}
+        .fc-repair-shell{display:flex;flex-direction:column;align-items:center;gap:14px;min-width:min(340px,84vw);padding:22px 24px;border-radius:18px;background:rgba(9,14,26,0.9);border:1px solid rgba(148,233,255,0.24);box-shadow:0 22px 54px rgba(0,0,0,0.38)}
+        .fc-repair-spinner{width:60px;height:60px;border-radius:999px;border:5px solid rgba(255,255,255,0.14);border-top-color:#8fe9ff;border-right-color:#59b9ff;animation:fc-repair-spin 0.9s linear infinite}
+        .fc-repair-title{color:#f4fbff;font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.45)}
+        .fc-repair-copy{max-width:min(420px,82vw);text-align:center;color:rgba(223,239,255,0.9);font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
+        @keyframes fc-repair-spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
         #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('./assets/PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
         @keyframes fc-menu-pan{0%{background-position:0 0}100%{background-position:-256px -256px}}
         #freecube2-menu::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.06), transparent 52%),linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.55));pointer-events:none}
         #freecube2-menu.show{display:flex}
         #freecube2-panel{position:relative;width:min(920px,96vw);min-height:calc(100dvh - 24px);margin:auto;padding:12px 0;background:transparent;border:none;box-shadow:none;text-align:center;display:flex;flex-direction:column;justify-content:center}
-        #fc-screen-title,#fc-screen-worlds,#fc-screen-settings,#fc-screen-resource-packs,#fc-screen-loading,#fc-screen-pause{width:min(860px,100%);margin:0 auto}
+        #fc-screen-profile,#fc-screen-title,#fc-screen-multiplayer,#fc-screen-worlds,#fc-screen-settings,#fc-screen-resource-packs,#fc-screen-loading,#fc-screen-pause{width:min(860px,100%);margin:0 auto}
         .fc-title{font:900 72px/1 ui-monospace,Menlo,Consolas,monospace;color:#fff;letter-spacing:4px;text-shadow:0 6px 0 rgba(0,0,0,0.45),0 18px 60px rgba(0,0,0,0.6);margin:0 auto 10px auto}
         .fc-sub{color:rgba(255,255,255,0.85);font:700 18px/1.1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 26px auto;transform:rotate(-10deg);display:inline-block}
         .fc-row{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
@@ -9207,12 +10033,48 @@ export default function FreeCube2Game(engine) {
         .fc-skin-preview{width:152px;min-height:192px;padding:12px;background:#1a1a1a;border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
         .fc-skin-controls{display:flex;flex-direction:column;gap:8px;flex:1 1 240px}
         .fc-skin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px}
+        .fc-profile-shell{display:grid;grid-template-columns:minmax(184px,220px) minmax(0,380px);gap:18px;align-items:start;justify-content:center;margin:0 auto;padding:18px;background:rgba(0,0,0,0.56);border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08)}
+        .fc-profile-preview-card{padding:12px;background:#111;border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08)}
+        .fc-profile-preview-card .fc-skin-preview{width:100%;min-height:236px;padding:14px}
+        .fc-profile-side{display:flex;flex-direction:column;gap:12px;text-align:left}
+        .fc-profile-title{font:900 18px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7)}
+        .fc-profile-label{font:12px/1 ui-monospace,Menlo,Consolas,monospace;color:rgba(255,255,255,0.88)}
+        .fc-profile-input,.fc-profile-select{all:unset;box-sizing:border-box;height:38px;padding:0 10px;background:#111;border:2px solid #000;color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace}
+        .fc-profile-input:focus,.fc-profile-select:focus{outline:2px solid rgba(255,255,255,0.9)}
+        .fc-profile-note{color:rgba(230,230,230,0.88);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
+        .fc-profile-actions{display:flex;flex-wrap:wrap;gap:10px}
+        .fc-mp-shell{display:grid;gap:12px;width:min(860px,100%)}
+        .fc-mp-browser{min-height:min(420px,52dvh);padding:14px;background:rgba(0,0,0,0.48);border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08);display:grid;grid-template-rows:auto auto 1fr}
+        .fc-mp-title{font:900 22px/1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7)}
+        .fc-mp-status{color:rgba(236,245,255,0.88);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
+        .fc-mp-list{display:flex;flex-direction:column;gap:10px;margin-top:14px;overflow:auto}
+        .fc-mp-section{margin-top:12px;color:rgba(240,246,255,0.88);font:700 13px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:left}
+        .fc-mp-entry{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px;background:rgba(0,0,0,0.46);border:2px solid #000;text-align:left}
+        .fc-mp-entry.locked{opacity:0.72}
+        .fc-mp-icon{width:44px;height:44px;display:grid;place-items:center;background:#111;border:2px solid #000;color:#fff;font:900 12px/1 ui-monospace,Menlo,Consolas,monospace}
+        .fc-mp-copy{display:grid;gap:4px;min-width:0}
+        .fc-mp-head{font:900 16px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
+        .fc-mp-sub{font:12px/1.25 ui-monospace,Menlo,Consolas,monospace;color:rgba(225,232,242,0.82);word-break:break-word}
+        .fc-mp-meta{display:grid;justify-items:end;gap:6px;color:rgba(245,245,245,0.88);font:12px/1.1 ui-monospace,Menlo,Consolas,monospace}
+        .fc-mp-signal{padding:4px 7px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:999px}
+        .fc-mp-controls{display:grid;gap:10px;margin-top:12px}
+        .fc-mp-direct{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+        .fc-mp-input{all:unset;box-sizing:border-box;height:38px;padding:0 10px;background:#111;border:2px solid #000;color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:left}
+        .fc-mp-input:focus{outline:2px solid rgba(255,255,255,0.9)}
+        .fc-mp-note{color:rgba(228,234,242,0.82);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;text-align:left}
+        #freecube2-error-overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,12,18,0.78);pointer-events:auto;z-index:1004}
+        .fc-error-panel{width:min(560px,92vw);padding:18px;background:rgba(0,0,0,0.82);border:3px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.12),0 18px 48px rgba(0,0,0,0.42);display:grid;gap:10px;text-align:center}
+        .fc-error-title{font:900 24px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
+        .fc-error-copy{font:14px/1.4 ui-monospace,Menlo,Consolas,monospace;color:rgba(236,242,255,0.94)}
+        .fc-error-detail{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:rgba(196,210,230,0.82)}
         @media (max-width: 760px){
           #freecube2-panel{width:min(96vw,96vw);min-height:calc(100dvh - 12px);padding:6px 0}
           .fc-title{font-size:clamp(42px,12vw,64px);letter-spacing:2px}
           .fc-sub{font-size:14px;margin-bottom:18px}
           .fc-grid{grid-template-columns:1fr}
           .fc-video-grid{grid-template-columns:1fr}
+          .fc-profile-shell{grid-template-columns:1fr}
+          .fc-mp-direct{grid-template-columns:1fr}
           .fc-inv-top{grid-template-columns:1fr}
           .fc-btn,.fc-btn.half,.fc-btn.small{min-width:100%}
           .fc-row{flex-direction:column;align-items:stretch}
@@ -9241,6 +10103,20 @@ export default function FreeCube2Game(engine) {
       </div>
       <div id="freecube2-crosshair"></div>
       <div id="freecube2-mining"><div id="freecube2-mining-bar"></div></div>
+      <div id="freecube2-weather-overlay"></div>
+      <div id="freecube2-lightning-flash"></div>
+      <canvas id="freecube2-debug-canvas"></canvas>
+      <div id="freecube2-debug-panel">
+        <div id="freecube2-debug-lines"></div>
+        <div id="freecube2-debug-graphs">
+          <canvas id="freecube2-debug-graph"></canvas>
+          <div id="freecube2-debug-pie">
+            <div id="freecube2-debug-pie-chart"></div>
+            <div id="freecube2-debug-pie-legend"></div>
+          </div>
+        </div>
+      </div>
+      <div id="freecube2-debug-help"></div>
       <div id="freecube2-status">
         <div class="fc-armor" id="freecube2-armor"></div>
         <div class="fc-hearts" id="freecube2-hearts"></div>
@@ -9292,20 +10168,101 @@ export default function FreeCube2Game(engine) {
         </div>
       </div>
       <div id="freecube2-inventory-cursor" class="freecube2-slot fc-inv-cursor"></div>
+      <div id="freecube2-sleep-overlay">
+        <div class="fc-sleep-card">
+          <div class="fc-sleep-title">Sleeping...</div>
+          <div id="freecube2-sleep-copy" class="fc-sleep-copy">Stay in bed a few seconds to skip the night.</div>
+          <div class="fc-sleep-bar"><div id="freecube2-sleep-progress"></div></div>
+        </div>
+      </div>
+      <div id="freecube2-autorepair-banner">
+        <div class="fc-repair-dot"></div>
+        <div id="freecube2-autorepair-banner-copy">Auto Repair</div>
+      </div>
+      <div id="freecube2-autorepair-center">
+        <div class="fc-repair-shell">
+          <div class="fc-repair-spinner"></div>
+          <div class="fc-repair-title">Auto Repair</div>
+          <div id="freecube2-autorepair-detail" class="fc-repair-copy">Diagnosing the problem.</div>
+        </div>
+      </div>
+      <div id="freecube2-error-overlay">
+        <div class="fc-error-panel">
+          <div id="freecube2-error-title" class="fc-error-title">Graphics Error</div>
+          <div id="freecube2-error-message" class="fc-error-copy">The WebGL renderer stopped responding.</div>
+          <div id="freecube2-error-detail" class="fc-error-detail">Reload the game to rebuild graphics resources.</div>
+          <div class="fc-row" style="margin-top:10px">
+            <button class="fc-btn half" data-action="run-auto-repair">Try Auto Repair</button>
+            <button class="fc-btn half" data-action="reload">Reload Game</button>
+          </div>
+        </div>
+      </div>
       <div id="freecube2-menu" class="show">
         <div id="freecube2-panel">
-          <div id="fc-screen-title">
+          <div id="fc-screen-profile" style="display:none">
+            <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 12px auto">Create Profile</div>
+            <div class="fc-profile-shell">
+              <div class="fc-profile-preview-card">
+                <div id="fc-profile-skin-preview" class="fc-skin-preview"></div>
+              </div>
+              <div class="fc-profile-side">
+                <div class="fc-profile-title">Screen Name</div>
+                <label class="fc-profile-label" for="fc-profile-name">Username</label>
+                <input id="fc-profile-name" class="fc-profile-input" maxlength="16" placeholder="Name" autocomplete="nickname" spellcheck="false" />
+                <label class="fc-profile-label" for="fc-profile-skin-preset">Player Skin</label>
+                <select id="fc-profile-skin-preset" class="fc-profile-select">
+                  <option value="steve_large">Steve</option>
+                  <option value="alex">Alex</option>
+                  <option value="zombie">Zombie</option>
+                  <option value="freecube">FreeCube</option>
+                  <option value="custom">Custom</option>
+                </select>
+                <div id="fc-profile-skin-current" class="fc-profile-note">Current skin: Steve</div>
+                <div class="fc-profile-actions">
+                  <button class="fc-btn half" data-action="profile-import-skin">Add Skin</button>
+                  <button class="fc-btn half" data-action="profile-clear-skin">Clear Skin</button>
+                </div>
+                <div class="fc-profile-note">Choose a screen name and skin before entering the title screen. Your name is stored locally in this browser.</div>
+                <div class="fc-row" style="margin-top:4px">
+                  <button class="fc-btn" data-action="complete-profile">Continue</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="fc-screen-title" style="display:none">
             <div class="fc-title">FREECUBE</div>
             <div class="fc-sub">Also try digging straight down</div>
             <div class="fc-stack">
               <button class="fc-btn" data-action="singleplayer">Singleplayer</button>
-              <button class="fc-btn disabled" disabled>Multiplayer</button>
+              <button class="fc-btn${MULTIPLAYER_ENABLED ? "" : " disabled"}" data-action="open-multiplayer" ${MULTIPLAYER_ENABLED ? "" : "disabled"}>Multiplayer</button>
               <button class="fc-btn" data-action="open-settings">Options...</button>
               <button class="fc-btn" data-action="reload">Quit Game</button>
             </div>
             <div class="fc-footer" style="margin-top:18px">
               <span>FreeCube2 ${GAME_VERSION}</span>
               <span>Static. Local saves.</span>
+            </div>
+          </div>
+          <div id="fc-screen-multiplayer" style="display:none">
+            <div class="fc-mp-shell">
+              <div class="fc-mp-browser">
+                <div class="fc-mp-title">Play Multiplayer</div>
+                <div id="fc-multiplayer-status" class="fc-mp-status">Multiplayer is disabled in this build.</div>
+                <div id="fc-multiplayer-list" class="fc-mp-list"></div>
+              </div>
+              <div class="fc-card fc-mp-controls">
+                <div class="fc-mp-direct">
+                  <input id="fc-multiplayer-direct-input" class="fc-mp-input" value="${DEFAULT_MULTIPLAYER_SERVER_URL}" spellcheck="false" />
+                  <button id="fc-multiplayer-direct-btn" class="fc-btn half disabled" type="button" disabled>Direct Connect</button>
+                </div>
+                <div class="fc-row">
+                  <button id="fc-multiplayer-join-btn" class="fc-btn small disabled" type="button" disabled>Join Server</button>
+                  <button id="fc-multiplayer-add-btn" class="fc-btn small disabled" type="button" disabled>Add Server</button>
+                  <button id="fc-multiplayer-refresh-btn" class="fc-btn small disabled" type="button" disabled>Refresh</button>
+                  <button class="fc-btn small" data-action="back-title">Cancel</button>
+                </div>
+                <div id="fc-multiplayer-note" class="fc-mp-note">Dedicated server code lives in <code>multiplayer-server/server.js</code>. The menu is present now, but the feature flag keeps it locked until the client networking pass is finished.</div>
+              </div>
             </div>
           </div>
           <div id="fc-screen-worlds" style="display:none">
@@ -9358,6 +10315,7 @@ export default function FreeCube2Game(engine) {
                   <button id="fc-video-fov" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-ms" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-bob" class="fc-btn fc-video-btn" type="button"></button>
+                  <button id="fc-video-shadows" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-fps" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-mastervol" class="fc-btn fc-video-btn" type="button"></button>
                   <button id="fc-video-musicvol" class="fc-btn fc-video-btn" type="button"></button>
@@ -9467,6 +10425,17 @@ export default function FreeCube2Game(engine) {
     const crosshairEl = root.querySelector("#freecube2-crosshair");
     const miningEl = root.querySelector("#freecube2-mining");
     const miningBar = root.querySelector("#freecube2-mining-bar");
+    const weatherOverlayEl = root.querySelector("#freecube2-weather-overlay");
+    const lightningFlashEl = root.querySelector("#freecube2-lightning-flash");
+    const debugCanvasEl = root.querySelector("#freecube2-debug-canvas");
+    const debugPanelEl = root.querySelector("#freecube2-debug-panel");
+    const debugLinesEl = root.querySelector("#freecube2-debug-lines");
+    const debugGraphsEl = root.querySelector("#freecube2-debug-graphs");
+    const debugGraphEl = root.querySelector("#freecube2-debug-graph");
+    const debugPieEl = root.querySelector("#freecube2-debug-pie");
+    const debugPieChartEl = root.querySelector("#freecube2-debug-pie-chart");
+    const debugPieLegendEl = root.querySelector("#freecube2-debug-pie-legend");
+    const debugHelpEl = root.querySelector("#freecube2-debug-help");
     const statusEl = root.querySelector("#freecube2-status");
     const armorEl = root.querySelector("#freecube2-armor");
     const heartsEl = root.querySelector("#freecube2-hearts");
@@ -9497,16 +10466,42 @@ export default function FreeCube2Game(engine) {
     const inventoryMainEl = root.querySelector("#freecube2-inventory-main");
     const inventoryHotbarEl = root.querySelector("#freecube2-inventory-hotbar");
     const inventoryCursorEl = root.querySelector("#freecube2-inventory-cursor");
+    const sleepOverlayEl = root.querySelector("#freecube2-sleep-overlay");
+    const sleepCopyEl = root.querySelector("#freecube2-sleep-copy");
+    const sleepProgressEl = root.querySelector("#freecube2-sleep-progress");
+    const autoRepairBannerEl = root.querySelector("#freecube2-autorepair-banner");
+    const autoRepairBannerCopyEl = root.querySelector("#freecube2-autorepair-banner-copy");
+    const autoRepairCenterEl = root.querySelector("#freecube2-autorepair-center");
+    const autoRepairDetailEl = root.querySelector("#freecube2-autorepair-detail");
+    const errorOverlayEl = root.querySelector("#freecube2-error-overlay");
+    const errorTitleEl = root.querySelector("#freecube2-error-title");
+    const errorMessageEl = root.querySelector("#freecube2-error-message");
+    const errorDetailEl = root.querySelector("#freecube2-error-detail");
     const menuEl = root.querySelector("#freecube2-menu");
 
     const screens = {
+      profile: root.querySelector("#fc-screen-profile"),
       title: root.querySelector("#fc-screen-title"),
+      multiplayer: root.querySelector("#fc-screen-multiplayer"),
       worlds: root.querySelector("#fc-screen-worlds"),
       settings: root.querySelector("#fc-screen-settings"),
       resourcePacks: root.querySelector("#fc-screen-resource-packs"),
       loading: root.querySelector("#fc-screen-loading"),
       pause: root.querySelector("#fc-screen-pause")
     };
+
+    const profileNameInput = root.querySelector("#fc-profile-name");
+    const profileSkinPreviewEl = root.querySelector("#fc-profile-skin-preview");
+    const profileSkinPresetEl = root.querySelector("#fc-profile-skin-preset");
+    const profileSkinCurrentEl = root.querySelector("#fc-profile-skin-current");
+    const multiplayerStatusEl = root.querySelector("#fc-multiplayer-status");
+    const multiplayerListEl = root.querySelector("#fc-multiplayer-list");
+    const multiplayerDirectInputEl = root.querySelector("#fc-multiplayer-direct-input");
+    const multiplayerDirectBtn = root.querySelector("#fc-multiplayer-direct-btn");
+    const multiplayerJoinBtn = root.querySelector("#fc-multiplayer-join-btn");
+    const multiplayerAddBtn = root.querySelector("#fc-multiplayer-add-btn");
+    const multiplayerRefreshBtn = root.querySelector("#fc-multiplayer-refresh-btn");
+    const multiplayerNoteEl = root.querySelector("#fc-multiplayer-note");
 
     const worldListEl = root.querySelector("#fc-world-list");
     const newWorldCard = root.querySelector("#fc-new-world");
@@ -9522,6 +10517,7 @@ export default function FreeCube2Game(engine) {
     const videoFovBtn = root.querySelector("#fc-video-fov");
     const videoMouseBtn = root.querySelector("#fc-video-ms");
     const videoViewBobBtn = root.querySelector("#fc-video-bob");
+    const videoShadowsBtn = root.querySelector("#fc-video-shadows");
     const videoFpsBtn = root.querySelector("#fc-video-fps");
     const videoMasterVolumeBtn = root.querySelector("#fc-video-mastervol");
     const videoMusicVolumeBtn = root.querySelector("#fc-video-musicvol");
@@ -9550,7 +10546,7 @@ export default function FreeCube2Game(engine) {
       screens[screen].style.display = "block";
       root.classList.add("menu-open");
       menuEl.classList.add("show");
-      crosshairEl.style.display = screen === "loading" || screen === "menu" || screen === "title" || screen === "worlds" || screen === "settings" || screen === "resourcePacks" || screen === "pause" ? "none" : "";
+      crosshairEl.style.display = screen === "loading" || screen === "menu" || screen === "profile" || screen === "title" || screen === "multiplayer" || screen === "worlds" || screen === "settings" || screen === "resourcePacks" || screen === "pause" ? "none" : "";
     };
 
     const hideMenu = () => {
@@ -9581,6 +10577,17 @@ export default function FreeCube2Game(engine) {
       menuEl,
       miningEl,
       miningBar,
+      weatherOverlayEl,
+      lightningFlashEl,
+      debugCanvasEl,
+      debugPanelEl,
+      debugLinesEl,
+      debugGraphsEl,
+      debugGraphEl,
+      debugPieEl,
+      debugPieChartEl,
+      debugPieLegendEl,
+      debugHelpEl,
       statusEl,
       armorEl,
       heartsEl,
@@ -9611,6 +10618,30 @@ export default function FreeCube2Game(engine) {
       inventoryMainEl,
       inventoryHotbarEl,
       inventoryCursorEl,
+      sleepOverlayEl,
+      sleepCopyEl,
+      sleepProgressEl,
+      autoRepairBannerEl,
+      autoRepairBannerCopyEl,
+      autoRepairCenterEl,
+      autoRepairDetailEl,
+      errorOverlayEl,
+      errorTitleEl,
+      errorMessageEl,
+      errorDetailEl,
+      screens,
+      profileNameInput,
+      profileSkinPreviewEl,
+      profileSkinPresetEl,
+      profileSkinCurrentEl,
+      multiplayerStatusEl,
+      multiplayerListEl,
+      multiplayerDirectInputEl,
+      multiplayerDirectBtn,
+      multiplayerJoinBtn,
+      multiplayerAddBtn,
+      multiplayerRefreshBtn,
+      multiplayerNoteEl,
       newWorldCard,
       worldNameInput,
       worldSeedInput,
@@ -9623,6 +10654,7 @@ export default function FreeCube2Game(engine) {
       videoFovBtn,
       videoMouseBtn,
       videoViewBobBtn,
+      videoShadowsBtn,
       videoFpsBtn,
       videoMasterVolumeBtn,
       videoMusicVolumeBtn,
@@ -9662,7 +10694,9 @@ export default function FreeCube2Game(engine) {
       renderSlotContents(slot, i, true);
       ui.hotbarEl.appendChild(slot);
     }
-    renderInventoryUI();
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
   }
 
   function updateHotbarSelection() {
@@ -9972,6 +11006,10 @@ export default function FreeCube2Game(engine) {
       slot.removeAttribute("title");
     }
     if (!itemType || itemType === BLOCK.AIR || count <= 0) return;
+    const baseTitle = placeholder ? `${placeholder}: ${getItemName(itemType)}` : getItemName(itemType);
+    slot.title = debugState.advancedTooltips
+      ? `${baseTitle} [id=${itemType}]${count > 1 ? ` x${count}` : ""}`
+      : baseTitle;
     const image = textures?.getItemTexture(itemType, settings);
     if (image?.src) {
       const img = document.createElement("img");
@@ -10031,25 +11069,175 @@ export default function FreeCube2Game(engine) {
 
   function renderInventoryPreview() {
     if (!ui) return;
-    const canvas = document.createElement("canvas");
-    canvas.className = "fc-inv-player-canvas";
+    const canvas = getOrCreatePlayerPreviewCanvas(ui.inventoryPreviewEl);
+    if (!canvas) return;
     renderPlayerPreviewCanvas(canvas, {
       head: getArmorSlotType(0),
       chest: getArmorSlotType(1),
       legs: getArmorSlotType(2),
       feet: getArmorSlotType(3)
     }, getSelectedPlayerSkinCanvas(settings));
-    ui.inventoryPreviewEl.innerHTML = "";
-    ui.inventoryPreviewEl.appendChild(canvas);
   }
 
   function renderSettingsSkinPreview() {
     if (!ui?.skinPreviewEl) return;
-    const canvas = document.createElement("canvas");
-    canvas.className = "fc-inv-player-canvas";
+    const canvas = getOrCreatePlayerPreviewCanvas(ui.skinPreviewEl);
+    if (!canvas) return;
     renderPlayerPreviewCanvas(canvas, {}, getSelectedPlayerSkinCanvas(settings));
-    ui.skinPreviewEl.innerHTML = "";
-    ui.skinPreviewEl.appendChild(canvas);
+  }
+
+  function renderProfileSkinPreview() {
+    if (!ui?.profileSkinPreviewEl) return;
+    const canvas = getOrCreatePlayerPreviewCanvas(ui.profileSkinPreviewEl);
+    if (!canvas) return;
+    renderPlayerPreviewCanvas(canvas, {}, getSelectedPlayerSkinCanvas(settings));
+  }
+
+  function setProfileSkinPreset(preset) {
+    const nextPreset = isValidPlayerSkinPreset(preset) ? preset : DEFAULT_SETTINGS.playerSkinPreset;
+    settings.playerSkinPreset = nextPreset;
+    if (nextPreset !== "custom") {
+      settings.playerSkinDataUrl = "";
+      customPlayerSkinCache = { dataUrl: "", canvas: null, loading: false, failed: false };
+    } else if (!settings.playerSkinDataUrl) {
+      settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+    }
+    markWorldDirty();
+    setProfileSetupUI();
+    setSettingsUI();
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
+  }
+
+  function setProfileSetupUI() {
+    if (!ui) return;
+    const usernameValue = playerUsername || getStoredCubeCraftUsername() || "";
+    if (ui.profileNameInput && document.activeElement !== ui.profileNameInput) {
+      ui.profileNameInput.value = usernameValue;
+    }
+    if (ui.profileSkinPresetEl) {
+      ui.profileSkinPresetEl.value = settings.playerSkinPreset === "custom" && settings.playerSkinDataUrl
+        ? "custom"
+        : (isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset);
+    }
+    if (ui.profileSkinCurrentEl) {
+      ui.profileSkinCurrentEl.textContent = `Current skin: ${getSelectedPlayerSkinLabel(settings)}`;
+    }
+    renderProfileSkinPreview();
+    renderMultiplayerMenu();
+  }
+
+  function needsProfileSetup() {
+    return !normalizeCubeCraftUsername(playerUsername || getStoredCubeCraftUsername(), "");
+  }
+
+  function openProfileSetupScreen() {
+    ensureUI();
+    ui.showScreen("profile");
+    ui.setHudVisible(false);
+    setProfileSetupUI();
+    ui.profileNameInput?.focus();
+    ui.profileNameInput?.select?.();
+  }
+
+  function showHomeScreen() {
+    if (needsProfileSetup()) {
+      openProfileSetupScreen();
+      return;
+    }
+    ensureUI();
+    renderMultiplayerMenu();
+    ui.showScreen("title");
+  }
+
+  function createMultiplayerEntryMarkup(server, section = "saved") {
+    const name = String(server?.name || "Unnamed Server");
+    const subtitle = String(server?.subtitle || "");
+    const address = String(server?.address || "");
+    const playersLabel = String(server?.playersLabel || "--/--");
+    const signalLabel = String(server?.signalLabel || "OFF");
+    const lockedClass = MULTIPLAYER_ENABLED ? "" : " locked";
+    const iconLabel = section === "lan" ? "LAN" : "SRV";
+    return `
+      <div class="fc-mp-entry${lockedClass}">
+        <div class="fc-mp-icon">${iconLabel}</div>
+        <div class="fc-mp-copy">
+          <div class="fc-mp-head">${name}</div>
+          <div class="fc-mp-sub">${subtitle}</div>
+          <div class="fc-mp-sub">${address}</div>
+        </div>
+        <div class="fc-mp-meta">
+          <div>${playersLabel}</div>
+          <div class="fc-mp-signal">${signalLabel}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderMultiplayerMenu() {
+    if (!ui?.multiplayerListEl) return;
+    const storedName = playerUsername || getStoredCubeCraftUsername() || "Player";
+    const currentOrigin = globalThis.location?.origin || "file://";
+    const originSocketUrl = getWebSocketURL(currentOrigin) || DEFAULT_MULTIPLAYER_SERVER_URL;
+    multiplayerState.directConnectUrl = String(multiplayerState.directConnectUrl || DEFAULT_MULTIPLAYER_SERVER_URL);
+    if (ui.multiplayerDirectInputEl && document.activeElement !== ui.multiplayerDirectInputEl) {
+      ui.multiplayerDirectInputEl.value = multiplayerState.directConnectUrl;
+    }
+
+    const lanEntries = multiplayerState.lanServers.length > 0
+      ? multiplayerState.lanServers.map((server) => createMultiplayerEntryMarkup(server, "lan")).join("")
+      : `<div class="fc-mp-entry locked"><div class="fc-mp-icon">LAN</div><div class="fc-mp-copy"><div class="fc-mp-head">Scanning for games on your local network</div><div class="fc-mp-sub">LAN discovery will arrive in a later multiplayer pass.</div><div class="fc-mp-sub">WebRTC signaling and join codes are intentionally not exposed yet.</div></div><div class="fc-mp-meta"><div>--</div><div class="fc-mp-signal">WAIT</div></div></div>`;
+
+    const savedEntries = multiplayerState.savedServers.map((server) => createMultiplayerEntryMarkup(server, "saved")).join("");
+    ui.multiplayerListEl.innerHTML = `
+      <div class="fc-mp-section">Local player</div>
+      <div class="fc-mp-entry${MULTIPLAYER_ENABLED ? "" : " locked"}">
+        <div class="fc-mp-icon">YOU</div>
+        <div class="fc-mp-copy">
+          <div class="fc-mp-head">${storedName}</div>
+          <div class="fc-mp-sub">Profile skin: ${getSelectedPlayerSkinLabel(settings)}</div>
+          <div class="fc-mp-sub">Suggested socket origin: ${originSocketUrl}</div>
+        </div>
+        <div class="fc-mp-meta">
+          <div>LOCAL</div>
+          <div class="fc-mp-signal">READY</div>
+        </div>
+      </div>
+      <div class="fc-mp-section">Local players on network</div>
+      ${lanEntries}
+      <div class="fc-mp-section">Servers</div>
+      ${savedEntries}
+    `;
+
+    if (ui.multiplayerStatusEl) {
+      ui.multiplayerStatusEl.textContent = MULTIPLAYER_ENABLED
+        ? "Client networking is enabled. Join, direct connect, and server refresh are available."
+        : "Multiplayer is staged in the UI, but locked behind MULTIPLAYER_ENABLED for now.";
+    }
+    if (ui.multiplayerNoteEl) {
+      ui.multiplayerNoteEl.innerHTML = `Dedicated server code lives in <code>multiplayer-server/server.js</code>. Use <code>${DEFAULT_MULTIPLAYER_SERVER_URL}</code> for local development, or convert HTTPS origins to <code>wss://</code>.`;
+    }
+    for (const button of [ui.multiplayerDirectBtn, ui.multiplayerJoinBtn, ui.multiplayerAddBtn, ui.multiplayerRefreshBtn]) {
+      if (!button) continue;
+      button.disabled = !MULTIPLAYER_ENABLED;
+      button.classList.toggle("disabled", !MULTIPLAYER_ENABLED);
+    }
+  }
+
+  function completeProfileSetup() {
+    const nextName = normalizeCubeCraftUsername(ui?.profileNameInput?.value || playerUsername || "", "");
+    if (!nextName) {
+      alert("Enter a username before continuing.");
+      ui?.profileNameInput?.focus();
+      return false;
+    }
+    playerUsername = setStoredCubeCraftUsername(nextName) || nextName;
+    if (!settings.playerSkinDataUrl && settings.playerSkinPreset === "custom") {
+      settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+    }
+    showHomeScreen();
+    return true;
   }
 
   function updatePreviewCanvasLook(canvas, armorItems = null, skinOverride = null, mouse = null) {
@@ -10084,6 +11272,11 @@ export default function FreeCube2Game(engine) {
     const settingsVisible = ui.screens?.settings?.style?.display !== "none";
     if (settingsVisible && settingsCanvas) {
       updatePreviewCanvasLook(settingsCanvas, {}, getSelectedPlayerSkinCanvas(settings), mouse);
+    }
+    const profileCanvas = ui.profileSkinPreviewEl?.querySelector?.("canvas");
+    const profileVisible = ui.screens?.profile?.style?.display !== "none";
+    if (profileVisible && profileCanvas) {
+      updatePreviewCanvasLook(profileCanvas, {}, getSelectedPlayerSkinCanvas(settings), mouse);
     }
   }
 
@@ -11202,30 +12395,22 @@ export default function FreeCube2Game(engine) {
 
   function dropMobLoot(mob) {
     if (!mob || !player) return;
-
-    let itemType = BLOCK.AIR;
-    let count = 0;
-    switch (mob.type) {
-      case "sheep":
-        itemType = ITEM.RAW_MUTTON;
-        count = 1;
-        break;
-      case "chicken":
-        itemType = ITEM.RAW_CHICKEN;
-        count = 1;
-        break;
-      case "zombie":
-        itemType = ITEM.ROTTEN_FLESH;
-        count = 1;
-        break;
-      default:
-        return;
-    }
+    const table = MOB_LOOT_TABLES[mob.type];
+    if (!table?.length) return;
 
     const seed = (world?.seed || 0) + Math.floor(mob.x * 17) + Math.floor(mob.z * 29);
-    const vx = (random3(Math.floor(mob.x * 3), Math.floor(mob.y * 5), Math.floor(mob.z * 7), seed + 11) - 0.5) * 2.4;
-    const vz = (random3(Math.floor(mob.z * 3), Math.floor(mob.y * 5), Math.floor(mob.x * 7), seed + 19) - 0.5) * 2.4;
-    spawnItemEntity(itemType, count, mob.x, mob.y + Math.min(0.9, mob.height * 0.45), mob.z, vx, 3.2, vz, 0.45);
+    const dropY = mob.y + Math.min(0.9, mob.height * 0.45);
+    for (let index = 0; index < table.length; index += 1) {
+      const entry = table[index];
+      const min = Math.max(0, Math.floor(entry?.min || 0));
+      const max = Math.max(min, Math.floor(entry?.max || min));
+      const roll = random3(Math.floor(mob.x * 3) + index, Math.floor(mob.y * 5) + index * 3, Math.floor(mob.z * 7) + index * 5, seed + 101 + index * 17);
+      const count = min + Math.floor(roll * (max - min + 1));
+      if (!entry?.itemType || count <= 0) continue;
+      const vx = (random3(Math.floor(mob.x * 3) + index, Math.floor(mob.y * 5), Math.floor(mob.z * 7), seed + 11 + index * 23) - 0.5) * 2.4;
+      const vz = (random3(Math.floor(mob.z * 3) + index, Math.floor(mob.y * 5), Math.floor(mob.x * 7), seed + 19 + index * 29) - 0.5) * 2.4;
+      spawnItemEntity(entry.itemType, count, mob.x, dropY, mob.z, vx, 3.2, vz, 0.45);
+    }
   }
 
   function dropFurnaceContentsAt(x, y, z) {
@@ -11466,10 +12651,25 @@ export default function FreeCube2Game(engine) {
   }
 
   function getApproxSkyLightLevel(x, y, z, cycle = getDayCycleInfo(worldTime)) {
-    if (!hasSkyExposureAt(x, y, z)) {
+    if (!world) {
       return 0;
     }
-    return clamp(Math.round(cycle.daylight * 15), 0, 15);
+    const sky = world.getSkyLightAt(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (sky <= 0) {
+      return 0;
+    }
+    return clamp(Math.round(sky * getEffectiveDaylight(cycle, weather.type)), 0, LIGHT_LEVEL_MAX);
+  }
+
+  function getApproxBlockLightLevel(x, y, z) {
+    if (!world) {
+      return 0;
+    }
+    return clamp(world.getBlockLightAt(Math.floor(x), Math.floor(y), Math.floor(z)), 0, LIGHT_LEVEL_MAX);
+  }
+
+  function getApproxLightLevel(x, y, z, cycle = getDayCycleInfo(worldTime)) {
+    return Math.max(getApproxSkyLightLevel(x, y, z, cycle), getApproxBlockLightLevel(x, y, z));
   }
 
   function canGrassStayAt(x, y, z, cycle = getDayCycleInfo(worldTime)) {
@@ -11523,7 +12723,9 @@ export default function FreeCube2Game(engine) {
 
   function updateWorldRandomTicks(dt) {
     if (!world || !player) return;
-    worldTime = (worldTime + dt) % MINECRAFT_DAY_LENGTH_SECONDS;
+    if (gamerules.doDaylightCycle !== false) {
+      worldTime = (worldTime + dt) % MINECRAFT_DAY_LENGTH_SECONDS;
+    }
     worldTickTimer += dt;
     if (worldTickTimer < RANDOM_BLOCK_TICK_INTERVAL) {
       return;
@@ -11600,6 +12802,283 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function serializeCurrentWorldState() {
+    return {
+      time: normalizeWorldTimeSeconds(worldTime),
+      weather: {
+        type: weather.type,
+        timer: Math.max(1, weather.timer || 1)
+      },
+      gamerules: { ...gamerules },
+      worldSpawnPoint: worldSpawnPoint ? { ...worldSpawnPoint } : null
+    };
+  }
+
+  function setWorldSpawn(point, announce = false) {
+    worldSpawnPoint = normalizeSpawnPoint(point, worldSpawnPoint || (world ? world.findSpawn(0, 0) : null));
+    if (world) {
+      world.saveDirty = true;
+    }
+    if (announce && worldSpawnPoint) {
+      pushChatLine(`World spawn set to ${worldSpawnPoint.x.toFixed(1)} ${worldSpawnPoint.y.toFixed(1)} ${worldSpawnPoint.z.toFixed(1)}.`, "sys");
+    }
+  }
+
+  function setPlayerSpawnPoint(point, announce = false) {
+    if (!player) return;
+    player.spawnPoint = normalizeSpawnPoint(point, null);
+    if (world) {
+      world.saveDirty = true;
+    }
+    if (announce && player.spawnPoint) {
+      pushChatLine("Respawn point set.", "sys");
+    }
+  }
+
+  function isPlayerBedSpawnValid(spawnPoint = player?.spawnPoint) {
+    if (!world || !spawnPoint) return false;
+    if (spawnPoint.bedKey) {
+      const [x, y, z] = spawnPoint.bedKey.split("|").map(Number);
+      return world.peekBlock(x, y, z) === BLOCK.BED;
+    }
+    return true;
+  }
+
+  function clearPlayerBedSpawnIfNeeded(x, y, z, announce = false) {
+    if (!player?.spawnPoint?.bedKey) return false;
+    const key = packBlockPositionKey(x, y, z);
+    if (player.spawnPoint.bedKey !== key) return false;
+    player.spawnPoint = null;
+    if (world) {
+      world.saveDirty = true;
+    }
+    if (announce) {
+      pushChatLine("Your bed was destroyed, so your respawn point reset to world spawn.", "sys");
+    }
+    return true;
+  }
+
+  function getRespawnPoint() {
+    if (player?.spawnPoint && isPlayerBedSpawnValid(player.spawnPoint)) {
+      return { x: player.spawnPoint.x, y: player.spawnPoint.y, z: player.spawnPoint.z };
+    }
+    if (player?.spawnPoint?.bedKey && !isPlayerBedSpawnValid(player.spawnPoint)) {
+      player.spawnPoint = null;
+    }
+    if (worldSpawnPoint) {
+      return { x: worldSpawnPoint.x, y: worldSpawnPoint.y, z: worldSpawnPoint.z };
+    }
+    return world ? world.findSpawn(0, 0) : { x: 0.5, y: SEA_LEVEL + 2, z: 0.5 };
+  }
+
+  function getPlayerCurrentBiome() {
+    if (!player || !world) return "plains";
+    return world.terrain.describeColumn(Math.floor(player.x), Math.floor(player.z)).biome;
+  }
+
+  function biomeGetsRain(biome = getPlayerCurrentBiome()) {
+    return biome !== "desert" && biome !== "mountains" && biome !== "cliff";
+  }
+
+  function canSleepNow() {
+    return isNightTime(worldTime) || weather.type === WEATHER_TYPES.THUNDER;
+  }
+
+  function setWeatherState(type, durationSeconds = null, announce = false) {
+    const normalizedType = normalizeWeatherType(type);
+    weather.type = normalizedType;
+    weather.timer = Math.max(1, Number(durationSeconds) || getRandomWeatherDurationSeconds(normalizedType));
+    weather.flash = 0;
+    weather.lightningTimer = normalizedType === WEATHER_TYPES.THUNDER ? 2 + Math.random() * 6 : 0;
+    if (world) {
+      world.saveDirty = true;
+    }
+    if (announce) {
+      pushChatLine(`Weather set to ${getWeatherLabel(normalizedType)}.`, "sys");
+    }
+  }
+
+  function advanceWeatherState() {
+    const roll = Math.random();
+    if (weather.type === WEATHER_TYPES.CLEAR) {
+      setWeatherState(roll > 0.74 ? WEATHER_TYPES.THUNDER : WEATHER_TYPES.RAIN);
+      return;
+    }
+    if (weather.type === WEATHER_TYPES.RAIN) {
+      setWeatherState(roll > 0.58 ? WEATHER_TYPES.CLEAR : WEATHER_TYPES.THUNDER);
+      return;
+    }
+    setWeatherState(roll > 0.42 ? WEATHER_TYPES.CLEAR : WEATHER_TYPES.RAIN);
+  }
+
+  function updateWeather(dt) {
+    weather.flash = Math.max(0, (weather.flash || 0) - dt * 3.2);
+    if (weather.type === WEATHER_TYPES.THUNDER) {
+      weather.lightningTimer -= dt;
+      if (weather.lightningTimer <= 0) {
+        weather.flash = 1;
+        weather.lightningTimer = 2 + Math.random() * 7;
+      }
+    } else {
+      weather.lightningTimer = 0;
+    }
+
+    if (gamerules.doWeatherCycle !== false) {
+      weather.timer -= dt;
+      if (weather.timer <= 0) {
+        advanceWeatherState();
+      }
+    }
+
+    if (!ui) return;
+    const showWeather = !!world && (mode === "playing" || mode === "paused" || mode === "loading" || sleepState.active);
+    if (!showWeather) {
+      ui.weatherOverlayEl.style.opacity = "0";
+      ui.weatherOverlayEl.style.display = "none";
+      ui.lightningFlashEl.style.display = "none";
+      ui.lightningFlashEl.style.opacity = "0";
+      return;
+    }
+    const rainingHere = weather.type !== WEATHER_TYPES.CLEAR && biomeGetsRain();
+    ui.weatherOverlayEl.className = "";
+    ui.weatherOverlayEl.id = "freecube2-weather-overlay";
+    if (rainingHere) {
+      ui.weatherOverlayEl.classList.add(weather.type === WEATHER_TYPES.THUNDER ? "thunder" : "rain");
+      ui.weatherOverlayEl.style.opacity = weather.type === WEATHER_TYPES.THUNDER ? "0.6" : "0.4";
+    } else {
+      ui.weatherOverlayEl.style.opacity = "0";
+      ui.weatherOverlayEl.style.display = "none";
+    }
+    if (rainingHere) {
+      ui.weatherOverlayEl.style.display = "block";
+    }
+    ui.lightningFlashEl.style.display = weather.flash > 0.01 ? "block" : "none";
+    ui.lightningFlashEl.style.opacity = weather.flash > 0.01 ? String(clamp(weather.flash * 0.55, 0, 0.55)) : "0";
+  }
+
+  function hasNearbySleepThreat() {
+    if (!player) return false;
+    for (const mob of mobs) {
+      if (!mob || mob.health <= 0 || !getMobDef(mob.type).hostile) continue;
+      const dx = mob.x - player.x;
+      const dz = mob.z - player.z;
+      if (dx * dx + dz * dz <= 12 * 12) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function setSleepOverlay(visible, progress = 0, text = "Stay in bed a few seconds to skip the night.") {
+    ensureUI();
+    ui.sleepOverlayEl.style.display = visible ? "flex" : "none";
+    ui.sleepProgressEl.style.width = `${Math.floor(clamp(progress, 0, 1) * 100)}%`;
+    ui.sleepCopyEl.textContent = text;
+  }
+
+  function stopSleeping(restorePointerLock = true) {
+    sleepState.active = false;
+    sleepState.timer = 0;
+    sleepState.bedKey = "";
+    sleepState.bedPosition = null;
+    setSleepOverlay(false);
+    if (restorePointerLock && mode === "playing" && !inventoryOpen && !chatOpen) {
+      input.pointerLockEnabled = true;
+      input.requestPointerLock();
+    }
+  }
+
+  function finishSleeping() {
+    worldTime = getWorldTimePreset("day") || 0;
+    setWeatherState(WEATHER_TYPES.CLEAR, getRandomWeatherDurationSeconds(WEATHER_TYPES.CLEAR));
+    if (sleepState.bedPosition && player) {
+      player.setPosition(
+        sleepState.bedPosition.x + 0.5,
+        sleepState.bedPosition.y + 1.001,
+        sleepState.bedPosition.z + 0.5
+      );
+      player.ensureSafePosition(world);
+    }
+    stopSleeping(true);
+    pushChatLine("You slept through the night.", "sys");
+    if (world) {
+      world.saveDirty = true;
+    }
+  }
+
+  function updateSleeping(dt) {
+    if (!sleepState.active) {
+      return false;
+    }
+    if (sleepState.bedPosition && world?.peekBlock(sleepState.bedPosition.x, sleepState.bedPosition.y, sleepState.bedPosition.z) !== BLOCK.BED) {
+      stopSleeping(true);
+      pushChatLine("Your sleep was interrupted.", "err");
+      return false;
+    }
+    sleepState.timer += dt;
+    setSleepOverlay(true, sleepState.timer / sleepState.duration);
+    if (sleepState.timer >= sleepState.duration) {
+      finishSleeping();
+    }
+    return true;
+  }
+
+  function tryUseBed(target) {
+    if (!target || target.type !== BLOCK.BED || !player) {
+      return false;
+    }
+
+    setPlayerSpawnPoint({
+      x: target.x + 0.5,
+      y: target.y + 1.001,
+      z: target.z + 0.5,
+      bedKey: packBlockPositionKey(target.x, target.y, target.z),
+      source: "bed"
+    }, true);
+
+    if (!canSleepNow()) {
+      pushChatLine("You can only sleep at night or during a thunderstorm.", "err");
+      return true;
+    }
+    if (hasNearbySleepThreat()) {
+      pushChatLine("You may not rest now, there are monsters nearby.", "err");
+      return true;
+    }
+
+    sleepState.active = true;
+    sleepState.timer = 0;
+    sleepState.bedKey = packBlockPositionKey(target.x, target.y, target.z);
+    sleepState.bedPosition = { x: target.x, y: target.y, z: target.z };
+    player.setPosition(target.x + 0.5, target.y + 1.001, target.z + 0.5);
+    player.vx = 0;
+    player.vy = 0;
+    player.vz = 0;
+    input.resetState?.(true);
+    input.pointerLockEnabled = false;
+    if (document.exitPointerLock) {
+      document.exitPointerLock();
+    }
+    closeChat(false);
+    if (inventoryOpen) {
+      setInventoryOpen(false);
+    }
+    setSleepOverlay(true, 0);
+    pushChatLine("Sleeping...", "sys");
+    return true;
+  }
+
+  function isHostileSpawnWindow(cycle = getDayCycleInfo(worldTime)) {
+    return cycle.isNight || getEffectiveDaylight(cycle, weather.type) <= 0.4 || weather.type === WEATHER_TYPES.THUNDER;
+  }
+
+  function isWetWeatherAt(x, z) {
+    if (!world || weather.type === WEATHER_TYPES.CLEAR) {
+      return false;
+    }
+    const biome = world.terrain.describeColumn(Math.floor(x), Math.floor(z)).biome;
+    return biomeGetsRain(biome);
+  }
+
   function isSpawnDistanceValid(x, z) {
     if (!player) return false;
     const dx = x - player.x;
@@ -11639,7 +13118,7 @@ export default function FreeCube2Game(engine) {
     }
     const groundY = Math.floor(y) - 1;
     const groundBlock = world.peekBlock(Math.floor(x), groundY, Math.floor(z));
-    const light = getApproxSkyLightLevel(x, y, z, cycle);
+    const light = getApproxLightLevel(x, y, z, cycle);
     const hostile = !!getMobDef(type).hostile;
     const requireGrass = !hostile && type !== "villager";
     if (!isValidSpawnGround(groundBlock, requireGrass)) {
@@ -11697,8 +13176,9 @@ export default function FreeCube2Game(engine) {
     if (inRange.length <= limit) return;
 
     const remove = [];
+    const hostileWindow = isHostileSpawnWindow(cycle);
     const hostilesInDay = inRange
-      .filter((entry) => getMobDef(entry.mob.type).hostile && !cycle.isNight)
+      .filter((entry) => getMobDef(entry.mob.type).hostile && !hostileWindow)
       .sort((a, b) => b.dist2 - a.dist2);
     const loosePassives = inRange
       .filter((entry) => entry.mob.type !== "villager" && !getMobDef(entry.mob.type).hostile)
@@ -11794,6 +13274,7 @@ export default function FreeCube2Game(engine) {
     if (spawnTimer > 0) return;
 
     const cycle = getDayCycleInfo(worldTime);
+    const hostileWindow = isHostileSpawnWindow(cycle);
     const capRadius = getMobCapRadius();
     const capRadius2 = capRadius * capRadius;
     pruneMobPopulation(MAX_ACTIVE_MOBS, capRadius);
@@ -11814,11 +13295,11 @@ export default function FreeCube2Game(engine) {
     }
 
     if (nearbyTotal >= MAX_ACTIVE_MOBS) {
-      spawnTimer = cycle.isNight ? 1.4 : 2.2;
+      spawnTimer = hostileWindow ? 1.4 : 2.2;
       return;
     }
 
-    if (cycle.isNight) {
+    if (hostileWindow) {
       spawnTimer = 2.1;
       if (hostiles < 7) {
         const hostileType =
@@ -11903,13 +13384,396 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function setRuntimeErrorOverlay(visible, title = "Graphics Error", message = "", detail = "") {
+    ensureUI();
+    ui.errorOverlayEl.style.display = visible ? "flex" : "none";
+    ui.errorTitleEl.textContent = title;
+    ui.errorMessageEl.textContent = message || "The renderer stopped responding.";
+    ui.errorDetailEl.textContent = detail || "";
+    if (visible) {
+      ui.root.classList.add("menu-open");
+    } else if (!inventoryOpen && !ui.menuEl.classList.contains("show") && ui.autoRepairCenterEl.style.display !== "flex") {
+      ui.root.classList.remove("menu-open");
+    }
+  }
+
+  function setAutoRepairUi(visible, detail = "", banner = "Auto Repair") {
+    ensureUI();
+    ui.autoRepairBannerEl.style.display = visible ? "flex" : "none";
+    ui.autoRepairCenterEl.style.display = visible ? "flex" : "none";
+    ui.autoRepairBannerCopyEl.textContent = banner || "Auto Repair";
+    ui.autoRepairDetailEl.textContent = detail || "Diagnosing the problem.";
+    if (visible) {
+      ui.root.classList.add("menu-open");
+    } else if (!inventoryOpen && !ui.menuEl.classList.contains("show") && ui.errorOverlayEl.style.display !== "flex") {
+      ui.root.classList.remove("menu-open");
+    }
+  }
+
+  function resetRuntimeInteractionState() {
+    input?.resetState?.(true);
+    if (input) {
+      input.pointerLockEnabled = false;
+    }
+    if (document.exitPointerLock) {
+      document.exitPointerLock();
+    }
+    currentTarget = null;
+    currentEntityTarget = null;
+    mining.key = null;
+    mining.progress = 0;
+    setMiningProgress(0);
+  }
+
+  function normalizeRuntimeFaultText(value, fallback = "") {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (value && typeof value.message === "string" && value.message.trim()) {
+      return value.message.trim();
+    }
+    return fallback;
+  }
+
+  function normalizeRuntimeFaultDetail(value, fallback = "") {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (value?.stack) {
+      return String(value.stack).split("\n").slice(0, 4).join(" | ");
+    }
+    return fallback;
+  }
+
+  function shouldIgnoreRuntimeFault(message = "", filename = "") {
+    if (!message) {
+      return true;
+    }
+    if (/ResizeObserver loop/i.test(message) || /Script error/i.test(message)) {
+      return true;
+    }
+    if (!filename) {
+      return false;
+    }
+    if (filename.startsWith(window.location.origin) || filename.startsWith("/") || /freecube2|sirco/i.test(filename)) {
+      return false;
+    }
+    return true;
+  }
+
+  function reportRuntimeFault(kind, title, message, detail = "", options = {}) {
+    const nextMessage = normalizeRuntimeFaultText(message, "The game hit an unexpected problem.");
+    const nextDetail = normalizeRuntimeFaultDetail(detail, "");
+    const now = performance.now();
+    const sameFault = runtimeFault?.active && runtimeFault.kind === kind && runtimeFault.message === nextMessage;
+    if (sameFault) {
+      runtimeFault.detail = nextDetail || runtimeFault.detail;
+      runtimeFault.waitingForRestore = !!options.waitingForRestore;
+      return runtimeFault;
+    }
+    runtimeFault = {
+      active: true,
+      kind,
+      title: normalizeRuntimeFaultText(title, "Game Error"),
+      message: nextMessage,
+      detail: nextDetail,
+      detectedAt: now,
+      attempts: 0,
+      waitingForRestore: !!options.waitingForRestore
+    };
+    runtimeRepairPromise = null;
+    resetRuntimeInteractionState();
+    setRuntimeErrorOverlay(false);
+    setAutoRepairUi(false);
+    console.error(`[AutoRepair] ${kind}: ${nextMessage}`, nextDetail || "");
+    return runtimeFault;
+  }
+
+  async function performAutoRepair() {
+    if (!runtimeFault?.active) {
+      return true;
+    }
+
+    setRuntimeErrorOverlay(false);
+    setAutoRepairUi(true, "Resetting controls and UI...");
+    resetRuntimeInteractionState();
+    closeChat(false);
+    if (inventoryOpen) {
+      ui.inventoryEl.style.display = "none";
+      inventoryOpen = false;
+    }
+    inventoryContext = "inventory";
+    activeFurnaceKey = null;
+    inventoryCursor.type = BLOCK.AIR;
+    inventoryCursor.count = 0;
+    resetInventoryDragState();
+    updateInventoryCursorVisual();
+    renderEntities.length = 0;
+    targetScanTimer = 0;
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    if (useWebGL) {
+      if (!engine.gl || engine.gl.isContextLost?.()) {
+        throw new Error("WebGL context is still unavailable.");
+      }
+      gl = engine.gl;
+      engine.ctx2d = null;
+      if (!atlas) {
+        atlas = new TextureArrayAtlas(gl, textures);
+      }
+      atlas.settings = settings;
+      setAutoRepairUi(true, "Rebuilding GPU textures and chunk meshes...");
+      await atlas.build();
+      if (world && player) {
+        ensureActiveRenderer();
+        invalidateAllChunkMeshes();
+      }
+      webglContextLost = false;
+      webglContextRestored = false;
+    } else if (world && player) {
+      setAutoRepairUi(true, "Refreshing renderer state...");
+      ensureActiveRenderer();
+    }
+
+    if (world && player) {
+      setHotbarImages();
+      updateHud(0);
+    }
+    setSettingsUI();
+    renderChatLines();
+    setAutoRepairUi(false);
+    runtimeFault = null;
+
+    if (mode === "playing" && !inventoryOpen && !chatOpen && !document.hidden) {
+      input.pointerLockEnabled = true;
+      input.requestPointerLock();
+    }
+    return true;
+  }
+
+  function beginAutoRepair(force = false) {
+    if (!runtimeFault?.active || runtimeRepairPromise) {
+      return runtimeRepairPromise;
+    }
+    if (!force && runtimeFault.waitingForRestore && webglContextLost && !webglContextRestored) {
+      setAutoRepairUi(true, "Waiting for the browser to restore WebGL...");
+      return null;
+    }
+
+    runtimeFault.attempts += 1;
+    runtimeFault.waitingForRestore = false;
+    runtimeRepairPromise = performAutoRepair()
+      .catch((error) => {
+        const repairDetail = normalizeRuntimeFaultDetail(error, runtimeFault?.detail || "");
+        console.error("[AutoRepair] Repair failed:", error);
+        setAutoRepairUi(false);
+        setRuntimeErrorOverlay(
+          true,
+          runtimeFault?.title || "Auto Repair Failed",
+          runtimeFault?.message || "FreeCube2 hit a problem it could not repair automatically.",
+          repairDetail || "Reload the game to rebuild the renderer and world state."
+        );
+      })
+      .finally(() => {
+        runtimeRepairPromise = null;
+      });
+    return runtimeRepairPromise;
+  }
+
+  function updateRuntimeFaultState() {
+    if (!runtimeFault?.active) {
+      return false;
+    }
+
+    const now = performance.now();
+    if (now - runtimeFault.detectedAt < AUTO_REPAIR_DELAY_MS) {
+      return true;
+    }
+
+    if (runtimeFault.waitingForRestore && webglContextLost && !webglContextRestored) {
+      setAutoRepairUi(true, "Waiting for the browser to restore WebGL...");
+      return true;
+    }
+
+    setAutoRepairUi(true, runtimeRepairPromise ? "Rebuilding systems..." : "Diagnosing the problem...");
+    if (!runtimeRepairPromise) {
+      beginAutoRepair();
+    }
+    return true;
+  }
+
+  function handleWebGLContextLost(event = null) {
+    if (event?.preventDefault) {
+      event.preventDefault();
+    }
+    if (webglContextLost) {
+      return;
+    }
+    webglContextLost = true;
+    webglContextRestored = false;
+    reportRuntimeFault(
+      "webgl-context-lost",
+      "WebGL Context Lost",
+      "The renderer stopped responding, so FreeCube2 paused graphics before the browser's default context-loss screen could take over.",
+      "Auto Repair will try to recover the renderer as soon as the browser restores WebGL.",
+      { waitingForRestore: true }
+    );
+  }
+
+  function handleWebGLContextRestored() {
+    webglContextRestored = true;
+    console.warn("WebGL context restored. Starting FreeCube2 auto repair.");
+    if (runtimeFault?.active && runtimeFault.kind === "webgl-context-lost") {
+      runtimeFault.waitingForRestore = false;
+      runtimeFault.detectedAt = Math.min(runtimeFault.detectedAt, performance.now() - AUTO_REPAIR_DELAY_MS);
+      beginAutoRepair(true);
+      return;
+    }
+    reportRuntimeFault(
+      "webgl-context-restored",
+      "Graphics Repair",
+      "The browser restored WebGL and FreeCube2 is rebuilding the renderer.",
+      "Auto Repair is refreshing textures, meshes, and shaders now."
+    );
+    beginAutoRepair(true);
+  }
+
+  function handleWindowRuntimeError(event) {
+    const message = normalizeRuntimeFaultText(event?.error, normalizeRuntimeFaultText(event?.message, ""));
+    const filename = typeof event?.filename === "string" ? event.filename : "";
+    if (shouldIgnoreRuntimeFault(message, filename)) {
+      return;
+    }
+    const detail = normalizeRuntimeFaultDetail(event?.error, filename ? `${filename}:${event?.lineno || 0}` : "");
+    reportRuntimeFault(
+      "runtime-error",
+      "Runtime Error",
+      message,
+      detail
+    );
+    event?.preventDefault?.();
+  }
+
+  function handleWindowRuntimeRejection(event) {
+    const reason = event?.reason;
+    const message = normalizeRuntimeFaultText(reason, "Unhandled promise rejection");
+    if (shouldIgnoreRuntimeFault(message, "")) {
+      return;
+    }
+    const detail = normalizeRuntimeFaultDetail(reason, "");
+    reportRuntimeFault(
+      "runtime-rejection",
+      "Runtime Error",
+      message,
+      detail
+    );
+    event?.preventDefault?.();
+  }
+
+  function parseCommandBoolean(value) {
+    const lower = String(value || "").trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(lower)) return true;
+    if (["false", "0", "no", "off"].includes(lower)) return false;
+    return null;
+  }
+
+  function parseCommandTicks(value, fallbackSeconds = null) {
+    if (!Number.isFinite(Number(value))) {
+      return fallbackSeconds;
+    }
+    return Math.max(1, getTimeSecondsFromMinecraftTicks(Number(value)));
+  }
+
+  function parseCommandCoordinate(value, base) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    if (raw === "~") return Number(base);
+    if (raw.startsWith("~")) {
+      const offset = raw.slice(1);
+      if (!offset) return Number(base);
+      const parsedOffset = Number(offset);
+      return Number.isFinite(parsedOffset) ? Number(base) + parsedOffset : null;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function parseCommandPositionArgs(args, fallbackPosition = null) {
+    const base = fallbackPosition || player || { x: 0, y: 0, z: 0 };
+    if (!Array.isArray(args) || args.length < 3) {
+      return null;
+    }
+    const x = parseCommandCoordinate(args[0], base.x);
+    const y = parseCommandCoordinate(args[1], base.y);
+    const z = parseCommandCoordinate(args[2], base.z);
+    if (![x, y, z].every(Number.isFinite)) {
+      return null;
+    }
+    return {
+      x,
+      y: clamp(y, 1, WORLD_HEIGHT - 2),
+      z
+    };
+  }
+
+  function resolveBlockTypeByName(name) {
+    const key = normalizeItemName(name);
+    if (!key) return null;
+    if (key === "air") {
+      return BLOCK.AIR;
+    }
+    const itemType = resolveItemTypeByName(name);
+    if (BLOCK_INFO[itemType]) {
+      return itemType;
+    }
+    const placedBlock = getPlacedBlockType(itemType);
+    if (placedBlock && placedBlock !== BLOCK.AIR) {
+      return placedBlock;
+    }
+    return null;
+  }
+
+  function setWorldBlockWithChecks(x, y, z, blockType, announceBedReset = false) {
+    if (!world || y <= 0 || y >= WORLD_HEIGHT) {
+      return false;
+    }
+    const previous = world.peekBlock(x, y, z);
+    if (previous === BLOCK.BED && blockType !== BLOCK.BED) {
+      clearPlayerBedSpawnIfNeeded(x, y, z, announceBedReset);
+    }
+    return world.setBlock(x, y, z, blockType);
+  }
+
+  function handleKillCommand(selector = "@p") {
+    const target = String(selector || "@p").toLowerCase();
+    if (target === "@p" || target === "@a" || target === "player") {
+      player.health = 0;
+      respawnPlayer();
+      return "Player respawned.";
+    }
+    if (target === "@e") {
+      const removed = mobs.length + items.length;
+      mobs = [];
+      items = [];
+      renderEntities.length = 0;
+      if (glRenderer) {
+        glRenderer.entities = renderEntities;
+      }
+      world.saveDirty = true;
+      return `Removed ${removed} entities.`;
+    }
+    return "";
+  }
+
   function runCommand(line) {
     const parts = line.trim().split(/\s+/).filter(Boolean);
     const cmd = (parts.shift() || "").toLowerCase();
     const args = parts;
 
     if (!cmd || cmd === "help") {
-      pushChatLine("Commands: /help, /give <item> [count], /gm <survival|creative>, /tp x y z, /rd <2-6>, /summon <mob> [count], /boss <name> <0-1>, /boss off, /sysinfo, /clear", "sys");
+      pushChatLine("Commands: /help, /give, /gm, /tp, /time, /weather, /gamerule, /setblock, /fill, /kill, /spawnpoint, /setworldspawn, /locate, /summon, /rd, /sysinfo, /clear", "sys");
+      pushChatLine("Examples: /time set night, /weather thunder 6000, /setblock ~ ~-1 ~ bed, /fill ~-2 ~ ~-2 ~2 ~ ~2 glass", "sys");
       return;
     }
 
@@ -11958,17 +13822,173 @@ export default function FreeCube2Game(engine) {
     }
 
     if (cmd === "tp" || cmd === "teleport") {
-      const x = Number(args[0]);
-      const y = Number(args[1]);
-      const z = Number(args[2]);
-      if (![x, y, z].every(Number.isFinite)) {
+      const pos = parseCommandPositionArgs(args, player);
+      if (!pos) {
         pushChatLine("Usage: /tp x y z", "err");
         return;
       }
-      player.setPosition(x, clamp(y, 1, WORLD_HEIGHT - 2), z);
+      player.setPosition(pos.x, pos.y, pos.z);
       player.ensureSafePosition(world);
       world.saveDirty = true;
-      pushChatLine(`Teleported to ${x.toFixed(1)} ${y.toFixed(1)} ${z.toFixed(1)}`, "sys");
+      pushChatLine(`Teleported to ${pos.x.toFixed(1)} ${pos.y.toFixed(1)} ${pos.z.toFixed(1)}`, "sys");
+      return;
+    }
+
+    if (cmd === "time") {
+      const sub = (args[0] || "").toLowerCase();
+      if (sub === "set") {
+        const preset = getWorldTimePreset(args[1]);
+        if (preset !== null) {
+          worldTime = preset;
+        } else if (Number.isFinite(Number(args[1]))) {
+          worldTime = normalizeWorldTimeSeconds(getTimeSecondsFromMinecraftTicks(Number(args[1])));
+        } else {
+          pushChatLine("Usage: /time set <day|noon|night|midnight|ticks>", "err");
+          return;
+        }
+        world.saveDirty = true;
+        pushChatLine(`Time set to ${getDayCycleInfo(worldTime).phase}.`, "sys");
+        return;
+      }
+      if (sub === "add") {
+        if (!Number.isFinite(Number(args[1]))) {
+          pushChatLine("Usage: /time add <ticks>", "err");
+          return;
+        }
+        worldTime = normalizeWorldTimeSeconds(worldTime + getTimeSecondsFromMinecraftTicks(Number(args[1])));
+        world.saveDirty = true;
+        pushChatLine(`Time advanced. It is now ${getDayCycleInfo(worldTime).phase}.`, "sys");
+        return;
+      }
+      pushChatLine("Usage: /time <set|add> ...", "err");
+      return;
+    }
+
+    if (cmd === "weather") {
+      const type = normalizeWeatherType(args[0], "");
+      if (!type) {
+        pushChatLine("Usage: /weather <clear|rain|thunder> [durationTicks]", "err");
+        return;
+      }
+      const durationSeconds = parseCommandTicks(args[1], null);
+      setWeatherState(type, durationSeconds, true);
+      return;
+    }
+
+    if (cmd === "gamerule") {
+      const ruleName = String(args[0] || "");
+      const parsedValue = parseCommandBoolean(args[1]);
+      if (!(ruleName in DEFAULT_GAMERULES) || parsedValue === null) {
+        pushChatLine("Usage: /gamerule <doDaylightCycle|doWeatherCycle|keepInventory> <true|false>", "err");
+        return;
+      }
+      gamerules[ruleName] = parsedValue;
+      world.saveDirty = true;
+      pushChatLine(`Gamerule ${ruleName} = ${parsedValue}.`, "sys");
+      return;
+    }
+
+    if (cmd === "spawnpoint") {
+      const position = parseCommandPositionArgs(args, player);
+      const point = position
+        ? { ...position, source: "command" }
+        : { x: player.x, y: player.y, z: player.z, source: "command" };
+      setPlayerSpawnPoint(point, true);
+      return;
+    }
+
+    if (cmd === "setworldspawn") {
+      const position = parseCommandPositionArgs(args, player);
+      const point = position
+        ? { ...position, source: "world" }
+        : { x: player.x, y: player.y, z: player.z, source: "world" };
+      setWorldSpawn(point, true);
+      return;
+    }
+
+    if (cmd === "setblock") {
+      const position = parseCommandPositionArgs(args.slice(0, 3), player);
+      const blockType = resolveBlockTypeByName(args[3]);
+      const blockName = blockType === BLOCK.AIR ? "Air" : getItemName(blockType);
+      if (!position || blockType === null) {
+        pushChatLine("Usage: /setblock x y z <block>", "err");
+        return;
+      }
+      if (blockType === BLOCK.BED && !isCollidable(world.peekBlock(position.x, position.y - 1, position.z))) {
+        pushChatLine("Beds need a solid block underneath.", "err");
+        return;
+      }
+      if (!setWorldBlockWithChecks(position.x, position.y, position.z, blockType, true)) {
+        pushChatLine("That block could not be changed.", "err");
+        return;
+      }
+      pushChatLine(`Set block at ${Math.floor(position.x)} ${Math.floor(position.y)} ${Math.floor(position.z)} to ${blockName}.`, "sys");
+      return;
+    }
+
+    if (cmd === "fill") {
+      const from = parseCommandPositionArgs(args.slice(0, 3), player);
+      const to = parseCommandPositionArgs(args.slice(3, 6), player);
+      const blockType = resolveBlockTypeByName(args[6]);
+      const blockName = blockType === BLOCK.AIR ? "Air" : getItemName(blockType);
+      if (!from || !to || blockType === null) {
+        pushChatLine("Usage: /fill x1 y1 z1 x2 y2 z2 <block>", "err");
+        return;
+      }
+      const minX = Math.floor(Math.min(from.x, to.x));
+      const maxX = Math.floor(Math.max(from.x, to.x));
+      const minY = Math.floor(Math.min(from.y, to.y));
+      const maxY = Math.floor(Math.max(from.y, to.y));
+      const minZ = Math.floor(Math.min(from.z, to.z));
+      const maxZ = Math.floor(Math.max(from.z, to.z));
+      const total = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+      if (total > 4096) {
+        pushChatLine("Fill is limited to 4096 blocks at a time.", "err");
+        return;
+      }
+      let changed = 0;
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let z = minZ; z <= maxZ; z += 1) {
+          for (let x = minX; x <= maxX; x += 1) {
+            if (blockType === BLOCK.BED && !isCollidable(world.peekBlock(x, y - 1, z))) {
+              continue;
+            }
+            if (setWorldBlockWithChecks(x, y, z, blockType, false)) {
+              changed += 1;
+            }
+          }
+        }
+      }
+      if (changed <= 0) {
+        pushChatLine("Fill did not change any blocks.", "err");
+        return;
+      }
+      pushChatLine(`Filled ${changed} block${changed === 1 ? "" : "s"} with ${blockName}.`, "sys");
+      return;
+    }
+
+    if (cmd === "locate") {
+      const sub = String(args[0] || "").toLowerCase();
+      if (sub !== "village") {
+        pushChatLine("Usage: /locate village", "err");
+        return;
+      }
+      const center = getNearestVillageCenter(player.x, player.z, world.seed, 256);
+      if (!center) {
+        pushChatLine("No village found nearby.", "err");
+        return;
+      }
+      pushChatLine(`Nearest village: ${Math.floor(center.x)} ${Math.floor(center.z)}`, "sys");
+      return;
+    }
+
+    if (cmd === "kill") {
+      const result = handleKillCommand(args[0] || "@p");
+      if (!result) {
+        pushChatLine("Usage: /kill [@p|@e]", "err");
+        return;
+      }
+      pushChatLine(result, "sys");
       return;
     }
 
@@ -11995,6 +14015,7 @@ export default function FreeCube2Game(engine) {
         renderer: useWebGL ? "WebGL2" : "Canvas",
         seed: world?.seed,
         time: worldTime.toFixed(1),
+        weather: weather.type,
         mobs: mobs.length,
         items: items.length,
         chunks: world?.chunks?.size,
@@ -12002,7 +14023,7 @@ export default function FreeCube2Game(engine) {
       };
       console.log("SYSINFO", info);
       logMobRenderDiagnostics("sysinfo");
-      pushChatLine(`SYSINFO: ${info.renderer}, mobs=${info.mobs}, items=${info.items}, chunks=${info.chunks}, furnaces=${info.furnaces}`, "sys");
+      pushChatLine(`SYSINFO: ${info.renderer}, weather=${info.weather}, mobs=${info.mobs}, items=${info.items}, chunks=${info.chunks}`, "sys");
       return;
     }
 
@@ -12069,9 +14090,27 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function clearPlayerInventory() {
+    if (!player) return;
+    player.initializeInventory();
+    inventoryCursor.type = BLOCK.AIR;
+    inventoryCursor.count = 0;
+    inventoryCraftTypes.fill(0);
+    inventoryCraftCounts.fill(0);
+    tableCraftTypes.fill(0);
+    tableCraftCounts.fill(0);
+    setHotbarImages();
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
+  }
+
   function respawnPlayer() {
-    const spawn = world.findSpawn(0, 0);
+    const spawn = getRespawnPoint();
     player.setPosition(spawn.x, spawn.y, spawn.z);
+    if (gamerules.keepInventory === false) {
+      clearPlayerInventory();
+    }
     player.health = player.maxHealth;
     player.hunger = player.maxHunger;
     player.hurtCooldown = 0;
@@ -12205,13 +14244,32 @@ export default function FreeCube2Game(engine) {
       return;
     }
 
-    ui.setHudVisible(mode === "playing" && !inventoryOpen);
+    ui.setHudVisible(mode === "playing" && !inventoryOpen && !sleepState.active);
     const cycle = getDayCycleInfo(worldTime);
-    ui.timeChipEl.style.display = mode === "playing" ? "block" : "none";
-    ui.timeChipEl.textContent = `${cycle.phase}${cycle.isNight ? " - Hostiles Active" : ""}`;
-    ui.timeChipEl.style.background = cycle.isNight ? "rgba(14,22,42,0.72)" : cycle.phase === "Sunset" ? "rgba(66,38,18,0.68)" : "rgba(0,0,0,0.32)";
-    ui.timeTintEl.style.background = cycle.isNight ? "rgba(18,32,74,1)" : cycle.phase === "Sunset" ? "rgba(94,54,24,1)" : "rgba(18,32,74,1)";
-    ui.timeTintEl.style.opacity = mode === "playing" ? String(cycle.darkness * 0.34) : "0";
+    const effectiveDaylight = getEffectiveDaylight(cycle, weather.type);
+    const effectiveDarkness = 1 - effectiveDaylight;
+    const weatherLabel = getWeatherLabel(weather.type);
+    ui.timeChipEl.style.display = mode === "playing" && !sleepState.active ? "block" : "none";
+    ui.timeChipEl.textContent = `${cycle.phase} - ${weatherLabel}${isHostileSpawnWindow(cycle) ? " - Hostiles Active" : ""}`;
+    ui.timeChipEl.style.background = weather.type === WEATHER_TYPES.THUNDER
+      ? "rgba(18,20,34,0.82)"
+      : weather.type === WEATHER_TYPES.RAIN
+        ? "rgba(24,42,62,0.76)"
+        : cycle.isNight
+          ? "rgba(14,22,42,0.72)"
+          : cycle.phase === "Sunset"
+            ? "rgba(66,38,18,0.68)"
+            : "rgba(0,0,0,0.32)";
+    ui.timeTintEl.style.background = weather.type === WEATHER_TYPES.THUNDER
+      ? "rgba(16,20,36,1)"
+      : weather.type === WEATHER_TYPES.RAIN
+        ? "rgba(24,44,76,1)"
+        : cycle.isNight
+          ? "rgba(18,32,74,1)"
+          : cycle.phase === "Sunset"
+            ? "rgba(94,54,24,1)"
+            : "rgba(18,32,74,1)";
+    ui.timeTintEl.style.opacity = mode === "playing" ? String(clamp(effectiveDarkness * 0.34 + getWeatherSkyDarkness(weather.type) * 0.42, 0, 0.42)) : "0";
 
     hud.timer += dt;
     if (hud.timer < 0.1) {
@@ -12228,7 +14286,7 @@ export default function FreeCube2Game(engine) {
     hud.timer = 0;
 
     if (!player) return;
-    const snap = `${player.getArmorPoints()}|${player.health}|${player.hunger}|${player.xpLevel}|${player.xp}|${settings.gameMode}|${mode}|${boss.active}|${boss.health}|${boss.name}`;
+    const snap = `${player.getArmorPoints()}|${player.health}|${player.hunger}|${player.xpLevel}|${player.xp}|${settings.gameMode}|${mode}|${weather.type}|${Math.round(effectiveDaylight * 100)}|${boss.active}|${boss.health}|${boss.name}|${sleepState.active}`;
     if (hud.last === snap) return;
     hud.last = snap;
 
@@ -12424,6 +14482,7 @@ export default function FreeCube2Game(engine) {
     ui.videoFovBtn.textContent = `FOV: ${settings.fovDegrees}`;
     ui.videoMouseBtn.textContent = `Mouse Sensitivity: ${formatMouseSensitivityLabel(settings.mouseSensitivity)}`;
     ui.videoViewBobBtn.textContent = `View Bobbing: ${settings.viewBobbing !== false ? "ON" : "OFF"}`;
+    ui.videoShadowsBtn.textContent = `Shadows: ${settings.shadows !== false ? "ON" : "OFF"}`;
     ui.videoFpsBtn.textContent = `Show FPS: ${settings.showFps !== false ? "ON" : "OFF"}`;
     ui.videoMasterVolumeBtn.textContent = `Master Volume: ${formatVolumeLabel(settings.masterVolume)}`;
     ui.videoMusicVolumeBtn.textContent = `Music Volume: ${formatVolumeLabel(settings.musicVolume)}`;
@@ -12435,7 +14494,21 @@ export default function FreeCube2Game(engine) {
     ui.videoGameModeBtn.textContent = `Game Mode: ${settings.gameMode === GAME_MODE.CREATIVE ? "Creative" : "Survival"}`;
     ui.resourcePackCurrentEl.textContent = `Current: ${getResourcePackMeta(settings.texturePack, settings).name}`;
     ui.skinCurrentEl.textContent = `Current: ${getSelectedPlayerSkinLabel(settings)}`;
-    renderSettingsSkinPreview();
+    if (ui.profileSkinPresetEl) {
+      ui.profileSkinPresetEl.value = settings.playerSkinPreset === "custom" && settings.playerSkinDataUrl
+        ? "custom"
+        : (isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset);
+    }
+    if (ui.profileSkinCurrentEl) {
+      ui.profileSkinCurrentEl.textContent = `Current skin: ${getSelectedPlayerSkinLabel(settings)}`;
+    }
+    if (ui.screens?.settings?.style?.display !== "none") {
+      renderSettingsSkinPreview();
+    }
+    if (ui.screens?.profile?.style?.display !== "none") {
+      renderProfileSkinPreview();
+    }
+    renderMultiplayerMenu();
     ui.fpsEl.style.display = settings.showFps === false ? "none" : "block";
   }
 
@@ -12487,6 +14560,15 @@ export default function FreeCube2Game(engine) {
     if (world) {
       world.saveDirty = true;
     }
+  }
+
+  function applyLightingSetting() {
+    if (glRenderer) {
+      invalidateAllChunkMeshes();
+    } else if (canvasRenderer) {
+      canvasRenderer.setSettings(settings);
+    }
+    markWorldDirty();
   }
 
   function invalidateAllChunkMeshes() {
@@ -12543,7 +14625,8 @@ export default function FreeCube2Game(engine) {
       fluidStates: serializeFluidStates(world.fluidStates),
       furnaces: serializeFurnaceStates(furnaceStates),
       player: player.serialize(),
-      settings
+      settings,
+      worldState: serializeCurrentWorldState()
     };
     store.saveWorld(activeWorldId, payload);
     world.saveDirty = false;
@@ -12874,6 +14957,17 @@ export default function FreeCube2Game(engine) {
     world.fluidStates = deserializeFluidStates(save?.fluidStates || {});
     world.loadedFromStorage = !!save;
     furnaceStates = deserializeFurnaceStates(save?.furnaces || {});
+    const defaultSpawn = world.findSpawn(0, 0);
+    const savedWorldState = normalizeSavedWorldState(save?.worldState, {
+      x: defaultSpawn.x,
+      y: defaultSpawn.y,
+      z: defaultSpawn.z,
+      source: "world"
+    });
+    worldTime = savedWorldState.time;
+    weather = savedWorldState.weather;
+    gamerules = savedWorldState.gamerules;
+    worldSpawnPoint = savedWorldState.worldSpawnPoint || { x: defaultSpawn.x, y: defaultSpawn.y, z: defaultSpawn.z, source: "world" };
     settings = { ...DEFAULT_SETTINGS, ...settings, ...(save?.settings || {}) };
     settings.renderDistanceChunks = clamp(settings.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 6);
     settings.mouseSensitivity = clamp(settings.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity, 0.0012, 0.006);
@@ -12920,10 +15014,12 @@ export default function FreeCube2Game(engine) {
     }
 
     player = new Player();
-    const spawn = world.findSpawn(0, 0);
-    player.setPosition(spawn.x, spawn.y, spawn.z);
+    player.setPosition(defaultSpawn.x, defaultSpawn.y, defaultSpawn.z);
     if (save?.player) {
       player.restore(save.player);
+    }
+    if (player.spawnPoint && !isPlayerBedSpawnValid(player.spawnPoint)) {
+      player.spawnPoint = null;
     }
     player.ensureSafePosition(world);
     activeFurnaceKey = null;
@@ -12979,7 +15075,6 @@ export default function FreeCube2Game(engine) {
     loadWorldFromStore(worldId);
     mobs = [];
     items = [];
-    worldTime = 0;
     spawnTimer = 0;
     for (let i = 0; i < 4; i += 1) {
       spawnMobNearPlayer("sheep");
@@ -13009,6 +15104,11 @@ export default function FreeCube2Game(engine) {
     runtimePlayerInCave = false;
     targetScanTimer = 0;
     renderEntities.length = 0;
+    stopSleeping(false);
+    runtimeFault = null;
+    runtimeRepairPromise = null;
+    webglContextLost = false;
+    webglContextRestored = false;
     loadingStartChunk = { x: Math.floor(player.x / CHUNK_SIZE), z: Math.floor(player.z / CHUNK_SIZE) };
     ensureActiveRenderer();
     logMobRenderDiagnostics("world-start");
@@ -13017,6 +15117,8 @@ export default function FreeCube2Game(engine) {
     setSettingsUI();
     mode = "loading";
     ensureUI();
+    setAutoRepairUi(false);
+    setRuntimeErrorOverlay(false);
     ui.showScreen("loading");
     ui.setHudVisible(false);
     ui.inventoryEl.style.display = "none";
@@ -13065,9 +15167,15 @@ export default function FreeCube2Game(engine) {
     runtimePlayerInCave = false;
     targetScanTimer = 0;
     renderEntities.length = 0;
+    runtimeFault = null;
+    runtimeRepairPromise = null;
+    webglContextLost = false;
+    webglContextRestored = false;
     resetInventoryDragState();
     ensureUI();
-    ui.showScreen("title");
+    setAutoRepairUi(false);
+    setRuntimeErrorOverlay(false);
+    showHomeScreen();
     ui.setHudVisible(false);
     ui.inventoryEl.style.display = "none";
     closeChat(false);
@@ -13094,6 +15202,9 @@ export default function FreeCube2Game(engine) {
     if (!currentTarget || player.breakCooldown > 0) return false;
     if (currentTarget.type === BLOCK.BEDROCK || isFluidBlock(currentTarget.type)) return false;
     if (world.setBlock(currentTarget.x, currentTarget.y, currentTarget.z, BLOCK.AIR)) {
+      if (currentTarget.type === BLOCK.BED) {
+        clearPlayerBedSpawnIfNeeded(currentTarget.x, currentTarget.y, currentTarget.z, true);
+      }
       if (!isCreativeMode()) {
         if (currentTarget.type === BLOCK.FURNACE) {
           dropFurnaceContentsAt(currentTarget.x, currentTarget.y, currentTarget.z);
@@ -13203,6 +15314,8 @@ export default function FreeCube2Game(engine) {
     if (player.intersectsBlock(place.x, place.y, place.z)) return;
     const type = getSelectedHeldBlockType();
     if (!type || type === BLOCK.AIR) return;
+    if (type === BLOCK.TORCH && !isCollidable(world.getBlock(place.x, place.y - 1, place.z))) return;
+    if (type === BLOCK.BED && !isCollidable(world.getBlock(place.x, place.y - 1, place.z))) return;
     if (!isCreativeMode() && getSelectedHeldCount() <= 0) return;
     if (world.setBlock(place.x, place.y, place.z, type)) {
       if (!isCreativeMode()) {
@@ -13221,8 +15334,9 @@ export default function FreeCube2Game(engine) {
     player.hunger = Math.min(player.maxHunger, player.hunger + food);
     player.regenTimer = 0;
     world.saveDirty = true;
-    setHotbarImages();
-    renderInventoryUI();
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
     return true;
   }
 
@@ -13266,6 +15380,9 @@ export default function FreeCube2Game(engine) {
       }
     }
     if (input.consumeMousePress(2)) {
+      if (currentTarget?.type === BLOCK.BED && tryUseBed(currentTarget)) {
+        return;
+      }
       if (currentTarget?.type === BLOCK.CRAFTING_TABLE) {
         setInventoryOpen(true, "table");
         return;
@@ -13360,6 +15477,535 @@ export default function FreeCube2Game(engine) {
       ui.fpsEl.textContent = `FPS: ${fps.toFixed(0)} (${backend})`;
       fpsTimer = 0;
     }
+  }
+
+  function setDebugVisible(visible) {
+    debugState.visible = !!visible;
+    if (!debugState.visible) {
+      debugState.frameGraph = false;
+      debugState.pieChart = false;
+    }
+    if (canvasRenderer) {
+      canvasRenderer.showDebug = false;
+    }
+    updateDebugUi();
+  }
+
+  function pushDebugFrameSample(frameMs) {
+    const samples = debugState.frameSamples;
+    samples.push(clamp(frameMs, 0, 80));
+    while (samples.length > 90) {
+      samples.shift();
+    }
+  }
+
+  function getDebugProjectionState() {
+    if (!player || !engine?.canvas) return null;
+    const width = engine.canvas.width || Math.max(1, window.innerWidth);
+    const height = engine.canvas.height || Math.max(1, window.innerHeight);
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const cameraX = player.x;
+    const cameraY = player.y + PLAYER_EYE_HEIGHT;
+    const cameraZ = player.z;
+    const yaw = player.yaw || 0;
+    const pitch = player.pitch || 0;
+    const sinYaw = Math.sin(yaw);
+    const cosYaw = Math.cos(yaw);
+    const sinPitch = Math.sin(pitch);
+    const cosPitch = Math.cos(pitch);
+    const fov = ((settings?.fovDegrees || DEFAULT_SETTINGS.fovDegrees) * Math.PI) / 180;
+    const focalLength = (height * 0.5) / Math.tan(fov / 2);
+    return { width, height, centerX, centerY, cameraX, cameraY, cameraZ, sinYaw, cosYaw, sinPitch, cosPitch, focalLength };
+  }
+
+  function projectDebugPoint(state, x, y, z, clampNear = true) {
+    if (!state) return null;
+    const dx = x - state.cameraX;
+    const dy = y - state.cameraY;
+    const dz = z - state.cameraZ;
+    const localX = dx * state.cosYaw - dz * state.sinYaw;
+    const localZ = dx * state.sinYaw + dz * state.cosYaw;
+    const rotatedY = dy * state.cosPitch - localZ * state.sinPitch;
+    const rotatedZ = dy * state.sinPitch + localZ * state.cosPitch;
+    if (rotatedZ <= (clampNear ? -0.12 : 0.02)) {
+      return null;
+    }
+    const depth = Math.max(rotatedZ, 0.02);
+    return {
+      x: state.centerX + (localX / depth) * state.focalLength,
+      y: state.centerY - (rotatedY / depth) * state.focalLength,
+      depth
+    };
+  }
+
+  function drawDebugBoxLines(ctx, state, x0, y0, z0, x1, y1, z1, strokeStyle, lineWidth = 1.5) {
+    const corners = [
+      [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+      [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
+    ];
+    const projected = corners.map((corner) => projectDebugPoint(state, corner[0], corner[1], corner[2], true));
+    if (projected.some((point) => !point)) {
+      return;
+    }
+    const edges = [
+      [0, 1], [1, 2], [2, 3], [3, 0],
+      [4, 5], [5, 6], [6, 7], [7, 4],
+      [0, 4], [1, 5], [2, 6], [3, 7]
+    ];
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = lineWidth;
+    for (const edge of edges) {
+      ctx.beginPath();
+      ctx.moveTo(projected[edge[0]].x, projected[edge[0]].y);
+      ctx.lineTo(projected[edge[1]].x, projected[edge[1]].y);
+      ctx.stroke();
+    }
+  }
+
+  function renderDebugWorldOverlay() {
+    if (!ui?.debugCanvasEl) return;
+    const shouldShow = debugState.visible && !!world && !!player && (debugState.chunkBorders || debugState.hitboxes);
+    ui.debugCanvasEl.style.display = shouldShow ? "block" : "none";
+    if (!shouldShow) {
+      const ctx = ui.debugCanvasEl.getContext("2d");
+      ctx?.clearRect?.(0, 0, ui.debugCanvasEl.width || 0, ui.debugCanvasEl.height || 0);
+      return;
+    }
+
+    const canvas = ui.debugCanvasEl;
+    if (canvas.width !== engine.canvas.width || canvas.height !== engine.canvas.height) {
+      canvas.width = engine.canvas.width;
+      canvas.height = engine.canvas.height;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const state = getDebugProjectionState();
+    if (!state) return;
+
+    ctx.save();
+    ctx.shadowBlur = 0;
+    if (debugState.chunkBorders) {
+      const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
+      const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
+      for (let dz = -1; dz <= 1; dz += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const chunkX = playerChunkX + dx;
+          const chunkZ = playerChunkZ + dz;
+          const x0 = chunkX * CHUNK_SIZE;
+          const z0 = chunkZ * CHUNK_SIZE;
+          const color = dx === 0 && dz === 0 ? "rgba(255,92,92,0.95)" : "rgba(246,222,105,0.82)";
+          drawDebugBoxLines(ctx, state, x0, 0, z0, x0 + CHUNK_SIZE, WORLD_HEIGHT, z0 + CHUNK_SIZE, color, dx === 0 && dz === 0 ? 2 : 1.25);
+        }
+      }
+    }
+
+    if (debugState.hitboxes) {
+      const entityDistance = 32;
+      const entityDistanceSq = entityDistance * entityDistance;
+      for (const mob of mobs) {
+        if (!mob || mob.health <= 0) continue;
+        const dx = mob.x - player.x;
+        const dy = mob.y - player.y;
+        const dz = mob.z - player.z;
+        if (dx * dx + dy * dy + dz * dz > entityDistanceSq) continue;
+        drawDebugBoxLines(
+          ctx,
+          state,
+          mob.x - mob.radius,
+          mob.y,
+          mob.z - mob.radius,
+          mob.x + mob.radius,
+          mob.y + mob.height,
+          mob.z + mob.radius,
+          getMobDef(mob.type).hostile ? "rgba(255,120,120,0.92)" : "rgba(120,255,170,0.88)",
+          1.35
+        );
+      }
+      for (const item of items) {
+        const dx = item.x - player.x;
+        const dy = item.y - player.y;
+        const dz = item.z - player.z;
+        if (dx * dx + dy * dy + dz * dz > entityDistanceSq) continue;
+        drawDebugBoxLines(ctx, state, item.x - 0.16, item.y - 0.02, item.z - 0.16, item.x + 0.16, item.y + 0.3, item.z + 0.16, "rgba(132,208,255,0.85)", 1.1);
+      }
+    }
+    ctx.restore();
+  }
+
+  function updateDebugUi() {
+    if (!ui) return;
+    const visible = debugState.visible && !!world && !!player && mode !== "menu";
+    ui.debugPanelEl.style.display = visible ? "block" : "none";
+    ui.debugHelpEl.style.display = debugState.helpUntil > performance.now() ? "block" : "none";
+    if (!visible) {
+      ui.debugGraphsEl.style.display = "none";
+      ui.debugPieEl.style.display = "none";
+      ui.debugCanvasEl.style.display = "none";
+      return;
+    }
+
+    const cycle = getDayCycleInfo(worldTime);
+    const column = world.terrain.describeColumn(Math.floor(player.x), Math.floor(player.z));
+    const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
+    const skyLight = getApproxSkyLightLevel(player.x, player.y + PLAYER_EYE_HEIGHT, player.z, cycle);
+    const blockLight = getApproxBlockLightLevel(player.x, player.y + PLAYER_EYE_HEIGHT, player.z);
+    const lines = [
+      `FreeCube2 ${GAME_VERSION} (${useWebGL ? "WebGL2" : "Canvas"})`,
+      `XYZ ${player.x.toFixed(2)} / ${player.y.toFixed(2)} / ${player.z.toFixed(2)}`,
+      `Chunk ${playerChunkX}, ${playerChunkZ} | Biome ${column.biome}`,
+      `Facing ${Math.round((player.yaw * 180) / Math.PI)}  Pitch ${Math.round((player.pitch * 180) / Math.PI)}`,
+      `FPS ${fps.toFixed(0)} | Frame ${debugState.metrics.frameMs.toFixed(1)} ms`,
+      `Time ${getDayCycleInfo(worldTime).phase} | Weather ${getWeatherLabel(weather.type)}`,
+      `Light sky ${skyLight} / block ${blockLight} | Loaded chunks ${world.chunks.size}`,
+      `Toggles: borders=${debugState.chunkBorders ? "on" : "off"} hitboxes=${debugState.hitboxes ? "on" : "off"} tips=${debugState.advancedTooltips ? "on" : "off"}`
+    ];
+    if (currentTarget) {
+      lines.push(`Block ${getItemName(currentTarget.type)} @ ${currentTarget.x}, ${currentTarget.y}, ${currentTarget.z}`);
+    }
+    if (currentEntityTarget?.mob) {
+      lines.push(`Entity ${currentEntityTarget.mob.type} hp=${Math.ceil(currentEntityTarget.mob.health)}`);
+    }
+    ui.debugLinesEl.textContent = lines.join("\n");
+
+    ui.debugGraphsEl.style.display = debugState.frameGraph || debugState.pieChart ? "grid" : "none";
+    ui.debugPieEl.style.display = debugState.pieChart ? "flex" : "none";
+
+    if (debugState.frameGraph) {
+      const canvas = ui.debugGraphEl;
+      const width = 240;
+      const height = 72;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "rgba(10,14,20,0.92)";
+        ctx.fillRect(0, 0, width, height);
+        ctx.strokeStyle = "rgba(255,255,255,0.1)";
+        ctx.beginPath();
+        ctx.moveTo(0, height - 16);
+        ctx.lineTo(width, height - 16);
+        ctx.stroke();
+        const samples = debugState.frameSamples;
+        ctx.strokeStyle = "rgba(126,229,255,0.96)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        samples.forEach((sample, index) => {
+          const x = (index / Math.max(1, samples.length - 1)) * width;
+          const y = height - clamp(sample / 40, 0, 1) * (height - 8);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+    }
+
+    if (debugState.pieChart) {
+      const metrics = debugState.metrics;
+      const updateMs = Math.max(0, metrics.updateMs || 0);
+      const renderMs = Math.max(0, metrics.renderMs || 0);
+      const chunkMs = Math.max(0, Math.min(metrics.chunkMs || 0, updateMs));
+      const uiMs = Math.max(0, Math.min(metrics.uiMs || 0, updateMs));
+      const worldMs = Math.max(0, metrics.worldMs || Math.max(0, updateMs - chunkMs - uiMs));
+      const total = Math.max(1, chunkMs + worldMs + uiMs + renderMs);
+      const chunkDeg = (chunkMs / total) * 360;
+      const worldDeg = (worldMs / total) * 360;
+      const uiDeg = (uiMs / total) * 360;
+      const renderDeg = 360 - chunkDeg - worldDeg - uiDeg;
+      ui.debugPieChartEl.style.background = `conic-gradient(#7fe1ff 0deg ${chunkDeg}deg,#63b4ff ${chunkDeg}deg ${chunkDeg + worldDeg}deg,#9cf2ba ${chunkDeg + worldDeg}deg ${chunkDeg + worldDeg + uiDeg}deg,#f5dc86 ${chunkDeg + worldDeg + uiDeg}deg ${360 - renderDeg}deg)`;
+      ui.debugPieLegendEl.innerHTML = [
+        `Chunk ${chunkMs.toFixed(1)} ms`,
+        `World ${worldMs.toFixed(1)} ms`,
+        `UI ${uiMs.toFixed(1)} ms`,
+        `Render ${renderMs.toFixed(1)} ms`
+      ].join("<br />");
+    }
+
+    if (debugState.helpUntil > performance.now()) {
+      ui.debugHelpEl.textContent = [
+        "F + 1: Toggle HUD",
+        "F + 3: Toggle debug overlay",
+        "F + 3 + Q: Show shortcut help",
+        "F + 3 + A: Reload chunks",
+        "F + 3 + T: Reload textures/resources",
+        "F + 3 + G: Toggle chunk borders",
+        "F + 3 + B: Toggle hitboxes",
+        "F + 3 + H: Toggle advanced tooltips",
+        "F + 3 + C: Copy coordinates",
+        "F + 3 + I: Copy target block/entity data",
+        "F + 3 + D: Clear chat",
+        "F + 3 + R: Increase render distance",
+        "Shift + F + 3 + R: Decrease render distance",
+        "F + 3 + N: Toggle creative/survival",
+        "Shift + F + 3: Toggle performance pie",
+        "Alt + F + 3: Toggle frame graph"
+      ].join("\n");
+    }
+  }
+
+  function showDebugShortcutHelp() {
+    debugState.helpUntil = performance.now() + 10000;
+    pushChatLine("Debug shortcut help opened.", "sys");
+    updateDebugUi();
+  }
+
+  function toggleDebugFlag(key, label) {
+    debugState[key] = !debugState[key];
+    debugState.visible = debugState.visible || debugState[key];
+    if (inventoryOpen) {
+      renderInventoryUI();
+    }
+    updateDebugUi();
+    pushChatLine(`${label}: ${debugState[key] ? "ON" : "OFF"}`, "sys");
+  }
+
+  async function copyDebugText(text, successMessage, failureMessage = "Copy failed.") {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        pushChatLine(successMessage, "sys");
+      } else {
+        throw new Error("Clipboard unavailable");
+      }
+    } catch {
+      pushChatLine(failureMessage, "err");
+    }
+  }
+
+  function reloadDebugChunks() {
+    if (!world) return;
+    compactRuntimeState(true);
+    invalidateAllChunkMeshes();
+    for (const chunk of world.chunks.values()) {
+      chunk.meshDirty = true;
+    }
+    world.saveDirty = true;
+    pushChatLine("Chunks reloaded.", "sys");
+  }
+
+  function reloadDebugResources() {
+    if (!textures || !entityTextures || !objModels) return;
+    textures.images.clear();
+    textures.pending.clear();
+    textures.failedPaths.clear();
+    textures.ready = false;
+    textures.failed = false;
+    textures.readyPromise = null;
+    textures.progress = 0;
+    entityTextures.images.clear();
+    entityTextures.billboardImages.clear();
+    entityTextures.glTextures.clear();
+    entityTextures.pendingLoads.clear();
+    entityTextures.ready = false;
+    entityTextures.failed = false;
+    entityTextures.readyPromise = null;
+    objModels.models.clear();
+    objModels.ready = false;
+    objModels.failed = false;
+    objModels.readyPromise = null;
+    textures.startLoading().then(() => {
+      if (atlas) {
+        atlas.texture = null;
+        atlas.build().catch((error) => console.warn("Atlas rebuild failed:", error.message));
+      }
+      setHotbarImages();
+    });
+    entityTextures.startLoading();
+    objModels.startLoading();
+    applyTexturePackSetting();
+    pushChatLine("Textures and resources reloaded.", "sys");
+  }
+
+  function handleDebugShortcutAction(action) {
+    switch (action) {
+      case "toggle_hud":
+        hud.visible = !hud.visible;
+        hud.last = null;
+        updateHud(0);
+        pushChatLine(`HUD: ${hud.visible ? "ON" : "OFF"}`, "sys");
+        return true;
+      case "toggle_debug":
+        setDebugVisible(!debugState.visible);
+        pushChatLine(`Debug overlay: ${debugState.visible ? "ON" : "OFF"}`, "sys");
+        return true;
+      case "help":
+        showDebugShortcutHelp();
+        return true;
+      case "reload_chunks":
+        reloadDebugChunks();
+        return true;
+      case "reload_resources":
+        reloadDebugResources();
+        return true;
+      case "toggle_chunk_borders":
+        toggleDebugFlag("chunkBorders", "Chunk Borders");
+        return true;
+      case "toggle_hitboxes":
+        toggleDebugFlag("hitboxes", "Hitboxes");
+        return true;
+      case "toggle_tooltips":
+        toggleDebugFlag("advancedTooltips", "Advanced Tooltips");
+        return true;
+      case "toggle_pie":
+        debugState.pieChart = !debugState.pieChart;
+        debugState.visible = debugState.visible || debugState.pieChart;
+        updateDebugUi();
+        pushChatLine(`Performance pie: ${debugState.pieChart ? "ON" : "OFF"}`, "sys");
+        return true;
+      case "toggle_graph":
+        debugState.frameGraph = !debugState.frameGraph;
+        debugState.visible = debugState.visible || debugState.frameGraph;
+        updateDebugUi();
+        pushChatLine(`Frame graph: ${debugState.frameGraph ? "ON" : "OFF"}`, "sys");
+        return true;
+      case "copy_coords":
+        copyDebugText(
+          `${player.x.toFixed(2)} ${player.y.toFixed(2)} ${player.z.toFixed(2)}`,
+          "Coordinates copied.",
+          "Could not copy coordinates."
+        );
+        return true;
+      case "copy_target":
+        if (currentTarget) {
+          copyDebugText(
+            JSON.stringify({ block: getItemName(currentTarget.type), x: currentTarget.x, y: currentTarget.y, z: currentTarget.z }),
+            "Target block data copied.",
+            "Could not copy target block data."
+          );
+          return true;
+        }
+        if (currentEntityTarget?.mob) {
+          copyDebugText(
+            JSON.stringify({ type: currentEntityTarget.mob.type, x: currentEntityTarget.mob.x, y: currentEntityTarget.mob.y, z: currentEntityTarget.mob.z, health: currentEntityTarget.mob.health }),
+            "Target entity data copied.",
+            "Could not copy target entity data."
+          );
+          return true;
+        }
+        pushChatLine("Nothing targeted to copy.", "err");
+        return true;
+      case "clear_chat":
+        chatLines = [];
+        chatNeedsRender = true;
+        renderChatLines();
+        pushChatLine("Chat cleared.", "sys");
+        return true;
+      case "increase_rd":
+        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks + 1, 2, 6);
+        if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
+        if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
+        setSettingsUI();
+        world.saveDirty = true;
+        pushChatLine(`Render distance: ${settings.renderDistanceChunks}`, "sys");
+        return true;
+      case "decrease_rd":
+        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks - 1, 2, 6);
+        if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
+        if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
+        setSettingsUI();
+        world.saveDirty = true;
+        pushChatLine(`Render distance: ${settings.renderDistanceChunks}`, "sys");
+        return true;
+      case "cycle_gamemode":
+        settings.gameMode = settings.gameMode === GAME_MODE.CREATIVE ? GAME_MODE.SURVIVAL : GAME_MODE.CREATIVE;
+        setHotbarImages();
+        setSettingsUI();
+        world.saveDirty = true;
+        pushChatLine(`Game mode: ${settings.gameMode}`, "sys");
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function handleCustomDebugShortcuts() {
+    const debugModifierDown = input.isDown("f") || input.isDown("F");
+    const shiftDown = input.isDown("Shift");
+    const altDown = input.isDown("Alt");
+    let used = false;
+
+    if (debugModifierDown && input.consumePress("1")) {
+      handleDebugShortcutAction("toggle_hud");
+      used = true;
+    }
+
+    if (debugModifierDown && input.consumePress("3")) {
+      if (shiftDown) {
+        handleDebugShortcutAction("toggle_pie");
+      } else if (altDown) {
+        handleDebugShortcutAction("toggle_graph");
+      } else {
+        handleDebugShortcutAction("toggle_debug");
+      }
+      debugState.chordUntil = performance.now() + 1500;
+      used = true;
+    }
+
+    const f3ChordActive = debugModifierDown && (input.isDown("3") || debugState.chordUntil > performance.now());
+    if (!f3ChordActive) {
+      return used;
+    }
+
+    if (input.consumePress("q", "Q")) {
+      handleDebugShortcutAction("help");
+      return true;
+    }
+    if (input.consumePress("a", "A")) {
+      handleDebugShortcutAction("reload_chunks");
+      return true;
+    }
+    if (input.consumePress("t", "T")) {
+      handleDebugShortcutAction("reload_resources");
+      return true;
+    }
+    if (input.consumePress("g", "G")) {
+      handleDebugShortcutAction("toggle_chunk_borders");
+      return true;
+    }
+    if (input.consumePress("b", "B")) {
+      handleDebugShortcutAction("toggle_hitboxes");
+      return true;
+    }
+    if (input.consumePress("h", "H")) {
+      handleDebugShortcutAction("toggle_tooltips");
+      return true;
+    }
+    if (input.consumePress("c", "C")) {
+      handleDebugShortcutAction("copy_coords");
+      return true;
+    }
+    if (input.consumePress("i", "I")) {
+      handleDebugShortcutAction("copy_target");
+      return true;
+    }
+    if (input.consumePress("d", "D")) {
+      handleDebugShortcutAction("clear_chat");
+      return true;
+    }
+    if (input.consumePress("r", "R", "=", "+", "-")) {
+      handleDebugShortcutAction(shiftDown ? "decrease_rd" : "increase_rd");
+      return true;
+    }
+    if (input.consumePress("n", "N")) {
+      handleDebugShortcutAction("cycle_gamemode");
+      return true;
+    }
+    return used;
+  }
+
+  function finalizeDebugUpdateMetrics(updateStartMs, uiMs = 0, chunkMs = 0, frameBudgetMs = debugState.metrics.frameMs) {
+    const updateMs = Math.max(0, performance.now() - updateStartMs);
+    debugState.metrics.frameMs = Math.max(0.1, frameBudgetMs);
+    debugState.metrics.updateMs = updateMs;
+    debugState.metrics.uiMs = Math.max(0, uiMs);
+    debugState.metrics.chunkMs = Math.max(0, chunkMs);
+    debugState.metrics.worldMs = Math.max(0, updateMs - uiMs - chunkMs);
+    updateDebugUi();
   }
 
   function compactRuntimeState(forceMeshReset = false) {
@@ -13616,7 +16262,18 @@ export default function FreeCube2Game(engine) {
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (!action) return;
 
-      if (action === "singleplayer") {
+      if (action === "complete-profile") {
+        completeProfileSetup();
+      } else if (action === "open-multiplayer") {
+        if (!MULTIPLAYER_ENABLED) return;
+        renderMultiplayerMenu();
+        ui.showScreen("multiplayer");
+      } else if (action === "profile-import-skin") {
+        ui.skinFileInput.value = "";
+        ui.skinFileInput.click();
+      } else if (action === "profile-clear-skin") {
+        setProfileSkinPreset(DEFAULT_SETTINGS.playerSkinPreset);
+      } else if (action === "singleplayer") {
         ui.showScreen("worlds");
         selectedWorldId = store.getSelectedWorldId() || store.listWorlds()[0]?.id || null;
         ui.newWorldCard.style.display = selectedWorldId ? "none" : "block";
@@ -13627,7 +16284,7 @@ export default function FreeCube2Game(engine) {
         }
         refreshWorldList(selectedWorldId);
       } else if (action === "back-title") {
-        ui.showScreen("title");
+        showHomeScreen();
       } else if (action === "open-settings") {
         ui.showScreen("settings");
         setSettingsUI();
@@ -13665,7 +16322,11 @@ export default function FreeCube2Game(engine) {
         setSettingsUI();
         if (inventoryOpen) renderInventoryUI();
       } else if (action === "back-settings") {
-        ui.showScreen(mode === "paused" ? "pause" : "title");
+        if (mode === "paused") {
+          ui.showScreen("pause");
+        } else {
+          showHomeScreen();
+        }
       } else if (action === "play-world") {
         if (!selectedWorldId) return;
         startWorld(selectedWorldId);
@@ -13701,10 +16362,63 @@ export default function FreeCube2Game(engine) {
       } else if (action === "quit-title") {
         mode = "menu";
         quitToTitle();
+      } else if (action === "run-auto-repair") {
+        if (!runtimeFault?.active) {
+          reportRuntimeFault(
+            useWebGL ? "manual-graphics-repair" : "manual-runtime-repair",
+            "Manual Repair",
+            useWebGL ? "Trying to rebuild the graphics renderer." : "Trying to rebuild the game state.",
+            "Auto Repair was started manually from the error screen."
+          );
+        }
+        beginAutoRepair(true);
       } else if (action === "reload") {
         location.reload();
       }
     });
+
+    if (ui.profileNameInput) {
+      ui.profileNameInput.addEventListener("input", () => {
+        playerUsername = normalizeCubeCraftUsername(ui.profileNameInput.value, "");
+      });
+      ui.profileNameInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        completeProfileSetup();
+      });
+    }
+
+    if (ui.profileSkinPresetEl) {
+      ui.profileSkinPresetEl.addEventListener("change", () => {
+        const nextPreset = ui.profileSkinPresetEl.value;
+        if (nextPreset === "custom") {
+          if (settings.playerSkinDataUrl) {
+            settings.playerSkinPreset = "custom";
+            setProfileSetupUI();
+            setSettingsUI();
+            return;
+          }
+          ui.skinFileInput.value = "";
+          ui.skinFileInput.click();
+          ui.profileSkinPresetEl.value = isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
+          return;
+        }
+        setProfileSkinPreset(nextPreset);
+      });
+    }
+
+    if (ui.multiplayerDirectInputEl) {
+      ui.multiplayerDirectInputEl.addEventListener("input", () => {
+        multiplayerState.directConnectUrl = ui.multiplayerDirectInputEl.value;
+      });
+    }
+
+    if (ui.multiplayerRefreshBtn) {
+      ui.multiplayerRefreshBtn.addEventListener("click", () => {
+        if (!MULTIPLAYER_ENABLED) return;
+        renderMultiplayerMenu();
+      });
+    }
 
     [ui.worldNameInput, ui.worldSeedInput].forEach((inputEl) => {
       inputEl.addEventListener("keydown", (event) => {
@@ -13746,6 +16460,7 @@ export default function FreeCube2Game(engine) {
         };
         getCustomPlayerSkinCanvas(dataUrl);
         markWorldDirty();
+        setProfileSetupUI();
         setSettingsUI();
         if (inventoryOpen) renderInventoryUI();
       } catch (error) {
@@ -13847,6 +16562,12 @@ export default function FreeCube2Game(engine) {
       setSettingsUI();
     });
 
+    ui.videoShadowsBtn.addEventListener("click", () => {
+      settings.shadows = !(settings.shadows !== false);
+      applyLightingSetting();
+      setSettingsUI();
+    });
+
     ui.videoFpsBtn.addEventListener("click", () => {
       settings.showFps = !(settings.showFps !== false);
       ui.fpsEl.style.display = settings.showFps ? "block" : "none";
@@ -13943,7 +16664,12 @@ export default function FreeCube2Game(engine) {
 
       ensureUI();
       wireUiEvents();
-      ui.showScreen("title");
+      engine.canvas.addEventListener("webglcontextlost", handleWebGLContextLost);
+      engine.canvas.addEventListener("webglcontextrestored", handleWebGLContextRestored);
+      window.addEventListener("error", handleWindowRuntimeError);
+      window.addEventListener("unhandledrejection", handleWindowRuntimeRejection);
+      playerUsername = getStoredCubeCraftUsername();
+      showHomeScreen();
       ui.setHudVisible(false);
       setSettingsUI();
       preloadMusicTracks();
@@ -13968,12 +16694,30 @@ export default function FreeCube2Game(engine) {
 
     update(dt) {
       if (!input || !textures) return;
+      const updateStartMs = performance.now();
+      let debugUiMs = 0;
+      let debugChunkMs = 0;
+      ensureStore();
+      if (updateRuntimeFaultState()) {
+        if (player) {
+          player.isSprinting = false;
+          player.isCrouching = false;
+        }
+        setMiningProgress(0);
+        saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+        return;
+      }
       updateFps(dt);
       updateRuntimePerformance(dt);
-      ensureStore();
+      const uiStartMs = performance.now();
       updateChat(dt);
+      updateWeather(dt);
       updateHud(dt);
       updateMusicState(dt);
+      debugUiMs += performance.now() - uiStartMs;
+      debugState.metrics.frameMs = dt * 1000;
+      pushDebugFrameSample(dt * 1000);
 
       if (document.hidden) {
         input.resetState?.(true);
@@ -13983,12 +16727,13 @@ export default function FreeCube2Game(engine) {
         }
         setMiningProgress(0);
         saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
       // When pointer lock is active, ESC may only exit pointer lock (no keydown).
       // Treat that as "pause".
-      if (mode === "playing" && input.consumeLostPointerLock()) {
+      if (mode === "playing" && !sleepState.active && input.consumeLostPointerLock()) {
         mode = "paused";
         input.pointerLockEnabled = false;
         input.resetState?.(true);
@@ -14023,24 +16768,30 @@ export default function FreeCube2Game(engine) {
       if (mode === "menu") {
         input.consumeLook();
         setMiningProgress(0);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
-      if (!world || !player) return;
+      if (!world || !player) {
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+        return;
+      }
+
+      if (!chatOpen && handleCustomDebugShortcuts()) {
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+        return;
+      }
 
       if (input.consumePress("F1")) {
-        hud.visible = !hud.visible;
-        hud.last = null;
-        updateHud(0);
+        handleDebugShortcutAction("toggle_hud");
       }
       if (input.consumePress("F3")) {
-        if (canvasRenderer) {
-          canvasRenderer.showDebug = !canvasRenderer.showDebug;
-          console.log("Canvas debug:", canvasRenderer.showDebug);
-          pushChatLine(`Debug: ${canvasRenderer.showDebug ? "ON" : "OFF"}`, "sys");
+        if (input.isDown("Shift")) {
+          handleDebugShortcutAction("toggle_pie");
+        } else if (input.isDown("Alt")) {
+          handleDebugShortcutAction("toggle_graph");
         } else {
-          console.log("Debug: (WebGL) open Sirco Debug Console for logs");
-          pushChatLine("Debug: use Sirco console (Ctrl+Shift+Alt+Z)", "sys");
+          handleDebugShortcutAction("toggle_debug");
         }
       }
 
@@ -14050,6 +16801,7 @@ export default function FreeCube2Game(engine) {
         updateLoading(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
@@ -14061,20 +16813,37 @@ export default function FreeCube2Game(engine) {
         setMiningProgress(0);
         updatePlayerVitals(dt);
         saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
       // playing
+      if (sleepState.active) {
+        input.consumeLostPointerLock();
+        input.consumeLook();
+        player.isSprinting = false;
+        player.isCrouching = false;
+        player.breakCooldown = Math.max(0, player.breakCooldown - dt);
+        player.placeCooldown = Math.max(0, player.placeCooldown - dt);
+        updateSleeping(dt);
+        saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+        return;
+      }
+
       if (!chatOpen && !inventoryOpen && (input.consumePress("t") || input.consumePress("T"))) {
         openChat("");
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
       if (!chatOpen && !inventoryOpen && (input.consumePress("/") || input.consumePress("?"))) {
         openChat("/");
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
       if (!chatOpen && input.consumePress("e", "E")) {
         setInventoryOpen(!inventoryOpen);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
@@ -14090,6 +16859,7 @@ export default function FreeCube2Game(engine) {
         updateFurnaces(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
@@ -14106,6 +16876,7 @@ export default function FreeCube2Game(engine) {
         updateFurnaces(dt);
         updatePlayerVitals(dt);
         saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
@@ -14140,12 +16911,14 @@ export default function FreeCube2Game(engine) {
       }
 
       if (useWebGL && glRenderer && atlas.texture) {
+        const chunkStartMs = performance.now();
         glRenderer.runtimeInCave = runtimePlayerInCave;
         glRenderer.runtimeLowFps = fpsSmoothed > 0 && fpsSmoothed < (runtimePlayerInCave ? 56 : 50);
         const chunkConfig = getChunkRuntimeConfig(false);
         glRenderer.ensureVisibleChunks(chunkConfig.genLimit, chunkConfig.genBudgetMs);
         glRenderer.updateQueue(chunkConfig.meshLimit, chunkConfig.meshBudgetMs);
         glRenderer.updateCamera();
+        debugChunkMs += performance.now() - chunkStartMs;
       }
 
       targetScanTimer = Math.max(0, targetScanTimer - dt);
@@ -14207,7 +16980,7 @@ export default function FreeCube2Game(engine) {
           continue;
         }
 
-        if (!cycle.isNight && def.burnsInSunlight && isMobInSunlight(mob)) {
+        if (!cycle.isNight && def.burnsInSunlight && !isWetWeatherAt(mob.x, mob.z) && isMobInSunlight(mob)) {
           mob.sunBurnTimer += dt;
           if (mob.sunBurnTimer >= 0.85) {
             mob.sunBurnTimer = 0;
@@ -14261,15 +17034,24 @@ export default function FreeCube2Game(engine) {
       }
 
       saveWorld(false);
+      finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
     },
 
     render(dt) {
-      if (!world || !player) return;
+      const renderStartMs = performance.now();
+      if (runtimeFault?.active || webglContextLost || !world || !player) {
+        debugState.metrics.renderMs = 0;
+        renderDebugWorldOverlay();
+        return;
+      }
 
       if (useWebGL && glRenderer && atlas?.texture) {
         const cycle = getDayCycleInfo(worldTime);
-        const clear = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), cycle.darkness * 0.92);
-        gl.clearColor(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1);
+        const effectiveDarkness = clamp((1 - getEffectiveDaylight(cycle, weather.type)) + getWeatherSkyDarkness(weather.type) * 0.25, 0, 1);
+        const clear = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), effectiveDarkness * 0.92);
+        const flash = clamp(weather.flash || 0, 0, 1);
+        const clearRgb = flash > 0.001 ? mixRgb(clear, rgb(232, 238, 255), flash * 0.5) : clear;
+        gl.clearColor(clearRgb[0] / 255, clearRgb[1] / 255, clearRgb[2] / 255, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         glRenderer.updateCamera();
         glRenderer.renderFrame();
@@ -14286,6 +17068,8 @@ export default function FreeCube2Game(engine) {
           hasSave: true
         }, currentTarget);
       }
+      debugState.metrics.renderMs = Math.max(0, performance.now() - renderStartMs);
+      renderDebugWorldOverlay();
     }
   };
 }
