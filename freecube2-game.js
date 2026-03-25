@@ -1,6 +1,7 @@
-const GAME_VERSION = "6.5.4 (beta)";
+const GAME_VERSION = "7.5.4 (beta)";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
+const GLOBAL_SETTINGS_KEY = `freecube2-global-settings-v${STORAGE_NAMESPACE_VERSION}`;
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 112;
 const SEA_LEVEL = 30;
@@ -27,15 +28,15 @@ const DEFAULT_SETTINGS = {
   showFps: true,
   viewBobbing: true,
   graphicsMode: "fast",
-  shadows: true,
+  shadows: false,
   chunkLagFix: true,
   fullscreen: false,
   masterVolume: 1,
   musicVolume: 0.65,
   texturePack: "default",
   mobModels: true,
-  performancePreset: "balanced",
-  playerSkinPreset: "steve_large",
+  performancePreset: "boost",
+  playerSkinPreset: "steve",
   playerSkinDataUrl: "",
   customResourcePacks: []
 };
@@ -120,8 +121,21 @@ const LEGACY_WORLD_INDEX_KEYS = ["freecube2-worlds-index-v1"];
 const LEGACY_WORLD_SAVE_PREFIXES = ["freecube2-world-save-v1:"];
 const LEGACY_PURGE_MARKER_KEY = `freecube2-storage-purge-complete-v${STORAGE_NAMESPACE_VERSION}`;
 const CUBECRAFT_USERNAME_KEY = "cubecraft_username";
-const MULTIPLAYER_ENABLED = false;
+const MULTIPLAYER_ENABLED = true;
 const DEFAULT_MULTIPLAYER_SERVER_URL = "ws://localhost:3000";
+const DEFAULT_MULTIPLAYER_STUN_SERVERS = [{
+  urls: [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+    "stun:stun2.l.google.com:19302",
+    "stun:stun3.l.google.com:19302",
+    "stun:stun4.l.google.com:19302"
+  ]
+}];
+const MULTIPLAYER_PLAYER_SYNC_INTERVAL = 0.08;
+const MULTIPLAYER_WORLD_SYNC_INTERVAL = 0.35;
+const MULTIPLAYER_MAX_MOVE_SPEED = 11.5;
+const MULTIPLAYER_MAX_REACH = 7.5;
 const LEGACY_SAVE_KEYS = [
   "freecube2-static-save-v4",
   "freecube2-static-save-v5"
@@ -418,7 +432,7 @@ class WorldStore {
       this.index.selectedWorldId = worldId;
     }
     this.saveIndex();
-    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, fluidStates: {}, player: null, settings: null, worldState: null });
+    this.saveWorld(worldId, { seed: meta.seed, modifiedChunks: {}, fluidStates: {}, player: null, worldState: null });
     return worldId;
   }
 
@@ -515,7 +529,6 @@ class WorldStore {
         fluidStates: save.fluidStates && typeof save.fluidStates === "object" ? save.fluidStates : {},
         furnaces: save.furnaces && typeof save.furnaces === "object" ? save.furnaces : {},
         player: save.player && typeof save.player === "object" ? save.player : null,
-        settings: save.settings && typeof save.settings === "object" ? save.settings : null,
         worldState: save.worldState && typeof save.worldState === "object" ? save.worldState : null
       }
     };
@@ -552,7 +565,6 @@ class WorldStore {
       fluidStates: payloadCandidate.fluidStates && typeof payloadCandidate.fluidStates === "object" ? payloadCandidate.fluidStates : {},
       furnaces: payloadCandidate.furnaces && typeof payloadCandidate.furnaces === "object" ? payloadCandidate.furnaces : {},
       player: payloadCandidate.player && typeof payloadCandidate.player === "object" ? payloadCandidate.player : null,
-      settings: payloadCandidate.settings && typeof payloadCandidate.settings === "object" ? payloadCandidate.settings : null,
       worldState: payloadCandidate.worldState && typeof payloadCandidate.worldState === "object" ? payloadCandidate.worldState : null
     });
     return worldId;
@@ -743,6 +755,74 @@ class FractalNoise {
     }
 
     return value / maxValue;
+  }
+}
+
+class ValueNoise3D {
+  constructor(seed = 12345) {
+    this.seed = seed >>> 0;
+  }
+
+  smooth(t) {
+    return t * t * (3 - 2 * t);
+  }
+
+  sampleCorner(x, y, z) {
+    return (hash4(x, y, z, this.seed) / 4294967295) * 2 - 1;
+  }
+
+  noise(x, y, z) {
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const z0 = Math.floor(z);
+    const x1 = x0 + 1;
+    const y1 = y0 + 1;
+    const z1 = z0 + 1;
+    const tx = this.smooth(x - x0);
+    const ty = this.smooth(y - y0);
+    const tz = this.smooth(z - z0);
+
+    const c000 = this.sampleCorner(x0, y0, z0);
+    const c100 = this.sampleCorner(x1, y0, z0);
+    const c010 = this.sampleCorner(x0, y1, z0);
+    const c110 = this.sampleCorner(x1, y1, z0);
+    const c001 = this.sampleCorner(x0, y0, z1);
+    const c101 = this.sampleCorner(x1, y0, z1);
+    const c011 = this.sampleCorner(x0, y1, z1);
+    const c111 = this.sampleCorner(x1, y1, z1);
+
+    const x00 = lerp(c000, c100, tx);
+    const x10 = lerp(c010, c110, tx);
+    const x01 = lerp(c001, c101, tx);
+    const x11 = lerp(c011, c111, tx);
+    const y0v = lerp(x00, x10, ty);
+    const y1v = lerp(x01, x11, ty);
+    return lerp(y0v, y1v, tz);
+  }
+}
+
+class FractalNoise3D {
+  constructor(seed = 12345, octaves = 4, persistence = 0.5, lacunarity = 2) {
+    this.baseNoise = new ValueNoise3D(seed);
+    this.octaves = octaves;
+    this.persistence = persistence;
+    this.lacunarity = lacunarity;
+  }
+
+  fractal(x, y, z) {
+    let value = 0;
+    let amplitude = 1;
+    let frequency = 1;
+    let maxValue = 0;
+
+    for (let octave = 0; octave < this.octaves; octave += 1) {
+      value += this.baseNoise.noise(x * frequency, y * frequency, z * frequency) * amplitude;
+      maxValue += amplitude;
+      amplitude *= this.persistence;
+      frequency *= this.lacunarity;
+    }
+
+    return maxValue > 0 ? value / maxValue : 0;
   }
 }
 
@@ -1792,6 +1872,275 @@ const ITEM_INFO = {
   [ITEM.REDSTONE_DUST]: { name: "Redstone Dust", maxStack: 64, texture: ITEM_TEXTURE_SOURCES[ITEM.REDSTONE_DUST] }
 };
 
+const ITEM_DURABILITY = {
+  [ITEM.WOODEN_PICKAXE]: 59,
+  [ITEM.WOODEN_AXE]: 59,
+  [ITEM.WOODEN_SHOVEL]: 59,
+  [ITEM.WOODEN_SWORD]: 59,
+  [ITEM.WOODEN_HOE]: 59,
+  [ITEM.LEATHER_HELMET]: 55,
+  [ITEM.LEATHER_CHESTPLATE]: 80,
+  [ITEM.LEATHER_LEGGINGS]: 75,
+  [ITEM.LEATHER_BOOTS]: 65,
+  [ITEM.IRON_HELMET]: 165,
+  [ITEM.IRON_CHESTPLATE]: 240,
+  [ITEM.IRON_LEGGINGS]: 225,
+  [ITEM.IRON_BOOTS]: 195,
+  [ITEM.IRON_PICKAXE]: 250,
+  [ITEM.IRON_AXE]: 250,
+  [ITEM.IRON_SHOVEL]: 250,
+  [ITEM.IRON_SWORD]: 250,
+  [ITEM.IRON_HOE]: 250,
+  [ITEM.DIAMOND_PICKAXE]: 1561,
+  [ITEM.DIAMOND_AXE]: 1561,
+  [ITEM.DIAMOND_SHOVEL]: 1561,
+  [ITEM.DIAMOND_SWORD]: 1561,
+  [ITEM.DIAMOND_HOE]: 1561
+};
+
+const PLAYER_STAT_ORDER = [
+  "blocksMined",
+  "blocksPlaced",
+  "itemsCrafted",
+  "itemsSmelted",
+  "mobsKilled",
+  "villagerTrades",
+  "damageDealt",
+  "damageTaken",
+  "distanceWalked",
+  "jumps",
+  "playTime",
+  "foodsEaten",
+  "effectsUsed"
+];
+
+const PLAYER_STAT_LABELS = {
+  blocksMined: "Blocks mined",
+  blocksPlaced: "Blocks placed",
+  itemsCrafted: "Items crafted",
+  itemsSmelted: "Items smelted",
+  mobsKilled: "Mobs killed",
+  villagerTrades: "Villager trades",
+  damageDealt: "Damage dealt",
+  damageTaken: "Damage taken",
+  distanceWalked: "Distance walked",
+  jumps: "Jumps",
+  playTime: "Play time",
+  foodsEaten: "Foods eaten",
+  effectsUsed: "Potion effects used"
+};
+
+const ACHIEVEMENT_DEFS = {
+  get_wood: {
+    title: "Getting Wood",
+    desc: "Break your first log block."
+  },
+  benchmarking: {
+    title: "Benchmarking",
+    desc: "Craft a wooden tool.",
+    parent: "get_wood"
+  },
+  hot_stuff: {
+    title: "Hot Stuff",
+    desc: "Use a furnace to smelt something."
+  },
+  suit_up: {
+    title: "Suit Up",
+    desc: "Equip any piece of armor."
+  },
+  shiny_stones: {
+    title: "Shiny Stones",
+    desc: "Find diamonds or emeralds."
+  },
+  monster_hunter: {
+    title: "Monster Hunter",
+    desc: "Defeat a hostile mob."
+  },
+  village_social: {
+    title: "Village Social",
+    desc: "Trade with a villager."
+  },
+  local_brewery: {
+    title: "Local Brewery",
+    desc: "Gain a potion effect."
+  },
+  enchanter: {
+    title: "Enchanter",
+    desc: "Apply an enchantment upgrade."
+  },
+  bodyguard: {
+    title: "Bodyguard",
+    desc: "See an iron golem defending a village."
+  }
+};
+
+const EFFECT_DEFS = {
+  speed: { label: "Speed", positive: true },
+  strength: { label: "Strength", positive: true },
+  regeneration: { label: "Regeneration", positive: true },
+  jump_boost: { label: "Jump Boost", positive: true },
+  resistance: { label: "Resistance", positive: true },
+  poison: { label: "Poison", positive: false }
+};
+
+const ENCHANTMENT_DEFS = {
+  sharpness: { label: "Sharpness", maxLevel: 5 },
+  efficiency: { label: "Efficiency", maxLevel: 5 },
+  unbreaking: { label: "Unbreaking", maxLevel: 3 },
+  protection: { label: "Protection", maxLevel: 4 }
+};
+
+function getItemMaxDurability(itemType) {
+  return Math.max(0, Number(ITEM_DURABILITY[itemType]) || 0);
+}
+
+function normalizeDurabilityValue(itemType, value) {
+  const maxDurability = getItemMaxDurability(itemType);
+  if (maxDurability <= 0) {
+    return 0;
+  }
+  if (!Number.isFinite(value) || value <= 0) {
+    return maxDurability;
+  }
+  return clamp(Math.floor(value), 1, maxDurability);
+}
+
+function createDefaultPlayerStats() {
+  return {
+    blocksMined: 0,
+    blocksPlaced: 0,
+    itemsCrafted: 0,
+    itemsSmelted: 0,
+    mobsKilled: 0,
+    villagerTrades: 0,
+    damageDealt: 0,
+    damageTaken: 0,
+    distanceWalked: 0,
+    jumps: 0,
+    playTime: 0,
+    foodsEaten: 0,
+    effectsUsed: 0
+  };
+}
+
+function normalizePlayerStats(value) {
+  const base = createDefaultPlayerStats();
+  if (!value || typeof value !== "object") {
+    return base;
+  }
+  for (const key of PLAYER_STAT_ORDER) {
+    base[key] = Math.max(0, Number(value[key]) || 0);
+  }
+  return base;
+}
+
+function createDefaultAchievementState() {
+  const state = {};
+  for (const key of Object.keys(ACHIEVEMENT_DEFS)) {
+    state[key] = {
+      done: false,
+      unlockedAt: 0
+    };
+  }
+  return state;
+}
+
+function normalizeAchievementState(value) {
+  const state = createDefaultAchievementState();
+  if (!value || typeof value !== "object") {
+    return state;
+  }
+  for (const key of Object.keys(ACHIEVEMENT_DEFS)) {
+    state[key] = {
+      done: !!value[key]?.done,
+      unlockedAt: Math.max(0, Number(value[key]?.unlockedAt) || 0)
+    };
+  }
+  return state;
+}
+
+function sanitizeEffectKey(name) {
+  const key = String(name || "").trim().toLowerCase().replace(/\s+/g, "_");
+  return Object.prototype.hasOwnProperty.call(EFFECT_DEFS, key) ? key : "";
+}
+
+function normalizePlayerEffects(value) {
+  const result = {};
+  if (!value || typeof value !== "object") {
+    return result;
+  }
+  for (const [rawKey, effect] of Object.entries(value)) {
+    const key = sanitizeEffectKey(rawKey);
+    if (!key || !effect || typeof effect !== "object") continue;
+    const level = clamp(Math.floor(Number(effect.level) || 0), 0, 10);
+    const time = Math.max(0, Number(effect.time) || 0);
+    const maxTime = Math.max(time, Number(effect.maxTime) || time);
+    if (level <= 0 || time <= 0) continue;
+    result[key] = {
+      level,
+      time,
+      maxTime
+    };
+  }
+  return result;
+}
+
+function createDefaultEnchantmentState() {
+  return {
+    held: {
+      sharpness: 0,
+      efficiency: 0,
+      unbreaking: 0
+    },
+    armor: {
+      protection: 0,
+      unbreaking: 0
+    }
+  };
+}
+
+function normalizeEnchantmentState(value) {
+  const state = createDefaultEnchantmentState();
+  if (!value || typeof value !== "object") {
+    return state;
+  }
+  for (const section of ["held", "armor"]) {
+    const source = value[section];
+    if (!source || typeof source !== "object") continue;
+    for (const key of Object.keys(state[section])) {
+      const maxLevel = ENCHANTMENT_DEFS[key]?.maxLevel || 5;
+      state[section][key] = clamp(Math.floor(Number(source[key]) || 0), 0, maxLevel);
+    }
+  }
+  return state;
+}
+
+function getPlayerEffectLevel(player, key) {
+  if (!player?.effects) return 0;
+  const normalized = sanitizeEffectKey(key);
+  return Math.max(0, Math.floor(Number(player.effects[normalized]?.level) || 0));
+}
+
+function formatStatValue(key, value) {
+  const numeric = Math.max(0, Number(value) || 0);
+  if (key === "distanceWalked") {
+    return `${numeric.toFixed(1)} m`;
+  }
+  if (key === "playTime") {
+    const totalSeconds = Math.floor(numeric);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+  if (numeric % 1 !== 0) {
+    return numeric.toFixed(1);
+  }
+  return String(Math.floor(numeric));
+}
+
 function getAllItemTexturePaths() {
   return Object.values(ITEM_TEXTURE_SOURCES).map((path) => normalizeAssetPath(path));
 }
@@ -2155,6 +2504,19 @@ const MOB_DEFS = {
     modelHeight: 1.8,
     yawOffset: Math.PI
   },
+  iron_golem: {
+    radius: 0.62,
+    height: 2.7,
+    maxHealth: 60,
+    speed: 1.35,
+    hostile: false,
+    scareRange: 0,
+    meleeDamage: 9,
+    attackDamage: 0,
+    attackReach: 2.2,
+    modelHeight: 2.7,
+    yawOffset: Math.PI
+  },
   wolf: {
     radius: 0.4,
     height: 1.0,
@@ -2231,6 +2593,307 @@ function getNearestVillageCenter(x, z, seed, radius = 128) {
     }
   }
   return best;
+}
+
+const VILLAGER_PROFESSIONS = ["farmer", "smith", "librarian", "cleric", "shepherd"];
+const VILLAGER_PROFESSION_DEFS = {
+  farmer: {
+    label: "Farmer",
+    workstation: BLOCK.CRAFTING_TABLE
+  },
+  smith: {
+    label: "Smith",
+    workstation: BLOCK.FURNACE
+  },
+  librarian: {
+    label: "Librarian",
+    workstation: BLOCK.PLANKS
+  },
+  cleric: {
+    label: "Cleric",
+    workstation: BLOCK.TORCH
+  },
+  shepherd: {
+    label: "Shepherd",
+    workstation: BLOCK.WHITE_WOOL
+  }
+};
+
+function getVillagerProfessionLabel(profession = "farmer") {
+  return VILLAGER_PROFESSION_DEFS[profession]?.label || "Villager";
+}
+
+function getVillageStructurePlan(centerX, centerZ, seed) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const offsetVariant = worldSeed & 1;
+  const houses = [
+    {
+      originX: centerX - 8,
+      originZ: centerZ - 6,
+      width: 5,
+      depth: 5,
+      doorSide: "south",
+      profession: VILLAGER_PROFESSIONS[(worldSeed + 0) % VILLAGER_PROFESSIONS.length]
+    },
+    {
+      originX: centerX + 4,
+      originZ: centerZ - 6,
+      width: 5,
+      depth: 5,
+      doorSide: "south",
+      profession: VILLAGER_PROFESSIONS[(worldSeed + 1) % VILLAGER_PROFESSIONS.length]
+    },
+    {
+      originX: offsetVariant === 0 ? centerX - 8 : centerX + 4,
+      originZ: centerZ + 3,
+      width: 5,
+      depth: 5,
+      doorSide: "north",
+      profession: VILLAGER_PROFESSIONS[(worldSeed + 2) % VILLAGER_PROFESSIONS.length]
+    }
+  ];
+
+  for (const house of houses) {
+    const bedZ = house.doorSide === "south" ? house.originZ + 1 : house.originZ + house.depth - 2;
+    const jobZ = house.doorSide === "south" ? house.originZ + 2 : house.originZ + house.depth - 3;
+    const centerHouseX = house.originX + Math.floor(house.width / 2);
+    house.bed = { x: centerHouseX, z: bedZ };
+    house.jobSite = {
+      x: house.originX + house.width - 2,
+      z: jobZ,
+      type: VILLAGER_PROFESSION_DEFS[house.profession]?.workstation || BLOCK.CRAFTING_TABLE
+    };
+  }
+
+  return {
+    gatherPoint: { x: centerX, z: centerZ },
+    well: { x: centerX, z: centerZ },
+    farms: [
+      {
+        minX: centerX - 3,
+        maxX: centerX + 3,
+        minZ: centerZ + 6,
+        maxZ: centerZ + 10
+      }
+    ],
+    pathNodes: [
+      { x: centerX, z: centerZ },
+      { x: centerX - 8, z: centerZ - 4 },
+      { x: centerX + 4, z: centerZ - 4 },
+      { x: centerX, z: centerZ + 5 }
+    ],
+    houses
+  };
+}
+
+function getVillagePlanFromCenter(center, seed) {
+  if (!center) return null;
+  return getVillageStructurePlan(Math.floor(center.x), Math.floor(center.z), center.seed || seed);
+}
+
+function getVillagerTradeTable(profession = "farmer", seed = 0) {
+  const offers = {
+    farmer: [
+      {
+        id: `farmer-wool-${seed}`,
+        label: "Trade wool for emeralds",
+        costs: [{ itemType: BLOCK.WHITE_WOOL, count: 4 }],
+        reward: { kind: "item", itemType: ITEM.EMERALD, count: 1 },
+        maxUses: 6
+      },
+      {
+        id: `farmer-food-${seed}`,
+        label: "Buy cooked mutton",
+        costs: [{ itemType: ITEM.EMERALD, count: 2 }],
+        reward: { kind: "item", itemType: ITEM.COOKED_MUTTON, count: 3 },
+        maxUses: 5
+      }
+    ],
+    smith: [
+      {
+        id: `smith-sword-${seed}`,
+        label: "Forge iron sword",
+        costs: [{ itemType: ITEM.EMERALD, count: 3 }, { itemType: ITEM.IRON_INGOT, count: 2 }],
+        reward: { kind: "item", itemType: ITEM.IRON_SWORD, count: 1 },
+        maxUses: 4
+      },
+      {
+        id: `smith-pick-${seed}`,
+        label: "Forge iron pickaxe",
+        costs: [{ itemType: ITEM.EMERALD, count: 4 }, { itemType: ITEM.IRON_INGOT, count: 3 }],
+        reward: { kind: "item", itemType: ITEM.IRON_PICKAXE, count: 1 },
+        maxUses: 4
+      }
+    ],
+    librarian: [
+      {
+        id: `lib-eff-${seed}`,
+        label: "Efficiency lesson",
+        costs: [{ itemType: ITEM.EMERALD, count: 5 }],
+        reward: { kind: "enchant", slot: "held", enchant: "efficiency", levels: 1 },
+        maxUses: 3
+      },
+      {
+        id: `lib-sharp-${seed}`,
+        label: "Sharpness lesson",
+        costs: [{ itemType: ITEM.EMERALD, count: 5 }],
+        reward: { kind: "enchant", slot: "held", enchant: "sharpness", levels: 1 },
+        maxUses: 3
+      }
+    ],
+    cleric: [
+      {
+        id: `cleric-regen-${seed}`,
+        label: "Blessing of regen",
+        costs: [{ itemType: ITEM.EMERALD, count: 3 }, { itemType: ITEM.REDSTONE_DUST, count: 1 }],
+        reward: { kind: "effect", effect: "regeneration", level: 1, duration: 90 },
+        maxUses: 4
+      },
+      {
+        id: `cleric-strength-${seed}`,
+        label: "Blessing of strength",
+        costs: [{ itemType: ITEM.EMERALD, count: 4 }, { itemType: ITEM.REDSTONE_DUST, count: 1 }],
+        reward: { kind: "effect", effect: "strength", level: 1, duration: 120 },
+        maxUses: 4
+      }
+    ],
+    shepherd: [
+      {
+        id: `shep-armor-${seed}`,
+        label: "Leather armor",
+        costs: [{ itemType: ITEM.EMERALD, count: 2 }],
+        reward: { kind: "item", itemType: ITEM.LEATHER_CHESTPLATE, count: 1 },
+        maxUses: 3
+      },
+      {
+        id: `shep-prot-${seed}`,
+        label: "Protection lesson",
+        costs: [{ itemType: ITEM.EMERALD, count: 4 }],
+        reward: { kind: "enchant", slot: "armor", enchant: "protection", levels: 1 },
+        maxUses: 3
+      }
+    ]
+  };
+  return (offers[profession] || offers.farmer).map((offer) => ({
+    ...offer,
+    uses: 0
+  }));
+}
+
+function getVillagePathKey(x, z) {
+  return `${x},${z}`;
+}
+
+function findVillagePath(world, startX, startZ, goalX, goalZ, hintY = SEA_LEVEL + 4, maxRadius = 18) {
+  const startCell = { x: Math.floor(startX), z: Math.floor(startZ) };
+  const goalCell = { x: Math.floor(goalX), z: Math.floor(goalZ) };
+  const startKey = getVillagePathKey(startCell.x, startCell.z);
+  const goalKey = getVillagePathKey(goalCell.x, goalCell.z);
+  if (startKey === goalKey) {
+    const y = findLoadedWalkableY(world, startCell.x + 0.5, startCell.z + 0.5, hintY, 2)
+      || findWalkableY(world, startCell.x + 0.5, startCell.z + 0.5, hintY, 2)
+      || hintY;
+    return [{ x: goalCell.x + 0.5, y, z: goalCell.z + 0.5 }];
+  }
+
+  const minX = Math.min(startCell.x, goalCell.x) - maxRadius;
+  const maxX = Math.max(startCell.x, goalCell.x) + maxRadius;
+  const minZ = Math.min(startCell.z, goalCell.z) - maxRadius;
+  const maxZ = Math.max(startCell.z, goalCell.z) + maxRadius;
+  const open = [startKey];
+  const openSet = new Set([startKey]);
+  const cameFrom = new Map();
+  const gScore = new Map([[startKey, 0]]);
+  const fScore = new Map([[startKey, Math.abs(goalCell.x - startCell.x) + Math.abs(goalCell.z - startCell.z)]]);
+  const yCache = new Map();
+  const parsedCache = new Map([[startKey, startCell], [goalKey, goalCell]]);
+
+  const getCell = (key) => {
+    if (parsedCache.has(key)) {
+      return parsedCache.get(key);
+    }
+    const [x, z] = key.split(",").map(Number);
+    const cell = { x, z };
+    parsedCache.set(key, cell);
+    return cell;
+  };
+
+  const getWalkY = (x, z, baseY) => {
+    const key = getVillagePathKey(x, z);
+    if (yCache.has(key)) {
+      return yCache.get(key);
+    }
+    const walkY = findLoadedWalkableY(world, x + 0.5, z + 0.5, baseY, 2)
+      || findWalkableY(world, x + 0.5, z + 0.5, baseY, 2);
+    yCache.set(key, walkY ?? NaN);
+    return walkY ?? NaN;
+  };
+
+  let iterations = 0;
+  while (open.length > 0 && iterations < 420) {
+    iterations += 1;
+    open.sort((a, b) => (fScore.get(a) || Infinity) - (fScore.get(b) || Infinity));
+    const currentKey = open.shift();
+    openSet.delete(currentKey);
+    if (currentKey === goalKey) {
+      const path = [];
+      let cursor = currentKey;
+      while (cursor) {
+        const cell = getCell(cursor);
+        const y = getWalkY(cell.x, cell.z, hintY);
+        if (Number.isFinite(y)) {
+          path.push({ x: cell.x + 0.5, y, z: cell.z + 0.5 });
+        }
+        cursor = cameFrom.get(cursor) || "";
+      }
+      path.reverse();
+      if (path.length <= 2) {
+        return path;
+      }
+      const reduced = [path[0]];
+      for (let i = 1; i < path.length - 1; i += 1) {
+        const prev = path[i - 1];
+        const curr = path[i];
+        const next = path[i + 1];
+        const dirA = `${Math.sign(curr.x - prev.x)},${Math.sign(curr.z - prev.z)}`;
+        const dirB = `${Math.sign(next.x - curr.x)},${Math.sign(next.z - curr.z)}`;
+        if (dirA !== dirB) {
+          reduced.push(curr);
+        }
+      }
+      reduced.push(path[path.length - 1]);
+      return reduced;
+    }
+
+    const current = getCell(currentKey);
+    const currentY = getWalkY(current.x, current.z, hintY);
+    if (!Number.isFinite(currentY)) {
+      continue;
+    }
+
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = current.x + dx;
+      const nz = current.z + dz;
+      if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) continue;
+      const nextY = getWalkY(nx, nz, currentY);
+      if (!Number.isFinite(nextY) || Math.abs(nextY - currentY) > 1.35) continue;
+      const nextKey = getVillagePathKey(nx, nz);
+      const tentative = (gScore.get(currentKey) || 0) + 1 + Math.abs(nextY - currentY) * 0.35;
+      if (tentative >= (gScore.get(nextKey) || Infinity)) continue;
+      cameFrom.set(nextKey, currentKey);
+      gScore.set(nextKey, tentative);
+      fScore.set(nextKey, tentative + Math.abs(goalCell.x - nx) + Math.abs(goalCell.z - nz));
+      if (!openSet.has(nextKey)) {
+        open.push(nextKey);
+        openSet.add(nextKey);
+      }
+    }
+  }
+
+  const fallbackY = findLoadedWalkableY(world, goalCell.x + 0.5, goalCell.z + 0.5, hintY, 2)
+    || findWalkableY(world, goalCell.x + 0.5, goalCell.z + 0.5, hintY, 2)
+    || hintY;
+  return [{ x: goalCell.x + 0.5, y: fallbackY, z: goalCell.z + 0.5 }];
 }
 
 function getDayCycleInfo(time = 0) {
@@ -2400,6 +3063,123 @@ function getWeatherLabel(type) {
     default:
       return "Clear";
   }
+}
+
+function getColumnPrecipitationType(column) {
+  if (!column || typeof column !== "object") {
+    return "none";
+  }
+  const biome = String(column.biome || "").toLowerCase();
+  if (biome === "desert") {
+    return "none";
+  }
+  const temperature = Number(column.temperature);
+  const height = Number(column.height) || 0;
+  const coldBiome = biome === "mountains" || biome === "cliff";
+  return coldBiome || temperature < 0.34 || height >= SEA_LEVEL + 28 ? "snow" : "rain";
+}
+
+function getWeatherBaseIntensity(type) {
+  switch (normalizeWeatherType(type)) {
+    case WEATHER_TYPES.THUNDER:
+      return 1;
+    case WEATHER_TYPES.RAIN:
+      return 0.72;
+    default:
+      return 0;
+  }
+}
+
+function getWeatherParticleBudget(settingsState = DEFAULT_SETTINGS, weatherState = null) {
+  const preset = normalizePerformancePreset(settingsState?.performancePreset);
+  let count = preset === "turbo" ? 42 : preset === "boost" ? 68 : 96;
+  if ((settingsState?.renderDistanceChunks || DEFAULT_RENDER_DISTANCE) <= 2) {
+    count = Math.max(28, Math.floor(count * 0.8));
+  }
+  if (weatherState?.runtimeLowFps) {
+    count = Math.max(22, Math.floor(count * 0.62));
+  }
+  if (settingsState?.graphicsMode !== "fancy") {
+    count = Math.max(20, Math.floor(count * 0.88));
+  }
+  return count;
+}
+
+function buildWeatherParticlePass(world, player, weatherState, settingsState = DEFAULT_SETTINGS) {
+  const intensity = clamp(Number(weatherState?.intensity) || 0, 0, 1);
+  const weatherType = normalizeWeatherType(weatherState?.weather?.type);
+  if (!world || !player || weatherType === WEATHER_TYPES.CLEAR || intensity <= 0.02) {
+    return { drops: [], splashes: [] };
+  }
+
+  const timeSeconds = Number(weatherState?.timeSeconds) || 0;
+  const renderDistance = clamp(Number(settingsState?.renderDistanceChunks) || DEFAULT_RENDER_DISTANCE, 2, 6);
+  const radius = clamp(6 + renderDistance * 1.8 + (weatherType === WEATHER_TYPES.THUNDER ? 1.5 : 0), 7, 18);
+  const budget = Math.max(18, Math.floor(getWeatherParticleBudget(settingsState, weatherState) * intensity));
+  const drops = [];
+  const splashes = [];
+  const eyeY = player.y + PLAYER_EYE_HEIGHT;
+  const playerColumn = world.terrain.describeColumn(Math.floor(player.x), Math.floor(player.z));
+  const playerUnderCover = playerColumn && playerColumn.height > eyeY + 1.4;
+
+  for (let index = 0; index < budget; index += 1) {
+    const angleSeed = hash4(Math.floor(player.x), index, Math.floor(player.z), Math.floor(timeSeconds * 6) + 4103);
+    const radialSeed = hash4(Math.floor(player.z), index, Math.floor(player.x), Math.floor(timeSeconds * 4) + 7117);
+    const angle = index * 2.399963229728653 + timeSeconds * 0.28 + ((angleSeed & 1023) / 1023) * 0.8;
+    const radial = radius * (0.18 + 0.82 * Math.sqrt(((radialSeed >>> 10) & 1023) / 1023));
+    const jitterX = (((radialSeed >>> 20) & 255) / 255 - 0.5) * 1.1;
+    const jitterZ = (((angleSeed >>> 20) & 255) / 255 - 0.5) * 1.1;
+    const worldX = Math.floor(player.x + Math.cos(angle) * radial + jitterX);
+    const worldZ = Math.floor(player.z + Math.sin(angle) * radial + jitterZ);
+    const column = world.terrain.describeColumn(worldX, worldZ);
+    const precipitationType = getColumnPrecipitationType(column);
+    if (precipitationType === "none") {
+      continue;
+    }
+
+    const surfaceY = clamp((Number(column?.height) || SEA_LEVEL) + 1.02, 1, WORLD_HEIGHT - 1);
+    if (playerUnderCover && radial < 3.4 && surfaceY > eyeY + 0.9) {
+      continue;
+    }
+
+    const topY = Math.min(WORLD_HEIGHT + 12, Math.max(surfaceY + 6, eyeY + 8));
+    const fallSpan = Math.max(4.5, topY - surfaceY);
+    const phaseSeed = ((angleSeed >>> 8) & 1023) / 1023;
+    const speed = precipitationType === "snow" ? 2.3 : weatherType === WEATHER_TYPES.THUNDER ? 16.5 : 12.6;
+    const travel = mod(timeSeconds * speed + phaseSeed * fallSpan, fallSpan);
+    const y = topY - travel;
+    if (y < player.y - 8 || y > player.y + 22) {
+      continue;
+    }
+
+    const driftX = precipitationType === "snow" ? Math.sin(timeSeconds * 0.8 + angle) * 0.15 : 0.02;
+    const driftZ = precipitationType === "snow" ? Math.cos(timeSeconds * 0.72 + angle * 1.14) * 0.15 : -0.02;
+    const length = precipitationType === "snow" ? 0.2 + phaseSeed * 0.16 : 0.9 + phaseSeed * 0.5 + intensity * 0.25;
+    const alpha = precipitationType === "snow" ? 0.4 + intensity * 0.2 : 0.26 + intensity * 0.3;
+    drops.push({
+      type: precipitationType,
+      x: worldX + 0.5 + driftX,
+      y,
+      z: worldZ + 0.5 + driftZ,
+      endX: worldX + 0.5 + driftX * 0.35,
+      endY: y - length,
+      endZ: worldZ + 0.5 + driftZ * 0.35,
+      alpha,
+      depthHint: radial
+    });
+
+    if (precipitationType === "rain" && y - length <= surfaceY + 0.18 && radial < radius * 0.86) {
+      splashes.push({
+        x: worldX + 0.5,
+        y: surfaceY,
+        z: worldZ + 0.5,
+        size: 0.06 + phaseSeed * 0.06,
+        alpha: 0.08 + intensity * 0.16
+      });
+    }
+  }
+
+  return { drops, splashes };
 }
 
 class TextureLibrary {
@@ -2985,7 +3765,7 @@ const MOB_LOOT_TABLES = {
 
 const PLAYER_SKIN_PRESETS = {
   steve_large: {
-    label: "Steve",
+    label: "Steve HD",
     source: normalizeAssetPath("assets/PNG/skins/steve_large.webp"),
     fallbackPreset: "steve"
   },
@@ -3025,6 +3805,7 @@ const PLAYER_SKIN_PRESETS = {
   },
   steve: {
     label: "Steve",
+    source: normalizeAssetPath("assets/PNG/skins/steve_large.webp"),
     skin: "#c79d7b",
     skinShade: "#a87b5c",
     hair: "#4c331d",
@@ -3364,6 +4145,26 @@ function normalizeImportedPlayerSkinCanvas(image) {
   return canvas;
 }
 
+function buildPlayerBillboardCanvas(skinSource = null) {
+  const skin = skinSource || getPresetPlayerSkinCanvas("steve");
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!skin) {
+    return canvas;
+  }
+  ctx.drawImage(skin, 8, 8, 8, 8, 4, 0, 8, 8);
+  ctx.drawImage(skin, 20, 20, 8, 12, 4, 8, 8, 12);
+  ctx.drawImage(skin, 44, 20, 4, 12, 0, 8, 4, 12);
+  ctx.drawImage(skin, 36, 52, 4, 12, 12, 8, 4, 12);
+  ctx.drawImage(skin, 4, 20, 4, 12, 4, 20, 4, 12);
+  ctx.drawImage(skin, 20, 52, 4, 12, 8, 20, 4, 12);
+  return canvas;
+}
+
 function triggerPlayerSkinRefresh() {
   playerSkinRefreshHandler?.();
 }
@@ -3440,7 +4241,7 @@ function getSelectedPlayerSkinLabel(settingsState = DEFAULT_SETTINGS) {
 function readPlayerSkinFile(file) {
   return new Promise((resolve, reject) => {
     if (!file) {
-      reject(new Error("Choose a PNG skin first."));
+      reject(new Error("Choose a PNG or WebP skin first."));
       return;
     }
     const reader = new FileReader();
@@ -4242,13 +5043,17 @@ class TerrainGenerator {
     this.peaks = new FractalNoise(seed + 93, 4, 0.5, 2.12);
     this.erosion = new FractalNoise(seed + 107, 3, 0.54, 2.15);
     this.rivers = new FractalNoise(seed + 121, 3, 0.55, 2.3);
-    this.cavesXZ = new FractalNoise(seed + 151, 3, 0.56, 2.1);
-    this.cavesXY = new FractalNoise(seed + 173, 3, 0.52, 2.06);
-    this.cavesYZ = new FractalNoise(seed + 197, 3, 0.54, 2.14);
-    this.caveWarp = new FractalNoise(seed + 223, 2, 0.5, 2);
-    this.caveRooms = new FractalNoise(seed + 239, 3, 0.54, 2.12);
-    this.caveDetail = new FractalNoise(seed + 257, 2, 0.58, 2.45);
-    this.lavaPools = new FractalNoise(seed + 271, 2, 0.56, 2.08);
+    this.caveWarp = new FractalNoise3D(seed + 151, 2, 0.52, 2.02);
+    this.cheeseCaves = new FractalNoise3D(seed + 173, 4, 0.54, 2.04);
+    this.spaghettiCavesA = new FractalNoise3D(seed + 197, 3, 0.56, 2.18);
+    this.spaghettiCavesB = new FractalNoise3D(seed + 223, 3, 0.55, 2.12);
+    this.noodleCaves = new FractalNoise3D(seed + 239, 2, 0.58, 2.42);
+    this.verticalCaves = new FractalNoise3D(seed + 257, 3, 0.5, 2.08);
+    this.caveMask = new FractalNoise3D(seed + 271, 3, 0.53, 1.96);
+    this.cavePillars = new FractalNoise3D(seed + 293, 2, 0.5, 2.3);
+    this.aquiferNoise = new FractalNoise3D(seed + 311, 3, 0.55, 2.03);
+    this.aquiferLevelNoise = new FractalNoise3D(seed + 337, 2, 0.5, 1.9);
+    this.lavaPools = new FractalNoise3D(seed + 359, 2, 0.57, 2.08);
     this.heightCache = new Map();
     this.columnCache = new Map();
   }
@@ -4424,56 +5229,88 @@ class TerrainGenerator {
     return base + Math.floor(random2(x, z, this.seed + 401) * variance);
   }
 
-  shouldCarveCave(x, y, z, surfaceY) {
-    if (y < 6 || y >= surfaceY - 4) {
-      return false;
+  sampleCaveProfile(x, y, z, surfaceY) {
+    if (y < 5 || y >= surfaceY - 3) {
+      return { carve: false, fluidType: BLOCK.AIR, openness: 0, chamber: 0 };
     }
 
-    const depth = clamp((surfaceY - y) / 38, 0, 1);
-    if (depth < 0.18) {
-      return false;
+    const depth = clamp((surfaceY - y) / Math.max(22, surfaceY * 0.72), 0, 1);
+    if (depth < 0.12) {
+      return { carve: false, fluidType: BLOCK.AIR, openness: 0, chamber: 0 };
     }
 
-    const warpXZ = this.caveWarp.fractal(x * 0.017, z * 0.017) * 8;
-    const warpY = this.caveWarp.fractal(y * 0.021 + 17.3, z * 0.019 - 9.1) * 4.5;
-    const sampleX = (x + warpXZ) * 0.05;
-    const sampleY = (y + warpY) * 0.056;
-    const sampleZ = (z - warpXZ) * 0.05;
+    const warpX = this.caveWarp.fractal(x * 0.028, y * 0.024, z * 0.028) * 7.5;
+    const warpY = this.caveWarp.fractal(x * 0.022 + 13.7, y * 0.03 - 5.8, z * 0.022 - 9.4) * 5.6;
+    const warpZ = this.caveWarp.fractal(x * 0.028 - 17.1, y * 0.021 + 4.2, z * 0.028 + 11.5) * 7.5;
+    const sampleX = (x + warpX) * 0.055;
+    const sampleY = (y + warpY) * 0.055;
+    const sampleZ = (z + warpZ) * 0.055;
 
-    const chamber =
-      (1 - Math.abs(this.cavesXZ.fractal(sampleX * 0.92, sampleZ * 0.92))) * 0.36 +
-      (1 - Math.abs(this.cavesXY.fractal(sampleX * 0.95 + 19.4, sampleY * 0.95 - 11.2))) * 0.32 +
-      (1 - Math.abs(this.cavesYZ.fractal(sampleY * 0.93 - 7.6, sampleZ * 0.93 + 5.8))) * 0.32;
-    const tunnel =
-      (1 - Math.abs(this.cavesXZ.fractal(sampleX * 2.18 + 17.3, sampleZ * 2.18 - 11.4))) * 0.55 +
-      (1 - Math.abs(this.cavesYZ.fractal(sampleY * 2.03 + 6.7, sampleZ * 2.03 - 14.2))) * 0.45;
-    const detail =
-      (1 - Math.abs(this.caveRooms.fractal(sampleX * 1.45 - 8.4, sampleZ * 1.45 + 2.8))) * 0.55 +
-      (1 - Math.abs(this.caveDetail.fractal(sampleX * 1.92 + 13.2, sampleY * 1.92 - 4.5))) * 0.45;
-    const caveCeilingPenalty = y > surfaceY - 10 ? (y - (surfaceY - 10)) * 0.03 : 0;
-    const roomThreshold = 0.73 + (1 - depth) * 0.11 + caveCeilingPenalty;
-    const tunnelThreshold = 0.79 + (1 - depth) * 0.08 + caveCeilingPenalty;
-    const keepPillarChance = 0.04 + (1 - depth) * 0.07;
-    if (random3(x, y, z, this.seed + 311) < keepPillarChance) {
-      return false;
+    const chamber = this.cheeseCaves.fractal(sampleX * 0.68, sampleY * 0.68, sampleZ * 0.68) * 0.5 + 0.5;
+    const openness = this.caveMask.fractal(sampleX * 0.92 + 9.4, sampleY * 0.92 - 6.8, sampleZ * 0.92 + 4.1) * 0.5 + 0.5;
+    const spaghettiA = 1 - clamp(Math.abs(this.spaghettiCavesA.fractal(sampleX * 1.42 + 7.3, sampleY * 1.16 - 8.9, sampleZ * 1.42 + 2.1)) * 3.8, 0, 1);
+    const spaghettiB = 1 - clamp(Math.abs(this.spaghettiCavesB.fractal(sampleX * 1.31 - 11.6, sampleY * 1.24 + 5.5, sampleZ * 1.31 - 14.7)) * 3.5, 0, 1);
+    const spaghetti = Math.max(spaghettiA, spaghettiB) * (0.72 + openness * 0.28);
+    const noodle = 1 - clamp(Math.abs(this.noodleCaves.fractal(sampleX * 2.18 - 5.2, sampleY * 2.64 + 3.1, sampleZ * 2.18 + 17.2)) * 5.3, 0, 1);
+    const vertical = 1 - clamp(Math.abs(this.verticalCaves.fractal(sampleX * 1.04 - 3.7, sampleY * 0.62 + 7.2, sampleZ * 1.04 + 5.4)) * 2.7, 0, 1);
+    const pillarNoise = this.cavePillars.fractal(sampleX * 0.96 + 4.3, sampleY * 1.36 - 12.2, sampleZ * 0.96 - 1.8) * 0.5 + 0.5;
+
+    const caveCeilingPenalty = y > surfaceY - 10 ? (y - (surfaceY - 10)) * 0.036 : 0;
+    const cheeseThreshold = 0.75 + (1 - depth) * 0.13 + caveCeilingPenalty;
+    const spaghettiThreshold = 0.8 + (1 - depth) * 0.08 + caveCeilingPenalty;
+    const noodleThreshold = 0.885 + (1 - depth) * 0.045 + caveCeilingPenalty;
+
+    const carveCheese = chamber > cheeseThreshold;
+    const carveSpaghetti = spaghetti > spaghettiThreshold && openness > 0.36;
+    const carveNoodle = noodle > noodleThreshold && vertical > 0.28 && openness > 0.5;
+    let carve = carveCheese || carveSpaghetti || carveNoodle;
+
+    if (carveCheese && pillarNoise > 0.69 && openness < 0.8) {
+      carve = false;
     }
 
-    const carveRoom = chamber > roomThreshold && detail > 0.54;
-    const carveTunnel = tunnel > tunnelThreshold && detail > 0.44;
-    return carveRoom || carveTunnel;
+    const fluidType = carve ? this.getCaveFluidType(x, y, z, surfaceY, openness, chamber) : BLOCK.AIR;
+    return { carve, fluidType, openness, chamber };
   }
 
-  shouldFillCaveWithLava(x, y, z, surfaceY) {
+  shouldCarveCave(x, y, z, surfaceY) {
+    return this.sampleCaveProfile(x, y, z, surfaceY).carve;
+  }
+
+  shouldFillCaveWithWater(x, y, z, surfaceY, openness = 0.5) {
+    if (y >= surfaceY - 10 || y > SEA_LEVEL - 4 || y < LAVA_LEVEL + 3) {
+      return false;
+    }
+    const aquifer = this.aquiferNoise.fractal(x * 0.027, y * 0.024, z * 0.027) * 0.5 + 0.5;
+    if (aquifer < 0.72 || openness < 0.42) {
+      return false;
+    }
+    const aquiferDepth = this.aquiferLevelNoise.fractal(x * 0.013, y * 0.009, z * 0.013) * 0.5 + 0.5;
+    const waterLine = SEA_LEVEL - 4 - Math.floor(aquiferDepth * 18);
+    return y <= waterLine;
+  }
+
+  shouldFillCaveWithLava(x, y, z, surfaceY, chamber = 0.5) {
     if (y > LAVA_LEVEL || y >= surfaceY - 16) {
       return false;
     }
 
-    const poolMask = this.lavaPools.fractal(x * 0.031, z * 0.031) * 0.5 + 0.5;
-    if (poolMask < 0.63) {
+    const poolMask = this.lavaPools.fractal(x * 0.032, y * 0.02, z * 0.032) * 0.5 + 0.5;
+    if (poolMask < 0.66 || chamber < 0.54) {
       return false;
     }
-    const fillHeight = clamp(Math.floor(4 + (poolMask - 0.63) * 16), 4, LAVA_LEVEL);
+    const fillHeight = clamp(Math.floor(3 + (poolMask - 0.66) * 22), 3, LAVA_LEVEL);
     return y <= fillHeight;
+  }
+
+  getCaveFluidType(x, y, z, surfaceY, openness = 0.5, chamber = 0.5) {
+    if (this.shouldFillCaveWithLava(x, y, z, surfaceY, chamber)) {
+      return BLOCK.LAVA;
+    }
+    if (this.shouldFillCaveWithWater(x, y, z, surfaceY, openness)) {
+      return BLOCK.WATER;
+    }
+    return BLOCK.AIR;
   }
 }
 
@@ -4554,14 +5391,15 @@ class Chunk {
           if (current === BLOCK.AIR || isFluidBlock(current) || current === BLOCK.BEDROCK) {
             continue;
           }
-          if (!this.world.terrain.shouldCarveCave(worldX, y, worldZ, surfaceY)) {
+          const profile = this.world.terrain.sampleCaveProfile(worldX, y, worldZ, surfaceY);
+          if (!profile.carve) {
             continue;
           }
           this.setLocalRaw(
             lx,
             y,
             lz,
-            this.world.terrain.shouldFillCaveWithLava(worldX, y, worldZ, surfaceY) ? BLOCK.LAVA : BLOCK.AIR
+            profile.fluidType || BLOCK.AIR
           );
         }
       }
@@ -4599,47 +5437,67 @@ class Chunk {
           if (current === BLOCK.AIR || isFluidBlock(current) || current === BLOCK.BEDROCK) {
             continue;
           }
+          const caveProfile = this.world.terrain.sampleCaveProfile(x, y, z, surfaceY);
           this.setLocalRaw(
             localX,
             y,
             localZ,
-            this.world.terrain.shouldFillCaveWithLava(x, y, z, surfaceY) ? BLOCK.LAVA : BLOCK.AIR
+            caveProfile.fluidType || BLOCK.AIR
           );
         }
       }
     }
   }
 
-  carveWormTunnels(baseX, baseZ) {
+  carveWormPath(rng, startX, startY, startZ, length, dirX = null, dirY = null, dirZ = null, branchDepth = 0) {
+    let x = startX;
+    let y = startY;
+    let z = startZ;
+    let vx = Number.isFinite(dirX) ? dirX : rng() * 2 - 1;
+    let vy = Number.isFinite(dirY) ? dirY : (rng() * 2 - 1) * 0.26;
+    let vz = Number.isFinite(dirZ) ? dirZ : rng() * 2 - 1;
+    let branched = false;
+
+    for (let step = 0; step < length; step += 1) {
+      const arch = Math.sin((step / Math.max(1, length - 1)) * Math.PI);
+      const radius = (1.45 + arch * (1.8 + rng() * 0.45)) * (branchDepth > 0 ? 0.82 : 1);
+      this.carveWormSphere(x, y, z, radius);
+
+      vx += (rng() * 2 - 1) * 0.22;
+      vy += (rng() * 2 - 1) * 0.13;
+      vz += (rng() * 2 - 1) * 0.22;
+      const len = Math.hypot(vx, vy, vz) || 1;
+      vx /= len;
+      vy = clamp(vy / len, -0.46, 0.46);
+      vz /= len;
+
+      if (!branched && branchDepth < 2 && step > length * 0.28 && step < length * 0.78 && rng() > 0.962) {
+        branched = true;
+        const branchYaw = (rng() > 0.5 ? 1 : -1) * (0.65 + rng() * 0.5);
+        const branchDirX = vx * Math.cos(branchYaw) - vz * Math.sin(branchYaw);
+        const branchDirZ = vx * Math.sin(branchYaw) + vz * Math.cos(branchYaw);
+        const branchDirY = clamp(vy + (rng() * 2 - 1) * 0.12, -0.42, 0.42);
+        const branchLength = Math.max(18, Math.floor(length * (0.34 + rng() * 0.2)));
+        this.carveWormPath(rng, x, y, z, branchLength, branchDirX, branchDirY, branchDirZ, branchDepth + 1);
+      }
+
+      x += vx * 1.42;
+      y = clamp(y + vy * 1.04, 5, WORLD_HEIGHT - 7);
+      z += vz * 1.42;
+    }
+  }
+
+  carveWormTunnels() {
     for (let sourceChunkX = this.chunkX - CAVE_WORM_CHUNK_RADIUS; sourceChunkX <= this.chunkX + CAVE_WORM_CHUNK_RADIUS; sourceChunkX += 1) {
       for (let sourceChunkZ = this.chunkZ - CAVE_WORM_CHUNK_RADIUS; sourceChunkZ <= this.chunkZ + CAVE_WORM_CHUNK_RADIUS; sourceChunkZ += 1) {
-        const wormCount = 1 + Math.floor(random3(sourceChunkX, 0, sourceChunkZ, this.world.seed + 8801) * 3);
+        const wormCount = 1 + Math.floor(random3(sourceChunkX, 0, sourceChunkZ, this.world.seed + 8801) * 2);
         for (let wormIndex = 0; wormIndex < wormCount; wormIndex += 1) {
           const rng = createSeededRng(hash4(sourceChunkX, wormIndex, sourceChunkZ, this.world.seed + 8807));
           let x = sourceChunkX * CHUNK_SIZE + rng() * CHUNK_SIZE;
           let y = 10 + rng() * (WORLD_HEIGHT - 28);
           let z = sourceChunkZ * CHUNK_SIZE + rng() * CHUNK_SIZE;
-          let dirX = rng() * 2 - 1;
-          let dirY = (rng() * 2 - 1) * 0.42;
-          let dirZ = rng() * 2 - 1;
           const length = CAVE_WORM_MIN_LENGTH + Math.floor(rng() * (CAVE_WORM_MAX_LENGTH - CAVE_WORM_MIN_LENGTH + 1));
-
-          for (let step = 0; step < length; step += 1) {
-            const radius = 2 + rng() * 2.2;
-            this.carveWormSphere(x, y, z, radius);
-
-            dirX += (rng() * 2 - 1) * 0.34;
-            dirY += (rng() * 2 - 1) * 0.18;
-            dirZ += (rng() * 2 - 1) * 0.34;
-            const len = Math.hypot(dirX, dirY, dirZ) || 1;
-            dirX /= len;
-            dirY /= len;
-            dirZ /= len;
-
-            x += dirX * 1.55;
-            y = clamp(y + dirY * 1.15, 5, WORLD_HEIGHT - 7);
-            z += dirZ * 1.55;
-          }
+          this.carveWormPath(rng, x, y, z, length);
         }
       }
     }
@@ -4733,7 +5591,7 @@ class Chunk {
     }
 
     this.carveNoiseCaves(baseX, baseZ);
-    this.carveWormTunnels(baseX, baseZ);
+    this.carveWormTunnels();
     this.generateOreVeins(baseX, baseZ);
 
     this.decorateTrees(baseX, baseZ);
@@ -4843,7 +5701,7 @@ class Chunk {
     }
   }
 
-  buildVillageHouse(originX, originZ, width = 5, depth = 5, doorSide = "south") {
+  buildVillageHouse(originX, originZ, width = 5, depth = 5, doorSide = "south", options = {}) {
     let floorY = 0;
     for (let dx = 0; dx < width; dx += 1) {
       for (let dz = 0; dz < depth; dz += 1) {
@@ -4903,25 +5761,44 @@ class Chunk {
     this.writeWorldBlock(originX + width - 2, floorY + 2, originZ + depth - 1, BLOCK.GLASS, true);
     this.writeWorldBlock(originX, floorY + 2, originZ + 1, BLOCK.GLASS, true);
     this.writeWorldBlock(originX + width - 1, floorY + 2, originZ + depth - 2, BLOCK.GLASS, true);
+
+    const bedX = options?.bed?.x ?? (originX + Math.floor(width / 2));
+    const bedZ = options?.bed?.z ?? (doorSide === "south" ? originZ + 1 : originZ + depth - 2);
+    const jobX = options?.jobSite?.x ?? (originX + width - 2);
+    const jobZ = options?.jobSite?.z ?? (doorSide === "south" ? originZ + 2 : originZ + depth - 3);
+    const jobType = options?.jobSite?.type ?? BLOCK.CRAFTING_TABLE;
+    this.writeWorldBlock(bedX, floorY + 1, bedZ, BLOCK.BED, true);
+    this.writeWorldBlock(jobX, floorY + 1, jobZ, jobType, true);
   }
 
   applyVillageAt(centerX, groundY, centerZ, seed) {
+    const plan = getVillageStructurePlan(centerX, centerZ, seed);
     for (let d = -7; d <= 7; d += 1) {
       this.layVillageSurface(centerX + d, centerZ, BLOCK.PLANKS, BLOCK.WOOD);
       this.layVillageSurface(centerX, centerZ + d, BLOCK.PLANKS, BLOCK.WOOD);
     }
 
-    this.buildVillageHouse(centerX - 8, centerZ - 6, 5, 5, "south");
-    this.buildVillageHouse(centerX + 4, centerZ - 6, 5, 5, "south");
-    if ((seed & 1) === 0) {
-      this.buildVillageHouse(centerX - 8, centerZ + 3, 5, 5, "north");
-    } else {
-      this.buildVillageHouse(centerX + 4, centerZ + 3, 5, 5, "north");
+    for (const house of plan.houses) {
+      this.buildVillageHouse(house.originX, house.originZ, house.width, house.depth, house.doorSide, house);
     }
 
     for (let dx = -1; dx <= 1; dx += 1) {
       for (let dz = -1; dz <= 1; dz += 1) {
         this.layVillageSurface(centerX + dx, centerZ + dz, BLOCK.BRICK, BLOCK.STONE);
+      }
+    }
+
+    for (let y = groundY + 1; y <= groundY + 3; y += 1) {
+      this.writeWorldBlock(centerX, y, centerZ, BLOCK.WOOD, true);
+    }
+    this.writeWorldBlock(centerX, groundY + 4, centerZ, BLOCK.TORCH, true);
+
+    for (const farm of plan.farms) {
+      for (let x = farm.minX; x <= farm.maxX; x += 1) {
+        for (let z = farm.minZ; z <= farm.maxZ; z += 1) {
+          const isWaterChannel = x === centerX;
+          this.layVillageSurface(x, z, isWaterChannel ? BLOCK.WATER : BLOCK.GRASS, BLOCK.DIRT);
+        }
       }
     }
   }
@@ -6021,15 +6898,21 @@ class Player {
     this.sprintToggled = false;
     this.isCrouching = false;
     this.spawnPoint = null;
+    this.stats = createDefaultPlayerStats();
+    this.achievements = createDefaultAchievementState();
+    this.effects = {};
+    this.enchantments = createDefaultEnchantmentState();
   }
 
   initializeInventory() {
     this.inventoryTypes = new Uint8Array(INVENTORY_SLOTS);
     this.inventoryCounts = new Uint16Array(INVENTORY_SLOTS);
+    this.inventoryDurability = new Uint16Array(INVENTORY_SLOTS);
     this.hotbarTypes = this.inventoryTypes.subarray(0, HOTBAR_SLOTS);
     this.hotbarCounts = this.inventoryCounts.subarray(0, HOTBAR_SLOTS);
     this.armorTypes = new Uint8Array(ARMOR_SLOTS);
     this.armorCounts = new Uint8Array(ARMOR_SLOTS);
+    this.armorDurability = new Uint16Array(ARMOR_SLOTS);
   }
 
   getArmorPoints() {
@@ -6048,6 +6931,10 @@ class Player {
       y: this.y + PLAYER_EYE_HEIGHT - (this.isCrouching ? 0.18 : 0),
       z: this.z
     };
+  }
+
+  getEffectLevel(name) {
+    return getPlayerEffectLevel(this, name);
   }
 
   getLookVector() {
@@ -6264,7 +7151,10 @@ class Player {
       : !this.inWater && !this.inLava && !this.isCrouching && this.hunger > 0 && length > 0 && forward > 0 && this.sprintToggled;
     this.isSprinting = wantsSprint;
 
-    const speed = isCreative ? (wantsSprint ? 10.5 : 6.8) : this.inLava ? 1.7 : this.inWater ? 2.8 : this.isCrouching ? 1.75 : wantsSprint ? 6.9 : 4.6;
+    const speedEffect = this.getEffectLevel("speed");
+    const jumpBoostLevel = this.getEffectLevel("jump_boost");
+    const speedMultiplier = 1 + speedEffect * 0.18;
+    const speed = (isCreative ? (wantsSprint ? 10.5 : 6.8) : this.inLava ? 1.7 : this.inWater ? 2.8 : this.isCrouching ? 1.75 : wantsSprint ? 6.9 : 4.6) * speedMultiplier;
 
     let targetVX = moveX * speed;
     let targetVZ = moveZ * speed;
@@ -6338,8 +7228,11 @@ class Player {
       this.onGround = false;
     } else {
       if (this.onGround && input.consumePress(" ")) {
-        this.vy = 8.5;
+        this.vy = 8.5 + jumpBoostLevel * 1.15;
         this.onGround = false;
+        if (this.stats) {
+          this.stats.jumps = Math.max(0, (this.stats.jumps || 0) + 1);
+        }
       }
 
       this.vy -= 24 * dt;
@@ -6415,8 +7308,10 @@ class Player {
       selectedHotbarSlot: this.selectedHotbarSlot,
       inventoryTypes: Array.from(this.inventoryTypes),
       inventoryCounts: Array.from(this.inventoryCounts),
+      inventoryDurability: Array.from(this.inventoryDurability),
       armorTypes: Array.from(this.armorTypes),
       armorCounts: Array.from(this.armorCounts),
+      armorDurability: Array.from(this.armorDurability),
       hotbarTypes: Array.from(this.hotbarTypes),
       hotbarCounts: Array.from(this.hotbarCounts),
       sprintToggled: this.sprintToggled,
@@ -6424,7 +7319,14 @@ class Player {
       hunger: this.hunger,
       xp: this.xp,
       xpLevel: this.xpLevel,
-      spawnPoint: this.spawnPoint ? { ...this.spawnPoint } : null
+      spawnPoint: this.spawnPoint ? { ...this.spawnPoint } : null,
+      stats: { ...this.stats },
+      achievements: { ...this.achievements },
+      effects: { ...this.effects },
+      enchantments: {
+        held: { ...this.enchantments.held },
+        armor: { ...this.enchantments.armor }
+      }
     };
   }
 
@@ -6450,6 +7352,9 @@ class Player {
           if (t > 0 && c > 0) {
             this.inventoryTypes[i] = t;
             this.inventoryCounts[i] = clamp(Math.floor(c), 0, getItemMaxStack(t));
+            if (Array.isArray(data.inventoryDurability)) {
+              this.inventoryDurability[i] = normalizeDurabilityValue(t, Number(data.inventoryDurability[i]) || 0);
+            }
           }
         }
       }
@@ -6460,6 +7365,9 @@ class Player {
           if (t > 0 && c > 0 && getItemArmorSlot(t) === ARMOR_SLOT_KEYS[i]) {
             this.armorTypes[i] = t;
             this.armorCounts[i] = 1;
+            if (Array.isArray(data.armorDurability)) {
+              this.armorDurability[i] = normalizeDurabilityValue(t, Number(data.armorDurability[i]) || 0);
+            }
           }
         }
       }
@@ -6473,6 +7381,10 @@ class Player {
       this.isCrouching = false;
       this.isSprinting = false;
       this.spawnPoint = normalizeSpawnPoint(data.spawnPoint, null);
+      this.stats = normalizePlayerStats(data.stats);
+      this.achievements = normalizeAchievementState(data.achievements);
+      this.effects = normalizePlayerEffects(data.effects);
+      this.enchantments = normalizeEnchantmentState(data.enchantments);
       return true;
     }
 
@@ -6625,6 +7537,183 @@ function rayIntersectAABB(origin, direction, maxDistance, aabb) {
   return tMin >= 0 && tMin <= maxDistance ? tMin : null;
 }
 
+function restockVillagerOffers(mob) {
+  if (!Array.isArray(mob?.offers)) return;
+  for (const offer of mob.offers) {
+    offer.uses = 0;
+  }
+}
+
+function ensureVillageMobData(mob, world) {
+  if (!mob || !world || (mob.type !== "villager" && mob.type !== "iron_golem")) {
+    return null;
+  }
+  const center = Number.isFinite(mob.homeX) && Number.isFinite(mob.homeZ)
+    ? { x: mob.homeX, z: mob.homeZ, seed: mob.villageSeed || world.seed }
+    : getNearestVillageCenter(mob.x, mob.z, world.seed, 48);
+  if (!center) {
+    return null;
+  }
+  mob.homeX = center.x;
+  mob.homeZ = center.z;
+  mob.villageSeed = center.seed || world.seed;
+  const plan = getVillageStructurePlan(Math.floor(center.x), Math.floor(center.z), mob.villageSeed);
+  mob.gatherPoint = { x: plan.gatherPoint.x + 0.5, z: plan.gatherPoint.z + 0.5 };
+  if (mob.type === "villager") {
+    if (!mob.profession) {
+      const professionIndex = Math.abs(Math.floor((mob.variantSeed || 0) * 1000 + center.seed)) % plan.houses.length;
+      const house = plan.houses[professionIndex] || plan.houses[0];
+      mob.profession = house.profession;
+      mob.bedTarget = { x: house.bed.x + 0.5, z: house.bed.z + 0.5 };
+      mob.jobTarget = { x: house.jobSite.x + 0.5, z: house.jobSite.z + 0.5, type: house.jobSite.type };
+      mob.offers = getVillagerTradeTable(mob.profession, center.seed + professionIndex * 17);
+      mob.willingness = 0.25;
+    }
+  } else {
+    mob.patrolPoints = plan.pathNodes.map((node) => ({ x: node.x + 0.5, z: node.z + 0.5 }));
+  }
+  return plan;
+}
+
+function updateVillageMobPath(mob, world, targetX, targetZ, dt) {
+  mob.pathRecalcTimer = Math.max(0, (mob.pathRecalcTimer || 0) - dt);
+  const targetKey = `${Math.floor(targetX)}|${Math.floor(targetZ)}`;
+  if (mob.pathTargetKey !== targetKey || mob.pathRecalcTimer <= 0 || !Array.isArray(mob.path) || mob.path.length === 0) {
+    mob.path = findVillagePath(world, mob.x, mob.z, targetX, targetZ, mob.y + 1, mob.type === "iron_golem" ? 24 : 18);
+    mob.pathIndex = 0;
+    mob.pathRecalcTimer = 2.4;
+    mob.pathTargetKey = targetKey;
+  }
+  while ((mob.pathIndex || 0) < Math.max(0, mob.path.length - 1)) {
+    const waypoint = mob.path[mob.pathIndex];
+    const dx = waypoint.x - mob.x;
+    const dz = waypoint.z - mob.z;
+    if (dx * dx + dz * dz > 0.7 * 0.7) {
+      break;
+    }
+    mob.pathIndex += 1;
+  }
+  return mob.path?.[mob.pathIndex || 0] || { x: targetX, z: targetZ };
+}
+
+function findNearestVillageThreat(mob, allMobs, radius = 10) {
+  if (!Array.isArray(allMobs)) return null;
+  const radius2 = radius * radius;
+  let best = null;
+  let bestDist2 = radius2;
+  for (const candidate of allMobs) {
+    if (!candidate || candidate === mob || candidate.health <= 0 || !getMobDef(candidate.type).hostile) continue;
+    const dx = candidate.x - mob.x;
+    const dz = candidate.z - mob.z;
+    const dist2 = dx * dx + dz * dz;
+    if (dist2 < bestDist2) {
+      bestDist2 = dist2;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function getVillageMobSteering(mob, world, player, cycle, allMobs, dt, weatherState = null) {
+  const plan = ensureVillageMobData(mob, world);
+  if (!plan) {
+    return null;
+  }
+
+  if (mob.type === "villager") {
+    const threat = findNearestVillageThreat(mob, allMobs, 10);
+    let targetX = mob.gatherPoint?.x || mob.homeX;
+    let targetZ = mob.gatherPoint?.z || mob.homeZ;
+    let desiredSpeed = getMobDef(mob.type).speed * 0.82;
+    let state = "mingle";
+    const precipitationType = normalizeWeatherType(weatherState?.type) === WEATHER_TYPES.CLEAR
+      ? "none"
+      : getColumnPrecipitationType(world.terrain.describeColumn(Math.floor(mob.x), Math.floor(mob.z)));
+
+    if (threat) {
+      const awayX = mob.x - (threat.x - mob.x);
+      const awayZ = mob.z - (threat.z - mob.z);
+      targetX = mob.homeX + clamp(awayX - mob.homeX, -8, 8);
+      targetZ = mob.homeZ + clamp(awayZ - mob.homeZ, -8, 8);
+      desiredSpeed = getMobDef(mob.type).speed * 1.25;
+      state = "panic";
+    } else if (precipitationType !== "none" && !(cycle?.isNight || cycle?.phase === "Sunset")) {
+      targetX = mob.bedTarget?.x || mob.homeX;
+      targetZ = mob.bedTarget?.z || mob.homeZ;
+      desiredSpeed = getMobDef(mob.type).speed * 0.86;
+      state = "shelter";
+    } else if (cycle?.isNight || cycle?.phase === "Sunset") {
+      targetX = mob.bedTarget?.x || mob.homeX;
+      targetZ = mob.bedTarget?.z || mob.homeZ;
+      desiredSpeed = getMobDef(mob.type).speed * 0.96;
+      state = "sleep";
+    } else if (cycle?.phase === "Day" && cycle?.t < 0.46 && mob.jobTarget) {
+      targetX = mob.jobTarget.x;
+      targetZ = mob.jobTarget.z;
+      desiredSpeed = getMobDef(mob.type).speed * 0.92;
+      state = "work";
+    } else {
+      const wanderPoint = plan.pathNodes[Math.abs(Math.floor((mob.variantSeed || 0) * 100 + (mob.age || 0))) % plan.pathNodes.length] || plan.pathNodes[0];
+      targetX = (wanderPoint?.x || mob.homeX) + 0.5;
+      targetZ = (wanderPoint?.z || mob.homeZ) + 0.5;
+      desiredSpeed = getMobDef(mob.type).speed * 0.74;
+    }
+
+    const waypoint = updateVillageMobPath(mob, world, targetX, targetZ, dt);
+    if (state === "work" && mob.jobTarget) {
+      const dxJob = mob.x - mob.jobTarget.x;
+      const dzJob = mob.z - mob.jobTarget.z;
+      if (dxJob * dxJob + dzJob * dzJob <= 1.8 * 1.8) {
+        mob.workTimer = (mob.workTimer || 0) + dt;
+        if (mob.workTimer >= 4) {
+          restockVillagerOffers(mob);
+          mob.workedToday = true;
+          mob.workTimer = 0;
+        }
+      } else {
+        mob.workTimer = 0;
+      }
+    }
+
+    mob.villagerState = state;
+    return {
+      targetX: waypoint.x,
+      targetZ: waypoint.z,
+      desiredSpeed,
+      preferredYaw: Math.atan2(waypoint.x - mob.x, waypoint.z - mob.z)
+    };
+  }
+
+  const hostile = findNearestVillageThreat(mob, allMobs, 14);
+  let targetX = mob.homeX;
+  let targetZ = mob.homeZ;
+  let desiredSpeed = getMobDef(mob.type).speed * 0.78;
+  if (hostile) {
+    mob.guardTargetId = hostile.variantSeed || hostile.x;
+    targetX = hostile.x;
+    targetZ = hostile.z;
+    desiredSpeed = getMobDef(mob.type).speed * 1.18;
+  } else {
+    const patrolPoints = mob.patrolPoints?.length ? mob.patrolPoints : [{ x: mob.homeX, z: mob.homeZ }];
+    mob.patrolIndex = Math.max(0, Math.floor(mob.patrolIndex || 0)) % patrolPoints.length;
+    const patrolTarget = patrolPoints[mob.patrolIndex] || patrolPoints[0];
+    const dx = patrolTarget.x - mob.x;
+    const dz = patrolTarget.z - mob.z;
+    if (dx * dx + dz * dz < 1.2 * 1.2) {
+      mob.patrolIndex = (mob.patrolIndex + 1) % patrolPoints.length;
+    }
+    targetX = patrolTarget.x;
+    targetZ = patrolTarget.z;
+  }
+  const waypoint = updateVillageMobPath(mob, world, targetX, targetZ, dt);
+  return {
+    targetX: waypoint.x,
+    targetZ: waypoint.z,
+    desiredSpeed,
+    preferredYaw: Math.atan2(waypoint.x - mob.x, waypoint.z - mob.z)
+  };
+}
+
 class Mob {
   constructor(type = "zombie") {
     this.type = type;
@@ -6658,6 +7747,17 @@ class Mob {
     this.fuseTimer = 0;
     this.spiderLeapCooldown = 0;
     this.provokedTimer = 0;
+    this.variantSeed = Math.random();
+    this.profession = "";
+    this.offers = [];
+    this.willingness = 0;
+    this.workTimer = 0;
+    this.workedToday = false;
+    this.path = [];
+    this.pathIndex = 0;
+    this.pathRecalcTimer = 0;
+    this.pathTargetKey = "";
+    this.patrolIndex = 0;
   }
 
   get radius() {
@@ -6785,7 +7885,7 @@ class Mob {
     }
   }
 
-  update(dt, world, player, cycle = null) {
+  update(dt, world, player, cycle = null, allMobs = null, weatherState = null) {
     const def = getMobDef(this.type);
     this.age += dt;
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
@@ -6814,8 +7914,15 @@ class Mob {
     let desiredSpeed = 0;
     let preferredYaw = this.yaw;
     let keepFuseLit = false;
+    const villageSteering = getVillageMobSteering(this, world, player, cycle, allMobs, dt, weatherState);
 
-    if (isCreeper && activeHostile && dist < def.aggroRange) {
+    if (villageSteering) {
+      targetX = villageSteering.targetX;
+      targetZ = villageSteering.targetZ;
+      desiredSpeed = villageSteering.desiredSpeed;
+      preferredYaw = villageSteering.preferredYaw;
+      this.goalTimer = Math.max(this.goalTimer, 0.3);
+    } else if (isCreeper && activeHostile && dist < def.aggroRange) {
       targetX = player.x;
       targetZ = player.z;
       preferredYaw = Math.atan2(dxp, dzp);
@@ -6978,10 +8085,20 @@ class VoxelRenderer {
     this.cloudTime = 0;
     this.skyFog = rgb(192, 226, 248);
     this.sunColor = rgb(255, 236, 178);
+    this.weatherState = {
+      timeSeconds: 0,
+      intensity: 0,
+      runtimeLowFps: false,
+      weather: createWeatherState()
+    };
   }
 
   setSettings(settings) {
     this.settings = settings;
+  }
+
+  setWeatherState(weatherState) {
+    this.weatherState = weatherState || this.weatherState;
   }
 
   setRenderDistance(distance) {
@@ -7049,11 +8166,13 @@ class VoxelRenderer {
     this.cloudTime += dt;
     const ctx = this.ctx;
     const horizon = clamp(this.height * (0.56 + this.player.pitch * 0.17), this.height * 0.18, this.height * 0.84);
-    const cycle = getDayCycleInfo(worldTime);
-    const effectiveDaylight = getEffectiveDaylight(cycle, weather.type);
+    const weatherState = this.weatherState || {};
+    const weatherData = weatherState.weather || createWeatherState();
+    const cycle = getDayCycleInfo(weatherState.timeSeconds || 0);
+    const effectiveDaylight = getEffectiveDaylight(cycle, weatherData.type);
     const effectiveDarkness = 1 - effectiveDaylight;
-    const weatherDarkness = getWeatherSkyDarkness(weather.type);
-    const flash = clamp(weather.flash || 0, 0, 1);
+    const weatherDarkness = getWeatherSkyDarkness(weatherData.type);
+    const flash = clamp(weatherData.flash || 0, 0, 1);
     let skyTop = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), effectiveDarkness * 0.92);
     let skyMid = mixRgb(rgb(143, 209, 255), rgb(48, 72, 118), effectiveDarkness * 0.82);
     let skyBot = mixRgb(rgb(216, 243, 255), rgb(106, 118, 160), effectiveDarkness * 0.64);
@@ -7111,6 +8230,47 @@ class VoxelRenderer {
       ctx.ellipse(offset - width * 0.34, y + height * 0.07, width * 0.62, height * 0.82, 0, 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+
+  drawPrecipitation() {
+    const weatherPass = buildWeatherParticlePass(this.world, this.player, this.weatherState, this.settings);
+    if (weatherPass.drops.length === 0 && weatherPass.splashes.length === 0) {
+      return;
+    }
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineCap = "round";
+
+    for (const drop of weatherPass.drops) {
+      const start = this.projectPoint(drop.x, drop.y, drop.z) || this.projectPointClamped(drop.x, drop.y, drop.z);
+      const end = this.projectPoint(drop.endX, drop.endY, drop.endZ) || this.projectPointClamped(drop.endX, drop.endY, drop.endZ);
+      if (!start || !end) continue;
+      const width = drop.type === "snow" ? Math.max(1, this.uiScale()) : Math.max(1, this.uiScale() * 0.9);
+      ctx.strokeStyle = drop.type === "snow"
+        ? `rgba(244, 248, 255, ${drop.alpha})`
+        : `rgba(174, 216, 255, ${drop.alpha})`;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+    }
+
+    for (const splash of weatherPass.splashes) {
+      const center = this.projectPoint(splash.x, splash.y, splash.z);
+      if (!center) continue;
+      const radius = Math.max(1.2, (200 / Math.max(0.4, center.depth)) * splash.size);
+      ctx.strokeStyle = `rgba(202, 232, 255, ${splash.alpha})`;
+      ctx.lineWidth = Math.max(1, this.uiScale() * 0.9);
+      ctx.beginPath();
+      ctx.moveTo(center.x - radius, center.y);
+      ctx.lineTo(center.x + radius, center.y);
+      ctx.moveTo(center.x, center.y - radius * 0.55);
+      ctx.lineTo(center.x, center.y + radius * 0.55);
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   computeFaceStyle(face, depth) {
@@ -7366,17 +8526,23 @@ class VoxelRenderer {
       const head = this.projectPoint(mob.x, mob.y + mob.height, mob.z);
       if (!foot || !head) continue;
       const height = Math.max(8 * scale, Math.abs(foot.y - head.y));
-      const width = height * 0.6;
+      const width = height * (mob.entityKind === "remote_player" ? 0.5 : 0.6);
       const x = foot.x - width / 2;
       const y = Math.min(foot.y, head.y);
-      const tex = this.entityTextures?.getBillboardImage(mob.type) || this.entityTextures?.getImage(mob.type) || null;
+      const tex = mob.entityKind === "remote_player"
+        ? (mob.billboardCanvas || null)
+        : this.entityTextures?.getBillboardImage(mob.type) || this.entityTextures?.getImage(mob.type) || null;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
       if (tex) {
         ctx.globalAlpha = 0.96;
         ctx.drawImage(tex, x, y, width, height);
       } else {
-        ctx.fillStyle = mob.type === "zombie" ? "rgba(60,210,120,0.92)" : "rgba(240,240,240,0.92)";
+        ctx.fillStyle = mob.entityKind === "remote_player"
+          ? "rgba(86, 164, 255, 0.92)"
+          : mob.type === "zombie"
+            ? "rgba(60,210,120,0.92)"
+            : "rgba(240,240,240,0.92)";
         ctx.fillRect(x, y, width, height);
       }
       ctx.restore();
@@ -7739,6 +8905,7 @@ class VoxelRenderer {
     this.drawWorld();
     this.drawItems(this.items || []);
     this.drawMobs(this.mobs || []);
+    this.drawPrecipitation();
     if (currentTarget) {
       this.drawBlockOutline(currentTarget.x, currentTarget.y, currentTarget.z);
     }
@@ -8268,7 +9435,14 @@ class WebGLVoxelRenderer {
     this.entityTextures = null;
     this.objModelLibrary = null;
     this._spriteTextures = new WeakMap();
+    this.weatherState = {
+      timeSeconds: 0,
+      intensity: 0,
+      runtimeLowFps: false,
+      weather: createWeatherState()
+    };
     this._outline = this._createOutlineRenderer();
+    this._precipitation = this._createPrecipitationRenderer();
     this.entities = [];
     this.visibleOffsets = getChunkLoadOffsets(this.renderDistanceChunks);
     this.runtimeInCave = false;
@@ -8332,6 +9506,10 @@ class WebGLVoxelRenderer {
     this.renderDistanceChunks = clamp(distance, 1, 6);
     this.settings.renderDistanceChunks = this.renderDistanceChunks;
     this.visibleOffsets = getChunkLoadOffsets(this.renderDistanceChunks);
+  }
+
+  setWeatherState(weatherState) {
+    this.weatherState = weatherState || this.weatherState;
   }
 
   _getEffectiveRenderDistance() {
@@ -8667,6 +9845,8 @@ class WebGLVoxelRenderer {
       }
     }
 
+    this._precipitation.draw(this.proj, this.view, this.weatherState);
+
     if (this.settings?.mobModels !== false) {
       this._objEntities.draw(this.proj, this.view, this.entities || []);
     }
@@ -8677,6 +9857,95 @@ class WebGLVoxelRenderer {
 
     gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
+  }
+
+  _createPrecipitationRenderer() {
+    const gl = this.gl;
+    const program = createProgram(
+      gl,
+      `#version 300 es
+      precision highp float;
+      layout(location=0) in vec3 aPos;
+      layout(location=1) in vec4 aColor;
+      uniform mat4 uProj;
+      uniform mat4 uView;
+      out vec4 vColor;
+      void main(){
+        gl_Position = uProj * uView * vec4(aPos, 1.0);
+        vColor = aColor;
+      }`,
+      `#version 300 es
+      precision highp float;
+      in vec4 vColor;
+      out vec4 outColor;
+      void main(){
+        outColor = vColor;
+      }`
+    );
+
+    const uProj = gl.getUniformLocation(program, "uProj");
+    const uView = gl.getUniformLocation(program, "uView");
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 7 * 4, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 7 * 4, 3 * 4);
+    gl.bindVertexArray(null);
+
+    const draw = (proj, view) => {
+      const weatherPass = buildWeatherParticlePass(this.world, this.player, this.weatherState, this.settings);
+      if (weatherPass.drops.length === 0 && weatherPass.splashes.length === 0) {
+        return;
+      }
+
+      const vertices = [];
+      const pushVertex = (x, y, z, r, g, b, a) => {
+        vertices.push(x, y, z, r, g, b, a);
+      };
+
+      for (const drop of weatherPass.drops) {
+        if (drop.type === "snow") {
+          pushVertex(drop.x - 0.03, drop.y, drop.z, 0.95, 0.97, 1, drop.alpha * 0.92);
+          pushVertex(drop.endX + 0.03, drop.endY, drop.endZ, 0.95, 0.97, 1, drop.alpha * 0.8);
+        } else {
+          pushVertex(drop.x, drop.y, drop.z, 0.68, 0.84, 1, drop.alpha);
+          pushVertex(drop.endX, drop.endY, drop.endZ, 0.68, 0.84, 1, drop.alpha * 0.72);
+        }
+      }
+
+      for (const splash of weatherPass.splashes) {
+        const size = splash.size;
+        pushVertex(splash.x - size, splash.y, splash.z, 0.79, 0.91, 1, splash.alpha);
+        pushVertex(splash.x + size, splash.y, splash.z, 0.79, 0.91, 1, splash.alpha);
+        pushVertex(splash.x, splash.y, splash.z - size, 0.79, 0.91, 1, splash.alpha * 0.9);
+        pushVertex(splash.x, splash.y, splash.z + size, 0.79, 0.91, 1, splash.alpha * 0.9);
+      }
+
+      if (vertices.length === 0) {
+        return;
+      }
+
+      gl.useProgram(program);
+      gl.uniformMatrix4fv(uProj, false, proj);
+      gl.uniformMatrix4fv(uView, false, view);
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
+      gl.drawArrays(gl.LINES, 0, vertices.length / 7);
+      gl.depthMask(true);
+      gl.bindVertexArray(null);
+    };
+
+    return { draw };
   }
 
   _createOutlineRenderer() {
@@ -8862,9 +10131,10 @@ class WebGLVoxelRenderer {
       gl.depthMask(false);
       for (const e of sorted) {
         const isItem = Number.isFinite(e.itemType ?? e.blockType);
+        const isRemotePlayer = e.entityKind === "remote_player";
         const isZombie = !isItem && e.type === "zombie";
-        const hasObjModel = !isItem && this.objModelLibrary?.hasModel(e.type);
-        const hasEntityTexture = !isItem && !!(this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type));
+        const hasObjModel = !isItem && !isRemotePlayer && this.objModelLibrary?.hasModel(e.type);
+        const hasEntityTexture = !isItem && !isRemotePlayer && !!(this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type));
         const canUseObjModel = hasObjModel && hasEntityTexture;
         const canUseModelFallback = hasObjModel && e.type === "sheep";
         const canUseZombieModel = isZombie && !!this.entityTextures?.getImage("zombie");
@@ -8874,14 +10144,16 @@ class WebGLVoxelRenderer {
         // Keep zombies on the billboard path for now; it is more reliable than the
         // experimental box-model renderer and avoids invisible mobs.
 
-        const image = isItem
+        const image = isRemotePlayer
+          ? (e.billboardCanvas || null)
+          : isItem
           ? this.textureLibrary?.getItemTexture(e.itemType ?? e.blockType, this.settings) || null
           : this.entityTextures?.getBillboardImage(e.type) || this.entityTextures?.getImage(e.type) || null;
         const tex = image ? this._getOrCreateSpriteTexture(image) : null;
         const faceYaw = Math.atan2(this.player.x - e.x, this.player.z - e.z);
         const bob = isItem ? Math.sin((e.age || 0) * 6) * 0.08 : 0;
-        const width = isItem ? 0.48 : 0.9;
-        const height = isItem ? 0.48 : 1.8;
+        const width = isItem ? 0.48 : isRemotePlayer ? 0.8 : 0.9;
+        const height = isItem ? 0.48 : isRemotePlayer ? 1.8 : 1.8;
         const y = isItem ? e.y + bob : e.y;
         const color = isItem ? [1, 1, 1, 0.96] : [1, 1, 1, 0.98];
         gl.uniform4f(uColor, color[0], color[1], color[2], color[3]);
@@ -9452,6 +10724,7 @@ export default function FreeCube2Game(engine) {
   let mode = "menu"; // menu | loading | playing | paused
   let chatOpen = false;
   let inventoryOpen = false;
+  let tradeOpen = false;
   let chatLines = [];
   let chatNeedsRender = false;
   let mobs = [];
@@ -9461,6 +10734,7 @@ export default function FreeCube2Game(engine) {
   let boss = { active: false, name: "Boss", health: 1 };
   let worldTime = 0; // seconds, loops
   let weather = createWeatherState();
+  let weatherVisualIntensity = 0;
   let gamerules = normalizeGamerules();
   let worldSpawnPoint = null;
   let sleepState = { active: false, timer: 0, duration: 5, bedKey: "", bedPosition: null };
@@ -9477,7 +10751,7 @@ export default function FreeCube2Game(engine) {
   let currentTarget = null;
   let currentEntityTarget = null;
   let renderEntities = [];
-  let inventoryCursor = { type: BLOCK.AIR, count: 0 };
+  let inventoryCursor = { type: BLOCK.AIR, count: 0, durability: 0 };
   let inventoryContext = "inventory";
   let inventoryCraftTypes = new Uint8Array(CRAFT_GRID_SMALL);
   let inventoryCraftCounts = new Uint16Array(CRAFT_GRID_SMALL);
@@ -9489,6 +10763,9 @@ export default function FreeCube2Game(engine) {
   let suppressInventoryClick = false;
   let mobRenderWarnings = new Set();
   let lastMobRenderSummaryAt = 0;
+  let toastQueue = [];
+  let activeTradeVillager = null;
+  let villageLifeTimer = 0;
 
   let ui = null;
   let loadingStartChunk = null;
@@ -9530,17 +10807,29 @@ export default function FreeCube2Game(engine) {
   let multiplayerState = {
     directConnectUrl: DEFAULT_MULTIPLAYER_SERVER_URL,
     selectedServerId: "",
+    selectedRoomCode: "",
     lanServers: [],
     savedServers: [
-      {
-        id: "localhost-dev",
-        name: "Local Development Server",
-        subtitle: "Dedicated FreeCube2 server",
-        address: DEFAULT_MULTIPLAYER_SERVER_URL,
-        playersLabel: "0/8",
-        signalLabel: "DEV"
-      }
     ]
+  };
+  let multiplayerSession = {
+    signalMode: "manual",
+    signalingUrl: "",
+    socket: null,
+    socketState: "offline",
+    clientId: "",
+    roomCode: "",
+    roomName: "",
+    roomPrivate: false,
+    cheatDetection: false,
+    isHost: false,
+    hostPeerId: "",
+    joinPending: false,
+    peers: new Map(),
+    remotePlayers: new Map(),
+    selectedRoomName: "",
+    lastPlayerSyncAt: 0,
+    lastWorldSyncAt: 0
   };
 
   playerSkinRefreshHandler = () => {
@@ -9556,6 +10845,1310 @@ export default function FreeCube2Game(engine) {
   const MUSIC_FADE_SECONDS = 2.8;
   const AUTO_REPAIR_DELAY_MS = 2000;
 
+  function isMultiplayerSessionActive() {
+    return !!multiplayerSession.roomCode;
+  }
+
+  function isMultiplayerHost() {
+    return isMultiplayerSessionActive() && multiplayerSession.isHost;
+  }
+
+  function isMultiplayerGuest() {
+    return isMultiplayerSessionActive() && !multiplayerSession.isHost;
+  }
+
+  function isManualMultiplayerSession() {
+    return multiplayerSession.signalMode !== "socket";
+  }
+
+  function normalizeManualMultiplayerCode(rawValue = "") {
+    let value = String(rawValue || "").trim();
+    if (!value) return "";
+    if (value.includes("#")) {
+      value = value.slice(value.lastIndexOf("#") + 1);
+    }
+    value = value
+      .replace(/^freecube2:\/\//i, "")
+      .replace(/^freecube2:/i, "")
+      .replace(/^fc2z-/i, "")
+      .replace(/^fc2-/i, "")
+      .replace(/\s+/g, "");
+    const tokenMatch = value.match(/[A-Za-z0-9\-_+=/]+$/);
+    return tokenMatch ? tokenMatch[0] : value;
+  }
+
+  function encodeBase64Url(bytes) {
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function decodeBase64Url(value = "") {
+    const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+    const binary = atob(padded);
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  }
+
+  async function compressManualMultiplayerPayload(bytes) {
+    if (typeof CompressionStream !== "function") {
+      return { bytes, compressed: false };
+    }
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+      const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
+      if (compressed.length + 4 < bytes.length) {
+        return { bytes: compressed, compressed: true };
+      }
+    } catch (error) {
+      console.warn("Manual multiplayer payload compression failed:", error.message);
+    }
+    return { bytes, compressed: false };
+  }
+
+  async function inflateManualMultiplayerPayload(bytes) {
+    if (!(bytes instanceof Uint8Array)) {
+      return new Uint8Array();
+    }
+    if (typeof DecompressionStream !== "function") {
+      throw new Error("Can't connect.");
+    }
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch {
+      throw new Error("Can't connect.");
+    }
+  }
+
+  function createCompactManualMultiplayerPayload(payload) {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    if (payload.type === "freecube2_lan_offer") {
+      return {
+        t: "o",
+        v: 2,
+        r: String(payload.roomCode || "").slice(0, 7).toUpperCase(),
+        c: payload.cheatDetection ? 1 : 0,
+        s: String(payload.sdp?.sdp || "")
+      };
+    }
+    if (payload.type === "freecube2_lan_answer") {
+      return {
+        t: "a",
+        v: 2,
+        r: String(payload.roomCode || "").slice(0, 7).toUpperCase(),
+        s: String(payload.sdp?.sdp || "")
+      };
+    }
+    return payload;
+  }
+
+  function expandCompactManualMultiplayerPayload(payload) {
+    if (!payload || typeof payload !== "object") {
+      return null;
+    }
+    if (payload.t === "o" && typeof payload.s === "string") {
+      return {
+        type: "freecube2_lan_offer",
+        version: Number(payload.v) || 2,
+        roomCode: String(payload.r || ""),
+        cheatDetection: !!payload.c,
+        sdp: {
+          type: "offer",
+          sdp: payload.s
+        }
+      };
+    }
+    if (payload.t === "a" && typeof payload.s === "string") {
+      return {
+        type: "freecube2_lan_answer",
+        version: Number(payload.v) || 2,
+        roomCode: String(payload.r || ""),
+        sdp: {
+          type: "answer",
+          sdp: payload.s
+        }
+      };
+    }
+    if (payload.sdp && typeof payload.sdp === "string") {
+      return {
+        ...payload,
+        sdp: {
+          type: payload.type === "freecube2_lan_answer" ? "answer" : "offer",
+          sdp: payload.sdp
+        }
+      };
+    }
+    return payload;
+  }
+
+  async function encodeMultiplayerSignalPayload(payload) {
+    try {
+      const compactPayload = createCompactManualMultiplayerPayload(payload);
+      const bytes = new TextEncoder().encode(JSON.stringify(compactPayload));
+      const encoded = await compressManualMultiplayerPayload(bytes);
+      return `${encoded.compressed ? "FC2Z-" : "FC2-"}${encodeBase64Url(encoded.bytes)}`;
+    } catch (error) {
+      console.warn("Manual multiplayer payload encode failed:", error.message);
+      return "";
+    }
+  }
+
+  async function decodeMultiplayerSignalPayload(rawValue) {
+    const source = normalizeManualMultiplayerCode(rawValue);
+    if (!source) {
+      return null;
+    }
+    try {
+      const compressed = /FC2Z-/i.test(String(rawValue || ""));
+      const bytes = decodeBase64Url(source);
+      const decodedBytes = compressed ? await inflateManualMultiplayerPayload(bytes) : bytes;
+      return expandCompactManualMultiplayerPayload(JSON.parse(new TextDecoder().decode(decodedBytes)));
+    } catch {
+      return null;
+    }
+  }
+
+  function buildManualLanRoomCode() {
+    return String(generateId()).replace(/[^A-Z0-9]/gi, "").slice(0, 7).toUpperCase() || "LAN";
+  }
+
+  function getManualLanPeerId() {
+    return isMultiplayerHost() ? "manual-peer" : (multiplayerSession.hostPeerId || "host");
+  }
+
+  function waitForIceGatheringComplete(pc, timeoutMs = 4000) {
+    if (!pc || pc.iceGatheringState === "complete") {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        pc.removeEventListener("icegatheringstatechange", handleStateChange);
+        clearTimeout(timer);
+        resolve();
+      };
+      const handleStateChange = () => {
+        if (pc.iceGatheringState === "complete") {
+          finish();
+        }
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      pc.addEventListener("icegatheringstatechange", handleStateChange);
+    });
+  }
+
+  function showManualMultiplayerCode(promptLabel, encodedPayload) {
+    if (!encodedPayload) {
+      throw new Error("Can't connect.");
+    }
+    prompt(promptLabel, encodedPayload);
+  }
+
+  async function readManualMultiplayerCode(promptLabel) {
+    const rawValue = String(prompt(promptLabel, "") || "").trim();
+    if (!rawValue) {
+      return null;
+    }
+    const payload = await decodeMultiplayerSignalPayload(rawValue);
+    if (!payload || typeof payload !== "object") {
+      throw new Error("Can't connect.");
+    }
+    return { rawValue, payload };
+  }
+
+  async function describeManualInviteCode(rawValue = "") {
+    const payload = await decodeMultiplayerSignalPayload(rawValue);
+    if (!payload || typeof payload !== "object") {
+      return {
+        roomCode: "",
+        subtitle: "Saved invite code",
+        statusText: "Invite code"
+      };
+    }
+    const roomCode = String(payload.roomCode || "").slice(0, 7).toUpperCase();
+    return {
+      roomCode,
+      subtitle: roomCode ? `Code ${roomCode}` : "Saved invite code",
+      statusText: "Invite code"
+    };
+  }
+
+  function getMultiplayerSocketUrl(rawUrl = multiplayerState.directConnectUrl || DEFAULT_MULTIPLAYER_SERVER_URL) {
+    return getWebSocketURL(rawUrl) || DEFAULT_MULTIPLAYER_SERVER_URL;
+  }
+
+  function getLocalMultiplayerProfile() {
+    return {
+      username: normalizeCubeCraftUsername(playerUsername || getStoredCubeCraftUsername() || "Player", "Player"),
+      skinPreset: isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset,
+      skinDataUrl: typeof settings.playerSkinDataUrl === "string" ? settings.playerSkinDataUrl : ""
+    };
+  }
+
+  function getPlayerActionLabel() {
+    if (!player) return "idle";
+    if (!player.onGround) return player.vy > 0.2 ? "jump" : "fall";
+    if (Math.hypot(player.vx, player.vz) > 0.16) return player.isSprinting ? "sprint" : "walk";
+    return "idle";
+  }
+
+  function getLocalMultiplayerPlayerState() {
+    const profile = getLocalMultiplayerProfile();
+    return {
+      id: multiplayerSession.clientId || "host",
+      username: profile.username,
+      skinPreset: profile.skinPreset,
+      skinDataUrl: profile.skinDataUrl,
+      x: Number(player?.x || 0),
+      y: Number(player?.y || 0),
+      z: Number(player?.z || 0),
+      yaw: Number(player?.yaw || 0),
+      pitch: Number(player?.pitch || 0),
+      onGround: !!player?.onGround,
+      action: getPlayerActionLabel(),
+      animation: getPlayerActionLabel()
+    };
+  }
+
+  function getPlayerSkinCanvasForProfile(profile = {}) {
+    if (profile?.skinDataUrl) {
+      return getCustomPlayerSkinCanvas(profile.skinDataUrl) || getPresetPlayerSkinCanvas(profile.skinPreset || "steve");
+    }
+    return getPresetPlayerSkinCanvas(profile?.skinPreset || "steve");
+  }
+
+  function buildRemotePlayerEntity(state = {}) {
+    const skinCanvas = getPlayerSkinCanvasForProfile(state);
+    return {
+      entityKind: "remote_player",
+      type: "remote_player",
+      id: String(state.id || generateId()),
+      username: String(state.username || "Player"),
+      skinPreset: state.skinPreset || "steve",
+      skinDataUrl: state.skinDataUrl || "",
+      billboardCanvas: buildPlayerBillboardCanvas(skinCanvas),
+      x: Number(state.x || 0),
+      y: Number(state.y || 0),
+      z: Number(state.z || 0),
+      yaw: Number(state.yaw || 0),
+      pitch: Number(state.pitch || 0),
+      onGround: state.onGround !== false,
+      action: String(state.action || "idle"),
+      animation: String(state.animation || state.action || "idle"),
+      radius: 0.34,
+      height: 1.8,
+      lastUpdateAt: performance.now()
+    };
+  }
+
+  function upsertRemotePlayerEntity(state = {}) {
+    const peerId = String(state.id || "");
+    if (!peerId || peerId === multiplayerSession.clientId) {
+      return;
+    }
+    const existing = multiplayerSession.remotePlayers.get(peerId);
+    const next = existing || buildRemotePlayerEntity(state);
+    next.username = String(state.username || next.username || "Player");
+    next.skinPreset = state.skinPreset || next.skinPreset || "steve";
+    next.skinDataUrl = typeof state.skinDataUrl === "string" ? state.skinDataUrl : (next.skinDataUrl || "");
+    next.x = Number.isFinite(state.x) ? Number(state.x) : next.x;
+    next.y = Number.isFinite(state.y) ? Number(state.y) : next.y;
+    next.z = Number.isFinite(state.z) ? Number(state.z) : next.z;
+    next.yaw = Number.isFinite(state.yaw) ? Number(state.yaw) : next.yaw;
+    next.pitch = Number.isFinite(state.pitch) ? Number(state.pitch) : next.pitch;
+    next.onGround = state.onGround !== false;
+    next.action = String(state.action || next.action || "idle");
+    next.animation = String(state.animation || next.animation || next.action || "idle");
+    next.lastUpdateAt = performance.now();
+    const refreshedSkin = !existing
+      || existing.skinPreset !== next.skinPreset
+      || existing.skinDataUrl !== next.skinDataUrl;
+    if (refreshedSkin) {
+      next.billboardCanvas = buildPlayerBillboardCanvas(getPlayerSkinCanvasForProfile(next));
+    }
+    multiplayerSession.remotePlayers.set(peerId, next);
+  }
+
+  function removeRemotePlayerEntity(peerId) {
+    if (!peerId) return;
+    multiplayerSession.remotePlayers.delete(String(peerId));
+  }
+
+  function resetRemotePlayerEntities() {
+    multiplayerSession.remotePlayers.clear();
+  }
+
+  function sendMultiplayerSignal(payload) {
+    const socket = multiplayerSession.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    socket.send(JSON.stringify(payload));
+    return true;
+  }
+
+  function closeMultiplayerPeer(peerId, keepRemoteEntity = false) {
+    const key = String(peerId || "");
+    const record = multiplayerSession.peers.get(key);
+    if (!record) {
+      if (!keepRemoteEntity) {
+        removeRemotePlayerEntity(key);
+      }
+      return;
+    }
+    try {
+      record.channel?.close?.();
+    } catch (error) {
+      console.warn("Peer channel close failed:", error.message);
+    }
+    try {
+      record.pc?.close?.();
+    } catch (error) {
+      console.warn("Peer connection close failed:", error.message);
+    }
+    multiplayerSession.peers.delete(key);
+    if (!keepRemoteEntity) {
+      removeRemotePlayerEntity(key);
+    }
+  }
+
+  function teardownMultiplayerSession({ keepSocket = false, preserveBrowser = false } = {}) {
+    for (const peerId of Array.from(multiplayerSession.peers.keys())) {
+      closeMultiplayerPeer(peerId);
+    }
+    resetRemotePlayerEntities();
+    if (!keepSocket && multiplayerSession.socket) {
+      try {
+        multiplayerSession.socket.close();
+      } catch (error) {
+        console.warn("Signaling socket close failed:", error.message);
+      }
+    }
+    multiplayerSession = {
+      signalMode: "manual",
+      signalingUrl: keepSocket ? multiplayerSession.signalingUrl : "",
+      socket: keepSocket ? multiplayerSession.socket : null,
+      socketState: keepSocket ? multiplayerSession.socketState : "offline",
+      clientId: keepSocket ? multiplayerSession.clientId : "",
+      roomCode: "",
+      roomName: "",
+      roomPrivate: false,
+      cheatDetection: false,
+      isHost: false,
+      hostPeerId: "",
+      joinPending: false,
+      peers: new Map(),
+      remotePlayers: new Map(),
+      selectedRoomName: "",
+      lastPlayerSyncAt: 0,
+      lastWorldSyncAt: 0
+    };
+    if (!preserveBrowser) {
+      multiplayerState.selectedRoomCode = "";
+    }
+    syncRenderEntityList();
+  }
+
+  function buildMultiplayerWorldSnapshot() {
+    if (!world) {
+      return null;
+    }
+    return {
+      format: WORLD_EXPORT_FORMAT,
+      formatVersion: WORLD_EXPORT_FORMAT_VERSION,
+      gameVersion: GAME_VERSION,
+      exportedAt: Date.now(),
+      meta: {
+        name: store?.getWorldMeta(activeWorldId)?.name || multiplayerSession.roomName || "LAN World",
+        seed: world.seed
+      },
+      payload: {
+        version: GAME_VERSION,
+        seed: world.seed,
+        modifiedChunks: serializeModifiedChunks(world.modifiedChunks),
+        fluidStates: serializeFluidStates(world.fluidStates),
+        furnaces: serializeFurnaceStates(furnaceStates),
+        worldState: serializeCurrentWorldState()
+      }
+    };
+  }
+
+  function startMultiplayerWorldFromSnapshot(snapshot) {
+    const payload = snapshot?.payload && typeof snapshot.payload === "object" ? snapshot.payload : snapshot;
+    if (!payload || typeof payload !== "object") {
+      throw new Error("Host did not send a valid world snapshot.");
+    }
+
+    activeWorldId = null;
+    const seed = normalizeWorldSeed(payload.seed, generateRandomWorldSeed());
+    world = new World(seed);
+    world.modifiedChunks = deserializeModifiedChunks(payload.modifiedChunks || {});
+    world.fluidStates = deserializeFluidStates(payload.fluidStates || {});
+    world.loadedFromStorage = false;
+    furnaceStates = deserializeFurnaceStates(payload.furnaces || {});
+    const defaultSpawn = world.findSpawn(0, 0);
+    const savedWorldState = normalizeSavedWorldState(payload.worldState, {
+      x: defaultSpawn.x,
+      y: defaultSpawn.y,
+      z: defaultSpawn.z,
+      source: "world"
+    });
+    worldTime = savedWorldState.time;
+    weather = savedWorldState.weather;
+    weatherVisualIntensity = getWeatherBaseIntensity(weather.type);
+    gamerules = savedWorldState.gamerules;
+    worldSpawnPoint = savedWorldState.worldSpawnPoint || { x: defaultSpawn.x, y: defaultSpawn.y, z: defaultSpawn.z, source: "world" };
+    settings = normalizeSettingsState(settings);
+    if (settings.playerSkinPreset === "custom") {
+      getCustomPlayerSkinCanvas(settings.playerSkinDataUrl);
+    }
+    const activeCustomPack = getCustomResourcePack(settings);
+    if (activeCustomPack) {
+      preloadCustomResourcePackAssets(activeCustomPack).then(() => {
+        applyTexturePackSetting();
+      });
+    }
+    syncMusicVolume();
+    if (textures) {
+      textures.settings = settings;
+    }
+    if (entityTextures) {
+      entityTextures.settings = settings;
+    }
+    if (atlas) {
+      atlas.settings = settings;
+    }
+
+    player = new Player();
+    player.setPosition(defaultSpawn.x, defaultSpawn.y, defaultSpawn.z);
+    player.ensureSafePosition(world);
+    mobs = [];
+    items = [];
+    spawnTimer = 0;
+    mining.key = null;
+    mining.progress = 0;
+    currentTarget = null;
+    currentEntityTarget = null;
+    inventoryOpen = false;
+    closeTrade(false);
+    inventoryContext = "inventory";
+    clearInventoryCursor();
+    activeFurnaceKey = null;
+    inventoryCraftTypes.fill(0);
+    inventoryCraftCounts.fill(0);
+    tableCraftTypes.fill(0);
+    tableCraftCounts.fill(0);
+    resetInventoryDragState();
+    mobRenderWarnings.clear();
+    lastMobRenderSummaryAt = 0;
+    saveTimer = 0;
+    runtimeLowFpsTimer = 0;
+    runtimeCompactCooldown = 0;
+    runtimeMaintenanceTimer = 0;
+    caveCheckTimer = 0;
+    runtimePlayerInCave = false;
+    targetScanTimer = 0;
+    renderEntities.length = 0;
+    stopSleeping(false);
+    runtimeFault = null;
+    runtimeRepairPromise = null;
+    webglContextLost = false;
+    webglContextRestored = false;
+    loadingStartChunk = { x: Math.floor(player.x / CHUNK_SIZE), z: Math.floor(player.z / CHUNK_SIZE) };
+    ensureActiveRenderer();
+    setHotbarImages();
+    setSettingsUI();
+    mode = "loading";
+    ensureUI();
+    setAutoRepairUi(false);
+    setRuntimeErrorOverlay(false);
+    ui.showScreen("loading");
+    ui.setHudVisible(false);
+    ui.inventoryEl.style.display = "none";
+    closeChat(false);
+  }
+
+  function buildMultiplayerWorldStatePacket() {
+    return {
+      worldTime,
+      weather: {
+        type: weather.type,
+        timer: weather.timer,
+        lightningTimer: weather.lightningTimer,
+        flash: weather.flash
+      },
+      gamerules: { ...gamerules }
+    };
+  }
+
+  function applyMultiplayerWorldStatePacket(packet = {}) {
+    if (!packet || typeof packet !== "object") return;
+    if (Number.isFinite(packet.worldTime)) {
+      worldTime = normalizeWorldTimeSeconds(packet.worldTime);
+    }
+    if (packet.weather && typeof packet.weather === "object") {
+      const nextType = normalizeWeatherType(packet.weather.type, weather.type);
+      weather.type = nextType;
+      weather.timer = Math.max(1, Number(packet.weather.timer) || weather.timer || getRandomWeatherDurationSeconds(nextType));
+      weather.lightningTimer = nextType === WEATHER_TYPES.THUNDER
+        ? Math.max(0.2, Number(packet.weather.lightningTimer) || weather.lightningTimer || 2 + Math.random() * 6)
+        : 0;
+      weather.flash = Math.max(0, Number(packet.weather.flash) || 0);
+    }
+    gamerules = normalizeGamerules(packet.gamerules || gamerules);
+  }
+
+  function sendMultiplayerPeerMessage(peerId, payload) {
+    const record = multiplayerSession.peers.get(String(peerId || ""));
+    const channel = record?.channel || null;
+    if (!channel || channel.readyState !== "open") {
+      return false;
+    }
+    channel.send(JSON.stringify(payload));
+    return true;
+  }
+
+  function broadcastMultiplayerPeerMessage(payload, excludePeerId = "") {
+    for (const [peerId, record] of multiplayerSession.peers.entries()) {
+      if (excludePeerId && peerId === excludePeerId) continue;
+      if (record.channel?.readyState === "open") {
+        record.channel.send(JSON.stringify(payload));
+      }
+    }
+  }
+
+  async function handleMultiplayerRelay(fromPeerId, relayData) {
+    if (!fromPeerId || !relayData || typeof relayData !== "object") {
+      return;
+    }
+    const key = String(fromPeerId);
+    let record = multiplayerSession.peers.get(key) || null;
+    const ensureRecord = (initiator = false) => {
+      if (record) return record;
+      record = createMultiplayerPeerConnection(key, initiator);
+      return record;
+    };
+
+    if (relayData.kind === "offer") {
+      record = ensureRecord(false);
+      await record.pc.setRemoteDescription(new RTCSessionDescription(relayData.sdp));
+      const answer = await record.pc.createAnswer();
+      await record.pc.setLocalDescription(answer);
+      sendMultiplayerSignal({
+        type: "signal_relay",
+        roomCode: multiplayerSession.roomCode,
+        to: key,
+        data: { kind: "answer", sdp: answer }
+      });
+      return;
+    }
+
+    if (relayData.kind === "answer") {
+      record = ensureRecord(true);
+      await record.pc.setRemoteDescription(new RTCSessionDescription(relayData.sdp));
+      return;
+    }
+
+    if (relayData.kind === "ice" && relayData.candidate) {
+      record = ensureRecord(false);
+      try {
+        await record.pc.addIceCandidate(new RTCIceCandidate(relayData.candidate));
+      } catch (error) {
+        console.warn("ICE candidate failed:", error.message);
+      }
+    }
+  }
+
+  function bindMultiplayerDataChannel(peerId, channel) {
+    if (!channel) return;
+    const key = String(peerId);
+    const record = multiplayerSession.peers.get(key);
+    if (record) {
+      record.channel = channel;
+    }
+    channel.onopen = () => {
+      const current = multiplayerSession.peers.get(key);
+      if (current) {
+        current.connected = true;
+      }
+      if (isMultiplayerHost()) {
+        sendMultiplayerPeerMessage(key, {
+          type: "snapshot",
+          roomCode: multiplayerSession.roomCode,
+          hostId: multiplayerSession.clientId,
+          world: buildMultiplayerWorldSnapshot(),
+          worldState: buildMultiplayerWorldStatePacket(),
+          players: [
+            getLocalMultiplayerPlayerState(),
+            ...Array.from(multiplayerSession.remotePlayers.values()).map((remote) => ({
+              id: remote.id,
+              username: remote.username,
+              skinPreset: remote.skinPreset,
+              skinDataUrl: remote.skinDataUrl,
+              x: remote.x,
+              y: remote.y,
+              z: remote.z,
+              yaw: remote.yaw,
+              pitch: remote.pitch,
+              onGround: remote.onGround,
+              action: remote.action,
+              animation: remote.animation
+            }))
+          ]
+        });
+      } else {
+        sendMultiplayerPeerMessage(key, {
+          type: "player_state",
+          player: getLocalMultiplayerPlayerState()
+        });
+      }
+      pushToast(`Peer connected: ${key}`);
+    };
+    channel.onclose = () => {
+      const current = multiplayerSession.peers.get(key);
+      if (current) {
+        current.connected = false;
+      }
+      if (isMultiplayerGuest() && key === multiplayerSession.hostPeerId) {
+        pushToast("The host disconnected.");
+        teardownMultiplayerSession();
+        mode = "menu";
+        showHomeScreen();
+        return;
+      }
+      removeRemotePlayerEntity(key);
+      syncRenderEntityList();
+    };
+    channel.onerror = (error) => {
+      console.warn(`Peer data channel error (${key}):`, error?.message || error);
+    };
+    channel.onmessage = (event) => {
+      let payload = null;
+      try {
+        payload = JSON.parse(String(event.data || ""));
+      } catch (error) {
+        console.warn("Peer message parse failed:", error.message);
+        return;
+      }
+      handleMultiplayerPeerPacket(key, payload);
+    };
+  }
+
+  function createMultiplayerPeerConnection(peerId, initiator = false) {
+    const key = String(peerId || "");
+    const existing = multiplayerSession.peers.get(key);
+    if (existing) {
+      return existing;
+    }
+    const pc = new RTCPeerConnection({
+      iceServers: DEFAULT_MULTIPLAYER_STUN_SERVERS
+    });
+    const record = {
+      id: key,
+      pc,
+      channel: null,
+      connected: false,
+      lastAcceptedAt: 0
+    };
+    multiplayerSession.peers.set(key, record);
+    if (isManualMultiplayerSession()) {
+      pc.onicecandidate = () => {};
+    } else {
+      pc.onicecandidate = (event) => {
+        if (!event.candidate) return;
+        sendMultiplayerSignal({
+          type: "signal_relay",
+          roomCode: multiplayerSession.roomCode,
+          to: key,
+          data: {
+            kind: "ice",
+            candidate: event.candidate
+          }
+        });
+      };
+    }
+    pc.ondatachannel = (event) => {
+      bindMultiplayerDataChannel(key, event.channel);
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        if (pc.connectionState !== "closed") {
+          console.warn(`Peer connection ${key} changed to ${pc.connectionState}.`);
+        }
+      }
+    };
+    if (initiator) {
+      const channel = pc.createDataChannel("freecube2");
+      bindMultiplayerDataChannel(key, channel);
+      if (isManualMultiplayerSession()) {
+        return record;
+      }
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => {
+          sendMultiplayerSignal({
+            type: "signal_relay",
+            roomCode: multiplayerSession.roomCode,
+            to: key,
+            data: {
+              kind: "offer",
+              sdp: pc.localDescription
+            }
+          });
+        })
+        .catch((error) => {
+          console.warn("Peer offer failed:", error.message);
+        });
+    }
+    return record;
+  }
+
+  function applyMultiplayerBlockUpdate(x, y, z, blockType) {
+    if (!world) return false;
+    if (blockType === BLOCK.AIR) {
+      return setWorldBlockWithChecks(x, y, z, BLOCK.AIR, true);
+    }
+    return setWorldBlockWithChecks(x, y, z, blockType, false);
+  }
+
+  function maybeRejectPeerMove(record, nextState) {
+    if (!isMultiplayerHost() || !multiplayerSession.cheatDetection) {
+      return false;
+    }
+    const previous = multiplayerSession.remotePlayers.get(record.id);
+    if (!previous) {
+      return false;
+    }
+    const now = performance.now();
+    const dtSeconds = Math.max(0.05, (now - (previous.lastUpdateAt || now)) / 1000);
+    const distance = Math.hypot(
+      (nextState.x || 0) - previous.x,
+      (nextState.y || 0) - previous.y,
+      (nextState.z || 0) - previous.z
+    );
+    const allowed = MULTIPLAYER_MAX_MOVE_SPEED * dtSeconds + 1.35;
+    return distance > allowed;
+  }
+
+  function handleMultiplayerPeerPacket(peerId, payload) {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    if (payload.type === "snapshot" && isMultiplayerGuest()) {
+      startMultiplayerWorldFromSnapshot(payload.world);
+      applyMultiplayerWorldStatePacket(payload.worldState);
+      multiplayerSession.hostPeerId = String(payload.hostId || peerId);
+      for (const playerState of payload.players || []) {
+        upsertRemotePlayerEntity(playerState);
+      }
+      removeRemotePlayerEntity(multiplayerSession.clientId);
+      syncRenderEntityList();
+      pushToast(`Joined room ${multiplayerSession.roomCode}`);
+      return;
+    }
+
+    if (payload.type === "players_state") {
+      applyMultiplayerWorldStatePacket(payload.worldState);
+      const seen = new Set();
+      for (const playerState of payload.players || []) {
+        const id = String(playerState?.id || "");
+        if (!id || id === multiplayerSession.clientId) continue;
+        seen.add(id);
+        upsertRemotePlayerEntity(playerState);
+      }
+      for (const remoteId of Array.from(multiplayerSession.remotePlayers.keys())) {
+        if (!seen.has(remoteId)) {
+          removeRemotePlayerEntity(remoteId);
+        }
+      }
+      syncRenderEntityList();
+      return;
+    }
+
+    if (payload.type === "player_join") {
+      upsertRemotePlayerEntity(payload.player || {});
+      syncRenderEntityList();
+      return;
+    }
+
+    if (payload.type === "player_leave") {
+      closeMultiplayerPeer(payload.id, true);
+      removeRemotePlayerEntity(payload.id);
+      syncRenderEntityList();
+      return;
+    }
+
+    if (payload.type === "block_update") {
+      applyMultiplayerBlockUpdate(
+        Math.floor(Number(payload.x) || 0),
+        Math.floor(Number(payload.y) || 0),
+        Math.floor(Number(payload.z) || 0),
+        Number(payload.blockType)
+      );
+      return;
+    }
+
+    if (payload.type === "correction" && isMultiplayerGuest() && player) {
+      player.setPosition(Number(payload.x) || player.x, Number(payload.y) || player.y, Number(payload.z) || player.z);
+      player.yaw = Number.isFinite(payload.yaw) ? payload.yaw : player.yaw;
+      player.pitch = Number.isFinite(payload.pitch) ? payload.pitch : player.pitch;
+      return;
+    }
+
+    if (!isMultiplayerHost()) {
+      return;
+    }
+
+    if (payload.type === "player_state") {
+      const record = multiplayerSession.peers.get(String(peerId || ""));
+      const nextState = payload.player && typeof payload.player === "object" ? payload.player : {};
+      if (!record) return;
+      if (maybeRejectPeerMove(record, nextState)) {
+        sendMultiplayerPeerMessage(peerId, {
+          type: "correction",
+          x: multiplayerSession.remotePlayers.get(String(peerId))?.x || 0,
+          y: multiplayerSession.remotePlayers.get(String(peerId))?.y || 0,
+          z: multiplayerSession.remotePlayers.get(String(peerId))?.z || 0,
+          yaw: multiplayerSession.remotePlayers.get(String(peerId))?.yaw || 0,
+          pitch: multiplayerSession.remotePlayers.get(String(peerId))?.pitch || 0
+        });
+        return;
+      }
+      upsertRemotePlayerEntity({
+        ...nextState,
+        id: peerId
+      });
+      broadcastMultiplayerPeerMessage({
+        type: "player_join",
+        player: {
+          ...nextState,
+          id: peerId
+        }
+      }, String(peerId));
+      syncRenderEntityList();
+      return;
+    }
+
+    if (payload.type === "break_block_request") {
+      const remote = multiplayerSession.remotePlayers.get(String(peerId || ""));
+      const x = Math.floor(Number(payload.x) || 0);
+      const y = Math.floor(Number(payload.y) || 0);
+      const z = Math.floor(Number(payload.z) || 0);
+      if (!remote || !world || !Number.isFinite(x + y + z)) return;
+      const targetType = world.peekBlock(x, y, z);
+      if (targetType === BLOCK.AIR || targetType === BLOCK.BEDROCK || isFluidBlock(targetType)) return;
+      if (multiplayerSession.cheatDetection) {
+        const distance = Math.hypot(remote.x - (x + 0.5), remote.y + PLAYER_EYE_HEIGHT - (y + 0.5), remote.z - (z + 0.5));
+        if (distance > MULTIPLAYER_MAX_REACH) return;
+      }
+      if (!applyMultiplayerBlockUpdate(x, y, z, BLOCK.AIR)) return;
+      broadcastMultiplayerPeerMessage({
+        type: "block_update",
+        x,
+        y,
+        z,
+        blockType: BLOCK.AIR
+      });
+      return;
+    }
+
+    if (payload.type === "place_block_request") {
+      const remote = multiplayerSession.remotePlayers.get(String(peerId || ""));
+      const x = Math.floor(Number(payload.x) || 0);
+      const y = Math.floor(Number(payload.y) || 0);
+      const z = Math.floor(Number(payload.z) || 0);
+      const blockType = Number(payload.blockType) || BLOCK.AIR;
+      if (!remote || !world || !blockType || blockType === BLOCK.AIR) return;
+      if (multiplayerSession.cheatDetection) {
+        const distance = Math.hypot(remote.x - (x + 0.5), remote.y + PLAYER_EYE_HEIGHT - (y + 0.5), remote.z - (z + 0.5));
+        if (distance > MULTIPLAYER_MAX_REACH) return;
+      }
+      if (world.peekBlock(x, y, z) !== BLOCK.AIR) return;
+      if (!applyMultiplayerBlockUpdate(x, y, z, blockType)) return;
+      broadcastMultiplayerPeerMessage({
+        type: "block_update",
+        x,
+        y,
+        z,
+        blockType
+      });
+    }
+  }
+
+  function handleMultiplayerSignalMessage(payload) {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    switch (payload.type) {
+      case "connected":
+        if (payload.id) {
+          multiplayerSession.clientId = String(payload.id);
+        }
+        break;
+      case "signal_registered":
+        multiplayerSession.clientId = String(payload.clientId || multiplayerSession.clientId || "");
+        multiplayerSession.socketState = "online";
+        requestMultiplayerRoomList();
+        break;
+      case "signal_room_list":
+        multiplayerState.lanServers = Array.isArray(payload.rooms)
+          ? payload.rooms.map((room) => ({
+            id: String(room.code || generateId()),
+            code: String(room.code || ""),
+            name: String(room.name || `Room ${room.code || ""}`),
+            subtitle: `${room.private ? "Private" : "Public"} LAN room${room.cheatDetection ? " - Cheat Detect" : ""}`,
+            address: multiplayerSession.signalingUrl || getMultiplayerSocketUrl(),
+            playersLabel: `${Math.max(1, Number(room.playerCount) || 1)}/${Math.max(2, Number(room.maxPlayers) || 8)}`,
+            signalLabel: room.private ? "CODE" : "OPEN"
+          }))
+          : [];
+        renderMultiplayerMenu();
+        break;
+      case "signal_room_created":
+        multiplayerSession.roomCode = String(payload.room?.code || "");
+        multiplayerSession.roomName = String(payload.room?.name || multiplayerSession.roomName || "LAN World");
+        multiplayerSession.roomPrivate = !!payload.room?.private;
+        multiplayerSession.cheatDetection = !!payload.room?.cheatDetection;
+        multiplayerSession.isHost = true;
+        multiplayerSession.hostPeerId = multiplayerSession.clientId;
+        multiplayerSession.joinPending = false;
+        multiplayerState.selectedRoomCode = multiplayerSession.roomCode;
+        renderMultiplayerMenu();
+        pushToast(`LAN room code: ${multiplayerSession.roomCode}`);
+        alert(`LAN world open.\n\nRoom code: ${multiplayerSession.roomCode}\nPrivate: ${multiplayerSession.roomPrivate ? "Yes" : "No"}\nCheat detection: ${multiplayerSession.cheatDetection ? "On" : "Off"}`);
+        break;
+      case "signal_room_joined":
+        multiplayerSession.roomCode = String(payload.room?.code || multiplayerSession.roomCode || "");
+        multiplayerSession.roomName = String(payload.room?.name || multiplayerSession.roomName || "LAN World");
+        multiplayerSession.roomPrivate = !!payload.room?.private;
+        multiplayerSession.cheatDetection = !!payload.room?.cheatDetection;
+        multiplayerSession.isHost = !!payload.isHost;
+        multiplayerSession.hostPeerId = String(payload.hostPeerId || "");
+        multiplayerSession.joinPending = false;
+        multiplayerState.selectedRoomCode = multiplayerSession.roomCode;
+        renderMultiplayerMenu();
+        if (!multiplayerSession.isHost && multiplayerSession.hostPeerId) {
+          createMultiplayerPeerConnection(multiplayerSession.hostPeerId, false);
+          ensureUI();
+          ui.showScreen("loading");
+          ui.loadText.textContent = `Joining room ${multiplayerSession.roomCode}`;
+          ui.loadSub.textContent = "Waiting for host snapshot...";
+        }
+        break;
+      case "signal_room_peer_joined":
+        if (isMultiplayerHost() && payload.peer?.id) {
+          const spawn = getPreferredRespawnPoint();
+          upsertRemotePlayerEntity({
+            id: payload.peer.id,
+            username: payload.peer.username,
+            skinPreset: payload.peer.skinPreset,
+            skinDataUrl: payload.peer.skinDataUrl,
+            x: spawn.x,
+            y: spawn.y,
+            z: spawn.z,
+            yaw: 0,
+            pitch: 0
+          });
+          createMultiplayerPeerConnection(String(payload.peer.id), true);
+          syncRenderEntityList();
+        }
+        break;
+      case "signal_room_peer_left":
+        closeMultiplayerPeer(payload.peerId, true);
+        removeRemotePlayerEntity(payload.peerId);
+        broadcastMultiplayerPeerMessage({
+          type: "player_leave",
+          id: String(payload.peerId || "")
+        });
+        syncRenderEntityList();
+        break;
+      case "signal_relay":
+        handleMultiplayerRelay(payload.from, payload.data).catch((error) => {
+          console.warn("Relay handling failed:", error.message);
+        });
+        break;
+      case "signal_room_closed":
+        if (payload.roomCode && payload.roomCode === multiplayerSession.roomCode) {
+          pushToast("The multiplayer room closed.");
+          teardownMultiplayerSession({ preserveBrowser: true });
+          if (mode !== "menu") {
+            mode = "menu";
+            showHomeScreen();
+          }
+        }
+        requestMultiplayerRoomList();
+        break;
+      case "signal_error":
+        alert("Can't connect.");
+        multiplayerSession.joinPending = false;
+        break;
+      default:
+        break;
+    }
+  }
+
+  function ensureMultiplayerSignalingConnection(rawUrl = multiplayerState.directConnectUrl || DEFAULT_MULTIPLAYER_SERVER_URL) {
+    const targetUrl = getMultiplayerSocketUrl(rawUrl);
+    multiplayerState.directConnectUrl = targetUrl;
+    if (multiplayerSession.socket && multiplayerSession.socket.readyState === WebSocket.OPEN && multiplayerSession.signalingUrl === targetUrl) {
+      sendMultiplayerSignal({
+        type: "signal_register",
+        ...getLocalMultiplayerProfile()
+      });
+      return Promise.resolve(multiplayerSession.socket);
+    }
+    if (multiplayerSession.socket) {
+      teardownMultiplayerSession();
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const socket = new WebSocket(targetUrl);
+      multiplayerSession.signalingUrl = targetUrl;
+      multiplayerSession.socket = socket;
+      multiplayerSession.socketState = "connecting";
+      socket.addEventListener("open", () => {
+        multiplayerSession.socketState = "online";
+        sendMultiplayerSignal({
+          type: "signal_register",
+          ...getLocalMultiplayerProfile()
+        });
+        settled = true;
+        resolve(socket);
+      });
+      socket.addEventListener("message", (event) => {
+        let payload = null;
+        try {
+          payload = JSON.parse(String(event.data || ""));
+        } catch (error) {
+          console.warn("Signaling message parse failed:", error.message);
+          return;
+        }
+        handleMultiplayerSignalMessage(payload);
+      });
+      socket.addEventListener("close", () => {
+        multiplayerSession.socketState = "offline";
+        multiplayerSession.socket = null;
+        if (isMultiplayerSessionActive()) {
+          pushToast("Multiplayer signaling disconnected.");
+          teardownMultiplayerSession({ preserveBrowser: true });
+          if (mode !== "menu") {
+            mode = "menu";
+            showHomeScreen();
+          }
+        }
+      });
+      socket.addEventListener("error", (event) => {
+        if (!settled) {
+          reject(new Error("Can't connect."));
+        }
+      });
+    });
+  }
+
+  function requestMultiplayerRoomList() {
+    if (!MULTIPLAYER_ENABLED) return;
+    if (isManualMultiplayerSession()) {
+      multiplayerState.lanServers = [];
+      renderMultiplayerMenu();
+      return;
+    }
+    if (!multiplayerSession.socket || multiplayerSession.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    sendMultiplayerSignal({ type: "signal_list_rooms" });
+  }
+
+  async function buildManualLanOfferPayload() {
+    const peerId = getManualLanPeerId();
+    const record = createMultiplayerPeerConnection(peerId, true);
+    const offer = await record.pc.createOffer();
+    await record.pc.setLocalDescription(offer);
+    await waitForIceGatheringComplete(record.pc);
+    return {
+      type: "freecube2_lan_offer",
+      version: 2,
+      roomCode: multiplayerSession.roomCode,
+      cheatDetection: !!multiplayerSession.cheatDetection,
+      sdp: record.pc.localDescription
+    };
+  }
+
+  async function applyManualLanAnswer() {
+    const response = await readManualMultiplayerCode("Paste the guest reply code:");
+    if (!response) {
+      return false;
+    }
+    const payload = response.payload;
+    if (!payload || payload.type !== "freecube2_lan_answer" || !payload.sdp) {
+      throw new Error("Can't connect.");
+    }
+    const peerId = getManualLanPeerId();
+    const record = multiplayerSession.peers.get(peerId) || createMultiplayerPeerConnection(peerId, true);
+    await record.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+    pushToast("LAN peer linked");
+    return true;
+  }
+
+  async function joinManualLanSession(offerCode = "") {
+    const response = offerCode
+      ? { rawValue: offerCode, payload: await decodeMultiplayerSignalPayload(offerCode) }
+      : await readManualMultiplayerCode("Paste the host LAN code:");
+    if (!response) {
+      return false;
+    }
+    const payload = response.payload;
+    if (!payload || payload.type !== "freecube2_lan_offer" || !payload.sdp) {
+      throw new Error("Can't connect.");
+    }
+    teardownMultiplayerSession({ preserveBrowser: true });
+    multiplayerSession.signalMode = "manual";
+    multiplayerSession.clientId = generateId();
+    multiplayerSession.roomCode = String(payload.roomCode || buildManualLanRoomCode()).slice(0, 7).toUpperCase();
+    multiplayerSession.roomName = "LAN World";
+    multiplayerSession.roomPrivate = true;
+    multiplayerSession.cheatDetection = !!payload.cheatDetection;
+    multiplayerSession.isHost = false;
+    multiplayerSession.hostPeerId = "manual-peer";
+    multiplayerSession.joinPending = true;
+    multiplayerState.selectedRoomCode = multiplayerSession.roomCode;
+    const record = createMultiplayerPeerConnection(multiplayerSession.hostPeerId, false);
+    await record.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+    const answer = await record.pc.createAnswer();
+    await record.pc.setLocalDescription(answer);
+    await waitForIceGatheringComplete(record.pc);
+    ensureUI();
+    ui.showScreen("loading");
+    ui.loadText.textContent = `Joining room ${multiplayerSession.roomCode}`;
+    ui.loadSub.textContent = "Waiting for the host to finish linking...";
+    showManualMultiplayerCode(
+      "Send this reply code to the host:",
+      await encodeMultiplayerSignalPayload({
+        type: "freecube2_lan_answer",
+        version: 2,
+        roomCode: multiplayerSession.roomCode,
+        sdp: record.pc.localDescription
+      })
+    );
+    return true;
+  }
+
+  async function hostWorldOnLan() {
+    if (!world || !player) {
+      alert("Load a world before opening it to LAN.");
+      return false;
+    }
+    if (isMultiplayerHost()) {
+      const peerId = getManualLanPeerId();
+      const record = multiplayerSession.peers.get(peerId);
+      if (!record?.connected) {
+        return applyManualLanAnswer();
+      }
+      const shouldClose = confirm(`Close LAN room ${multiplayerSession.roomCode}?`);
+      if (shouldClose) {
+        teardownMultiplayerSession({ preserveBrowser: true });
+        renderMultiplayerMenu();
+      }
+      return shouldClose;
+    }
+    const roomName = String(prompt("LAN world name:", store?.getWorldMeta(activeWorldId)?.name || "FreeCube2 LAN World") || "").trim() || "FreeCube2 LAN World";
+    const cheatDetection = confirm("Enable cheat detection? This uses more resources, but validates movement and block reach.");
+    teardownMultiplayerSession({ preserveBrowser: true });
+    multiplayerSession.signalMode = "manual";
+    multiplayerSession.clientId = generateId();
+    multiplayerSession.roomCode = buildManualLanRoomCode();
+    multiplayerSession.roomName = roomName;
+    multiplayerSession.roomPrivate = true;
+    multiplayerSession.cheatDetection = cheatDetection;
+    multiplayerSession.isHost = true;
+    multiplayerSession.hostPeerId = multiplayerSession.clientId;
+    multiplayerSession.joinPending = false;
+    multiplayerState.selectedRoomCode = multiplayerSession.roomCode;
+    renderMultiplayerMenu();
+    const inviteCode = await encodeMultiplayerSignalPayload(await buildManualLanOfferPayload());
+    showManualMultiplayerCode(
+      "Send this LAN code to the other player:",
+      inviteCode
+    );
+    return true;
+  }
+
+  async function joinMultiplayerRoom(roomCode = "") {
+    const requestedCode = String(roomCode || multiplayerState.selectedRoomCode || "").trim();
+    return joinManualLanSession(requestedCode);
+  }
+
+  function updateMultiplayerSession(dt) {
+    if (!isMultiplayerSessionActive() || !player || mode !== "playing") {
+      return;
+    }
+    multiplayerSession.lastPlayerSyncAt += dt;
+    multiplayerSession.lastWorldSyncAt += dt;
+    if (isMultiplayerGuest()) {
+      if (multiplayerSession.lastPlayerSyncAt >= MULTIPLAYER_PLAYER_SYNC_INTERVAL) {
+        multiplayerSession.lastPlayerSyncAt = 0;
+        sendMultiplayerPeerMessage(multiplayerSession.hostPeerId, {
+          type: "player_state",
+          player: getLocalMultiplayerPlayerState()
+        });
+      }
+      return;
+    }
+    if (multiplayerSession.lastPlayerSyncAt >= MULTIPLAYER_PLAYER_SYNC_INTERVAL) {
+      multiplayerSession.lastPlayerSyncAt = 0;
+      broadcastMultiplayerPeerMessage({
+        type: "players_state",
+        players: [
+          getLocalMultiplayerPlayerState(),
+          ...Array.from(multiplayerSession.remotePlayers.values()).map((remote) => ({
+            id: remote.id,
+            username: remote.username,
+            skinPreset: remote.skinPreset,
+            skinDataUrl: remote.skinDataUrl,
+            x: remote.x,
+            y: remote.y,
+            z: remote.z,
+            yaw: remote.yaw,
+            pitch: remote.pitch,
+            onGround: remote.onGround,
+            action: remote.action,
+            animation: remote.animation
+          }))
+        ],
+        worldState: buildMultiplayerWorldStatePacket()
+      });
+    } else if (multiplayerSession.lastWorldSyncAt >= MULTIPLAYER_WORLD_SYNC_INTERVAL) {
+      multiplayerSession.lastWorldSyncAt = 0;
+      broadcastMultiplayerPeerMessage({
+        type: "players_state",
+        players: [
+          getLocalMultiplayerPlayerState(),
+          ...Array.from(multiplayerSession.remotePlayers.values()).map((remote) => ({
+            id: remote.id,
+            username: remote.username,
+            skinPreset: remote.skinPreset,
+            skinDataUrl: remote.skinDataUrl,
+            x: remote.x,
+            y: remote.y,
+            z: remote.z,
+            yaw: remote.yaw,
+            pitch: remote.pitch,
+            onGround: remote.onGround,
+            action: remote.action,
+            animation: remote.animation
+          }))
+        ],
+        worldState: buildMultiplayerWorldStatePacket()
+      });
+    }
+  }
+
   function formatVolumeLabel(value) {
     return `${Math.round(clamp(value, 0, 1) * 100)}%`;
   }
@@ -9564,6 +12157,310 @@ export default function FreeCube2Game(engine) {
     const rounded = Math.round(clamp(value, 0, 1) * 100) / 100;
     const currentIndex = Math.max(0, VOLUME_PRESETS.findIndex((preset) => Math.abs(preset - rounded) < 0.001));
     return VOLUME_PRESETS[(currentIndex + 1) % VOLUME_PRESETS.length];
+  }
+
+  function normalizeSettingsState(value = {}, previousState = {}) {
+    const next = { ...DEFAULT_SETTINGS, ...previousState, ...(value && typeof value === "object" ? value : {}) };
+    next.renderDistanceChunks = clamp(next.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 6);
+    next.mouseSensitivity = clamp(next.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity, 0.0012, 0.006);
+    next.fovDegrees = clamp(Math.round(next.fovDegrees || DEFAULT_SETTINGS.fovDegrees), 55, 95);
+    next.showFps = next.showFps !== false;
+    next.viewBobbing = next.viewBobbing !== false;
+    next.shadows = next.shadows !== false;
+    next.graphicsMode = next.graphicsMode === "fancy" ? "fancy" : DEFAULT_SETTINGS.graphicsMode;
+    next.chunkLagFix = next.chunkLagFix !== false;
+    next.fullscreen = !!next.fullscreen;
+    next.masterVolume = clamp(Number.isFinite(next.masterVolume) ? next.masterVolume : DEFAULT_SETTINGS.masterVolume, 0, 1);
+    next.musicVolume = clamp(Number.isFinite(next.musicVolume) ? next.musicVolume : DEFAULT_SETTINGS.musicVolume, 0, 1);
+    next.performancePreset = PERFORMANCE_PRESETS.includes(next.performancePreset) ? next.performancePreset : DEFAULT_SETTINGS.performancePreset;
+    next.customResourcePacks = getCustomResourcePacks(next);
+    next.texturePack = getAvailableResourcePackNames(next).includes(next.texturePack) ? next.texturePack : DEFAULT_SETTINGS.texturePack;
+    next.playerSkinPreset = isValidPlayerSkinPreset(next.playerSkinPreset) ? next.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
+    if (next.playerSkinPreset === "freecube" || next.playerSkinPreset === "hoodie") {
+      next.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+    }
+    next.playerSkinDataUrl = typeof next.playerSkinDataUrl === "string" ? next.playerSkinDataUrl : "";
+    if (next.playerSkinPreset === "custom" && !next.playerSkinDataUrl) {
+      next.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
+    }
+    next.mobModels = next.mobModels !== false;
+    next.invertY = !!next.invertY;
+    next.gameMode = next.gameMode === GAME_MODE.CREATIVE ? GAME_MODE.CREATIVE : GAME_MODE.SURVIVAL;
+    return next;
+  }
+
+  function saveGlobalSettings() {
+    settings = normalizeSettingsState(settings);
+    try {
+      localStorage.setItem(GLOBAL_SETTINGS_KEY, JSON.stringify(settings));
+      return true;
+    } catch (error) {
+      console.warn("Global settings save failed:", error.message);
+      return false;
+    }
+  }
+
+  function loadGlobalSettings() {
+    try {
+      const raw = localStorage.getItem(GLOBAL_SETTINGS_KEY);
+      if (!raw) {
+        settings = normalizeSettingsState(DEFAULT_SETTINGS);
+        return settings;
+      }
+      settings = normalizeSettingsState(JSON.parse(raw), settings);
+    } catch (error) {
+      console.warn("Global settings load failed:", error.message);
+      settings = normalizeSettingsState(DEFAULT_SETTINGS);
+    }
+    return settings;
+  }
+
+  function buildWeatherRenderState() {
+    return {
+      timeSeconds: worldTime,
+      intensity: weatherVisualIntensity,
+      runtimeLowFps: fpsSmoothed > 0 && fpsSmoothed < 42,
+      weather: {
+        type: weather.type,
+        flash: weather.flash || 0,
+        lightningTimer: weather.lightningTimer || 0
+      }
+    };
+  }
+
+  function clearInventoryCursor() {
+    inventoryCursor.type = BLOCK.AIR;
+    inventoryCursor.count = 0;
+    inventoryCursor.durability = 0;
+  }
+
+  function getHeldEnchantmentLevel(name) {
+    const maxLevel = ENCHANTMENT_DEFS[name]?.maxLevel || 5;
+    return clamp(Math.floor(Number(player?.enchantments?.held?.[name]) || 0), 0, maxLevel);
+  }
+
+  function getArmorEnchantmentLevel(name) {
+    const maxLevel = ENCHANTMENT_DEFS[name]?.maxLevel || 5;
+    return clamp(Math.floor(Number(player?.enchantments?.armor?.[name]) || 0), 0, maxLevel);
+  }
+
+  function getDurabilityPercent(itemType, durability) {
+    const maxDurability = getItemMaxDurability(itemType);
+    if (maxDurability <= 0) return 0;
+    return clamp((normalizeDurabilityValue(itemType, durability) / maxDurability) * 100, 0, 100);
+  }
+
+  function addPlayerStat(key, amount = 1) {
+    if (!player?.stats || !Object.prototype.hasOwnProperty.call(player.stats, key)) return;
+    player.stats[key] = Math.max(0, (player.stats[key] || 0) + (Number(amount) || 0));
+    if (world) {
+      world.saveDirty = true;
+    }
+  }
+
+  function queueToast(title, detail = "", duration = 4.5, kind = "sys") {
+    toastQueue.push({
+      id: generateId(),
+      title: String(title || "").slice(0, 80),
+      detail: String(detail || "").slice(0, 120),
+      duration: Math.max(1, Number(duration) || 4.5),
+      ttl: Math.max(1, Number(duration) || 4.5),
+      kind
+    });
+    if (toastQueue.length > 5) {
+      toastQueue = toastQueue.slice(toastQueue.length - 5);
+    }
+  }
+
+  function updateToasts(dt) {
+    if (!ui?.toastEl) return;
+    toastQueue = toastQueue
+      .map((toast) => ({ ...toast, ttl: toast.ttl - dt }))
+      .filter((toast) => toast.ttl > 0);
+    ui.toastEl.innerHTML = "";
+    for (const toast of toastQueue) {
+      const el = document.createElement("div");
+      el.className = `fc-toast ${toast.kind}`;
+      const fade = clamp(toast.ttl / toast.duration, 0, 1);
+      el.style.opacity = String(clamp(fade * 1.15, 0, 1));
+      el.innerHTML = `<div class="fc-toast-title">${toast.title}</div>${toast.detail ? `<div class="fc-toast-detail">${toast.detail}</div>` : ""}`;
+      ui.toastEl.appendChild(el);
+    }
+  }
+
+  function updateEffectsHud() {
+    if (!ui?.effectsEl || !player) return;
+    const entries = Object.entries(player.effects || {})
+      .filter(([, effect]) => effect && effect.time > 0 && effect.level > 0)
+      .sort((a, b) => a[1].time - b[1].time);
+    if (entries.length === 0 || mode !== "playing" || inventoryOpen || sleepState.active) {
+      ui.effectsEl.style.display = "none";
+      ui.effectsEl.innerHTML = "";
+      return;
+    }
+    ui.effectsEl.style.display = "flex";
+    ui.effectsEl.innerHTML = "";
+    for (const [key, effect] of entries) {
+      const chip = document.createElement("div");
+      chip.className = `fc-effect-chip${EFFECT_DEFS[key]?.positive === false ? " bad" : ""}`;
+      chip.textContent = `${EFFECT_DEFS[key]?.label || key} ${effect.level} (${Math.ceil(effect.time)}s)`;
+      ui.effectsEl.appendChild(chip);
+    }
+  }
+
+  function unlockPlayerAchievement(id) {
+    if (!player?.achievements || !ACHIEVEMENT_DEFS[id]) {
+      return false;
+    }
+    const achievement = player.achievements[id] || { done: false, unlockedAt: 0 };
+    if (achievement.done) {
+      return false;
+    }
+    const parent = ACHIEVEMENT_DEFS[id].parent;
+    if (parent && !player.achievements[parent]?.done) {
+      return false;
+    }
+    achievement.done = true;
+    achievement.unlockedAt = Date.now();
+    player.achievements[id] = achievement;
+    queueToast(ACHIEVEMENT_DEFS[id].title, ACHIEVEMENT_DEFS[id].desc, 5.6, "adv");
+    pushChatLine(`Advancement made! ${ACHIEVEMENT_DEFS[id].title}`, "sys");
+    if (world) {
+      world.saveDirty = true;
+    }
+    return true;
+  }
+
+  function applyPlayerEffect(name, level = 1, durationSeconds = 30, announce = true) {
+    if (!player) return false;
+    const key = sanitizeEffectKey(name);
+    if (!key) return false;
+    const nextLevel = clamp(Math.floor(Number(level) || 1), 1, 10);
+    const nextTime = Math.max(1, Number(durationSeconds) || 1);
+    const current = player.effects[key];
+    player.effects[key] = {
+      level: current ? Math.max(current.level, nextLevel) : nextLevel,
+      time: current ? Math.max(current.time, nextTime) : nextTime,
+      maxTime: current ? Math.max(current.maxTime || 0, nextTime) : nextTime
+    };
+    addPlayerStat("effectsUsed", 1);
+    unlockPlayerAchievement("local_brewery");
+    if (announce) {
+      queueToast(EFFECT_DEFS[key]?.label || key, `Level ${nextLevel} for ${Math.ceil(nextTime)}s`, 4.2, EFFECT_DEFS[key]?.positive === false ? "bad" : "buff");
+      pushChatLine(`Effect applied: ${EFFECT_DEFS[key]?.label || key} ${nextLevel}`, "sys");
+    }
+    return true;
+  }
+
+  function addEnchantmentLevel(slotKey, enchantKey, levels = 1, announce = true) {
+    if (!player || !player.enchantments || !ENCHANTMENT_DEFS[enchantKey]) {
+      return false;
+    }
+    const section = slotKey === "armor" ? "armor" : "held";
+    const maxLevel = ENCHANTMENT_DEFS[enchantKey].maxLevel || 5;
+    const current = Math.max(0, Number(player.enchantments[section][enchantKey]) || 0);
+    const next = clamp(current + Math.max(1, Math.floor(Number(levels) || 1)), 0, maxLevel);
+    if (next === current) {
+      return false;
+    }
+    player.enchantments[section][enchantKey] = next;
+    unlockPlayerAchievement("enchanter");
+    if (world) {
+      world.saveDirty = true;
+    }
+    if (announce) {
+      queueToast(ENCHANTMENT_DEFS[enchantKey].label, `${section === "armor" ? "Armor" : "Held"} gear ${next}`, 4.6, "adv");
+      pushChatLine(`${ENCHANTMENT_DEFS[enchantKey].label} ${next} applied to ${section}.`, "sys");
+    }
+    return true;
+  }
+
+  function countInventoryItem(itemType) {
+    if (!player || !itemType || itemType === BLOCK.AIR) return 0;
+    let total = 0;
+    for (let i = 0; i < INVENTORY_SLOTS; i += 1) {
+      if ((player.inventoryCounts[i] || 0) > 0 && player.inventoryTypes[i] === itemType) {
+        total += player.inventoryCounts[i] || 0;
+      }
+    }
+    return total;
+  }
+
+  function removeInventoryItem(itemType, count) {
+    if (!player || !itemType || itemType === BLOCK.AIR || count <= 0) return 0;
+    let remaining = Math.max(0, Math.floor(count));
+    for (let i = 0; i < INVENTORY_SLOTS && remaining > 0; i += 1) {
+      if (player.inventoryTypes[i] !== itemType || (player.inventoryCounts[i] || 0) <= 0) continue;
+      const take = Math.min(remaining, player.inventoryCounts[i] || 0);
+      player.inventoryCounts[i] -= take;
+      remaining -= take;
+      if ((player.inventoryCounts[i] || 0) <= 0) {
+        player.inventoryTypes[i] = BLOCK.AIR;
+        player.inventoryCounts[i] = 0;
+        player.inventoryDurability[i] = 0;
+      }
+    }
+    if (remaining < count) {
+      setHotbarImages();
+      if (inventoryOpen) renderInventoryUI();
+      if (world) world.saveDirty = true;
+    }
+    return count - remaining;
+  }
+
+  function damageSelectedHeldItem(amount = 1) {
+    if (!player || isCreativeMode()) return false;
+    const index = player.selectedHotbarSlot;
+    const itemType = player.hotbarTypes[index] || BLOCK.AIR;
+    const maxDurability = getItemMaxDurability(itemType);
+    if (maxDurability <= 0 || (player.hotbarCounts[index] || 0) <= 0) {
+      return false;
+    }
+    const unbreaking = getHeldEnchantmentLevel("unbreaking");
+    for (let i = 0; i < Math.max(1, Math.floor(amount)); i += 1) {
+      if (unbreaking > 0 && Math.random() < unbreaking / (unbreaking + 1)) {
+        continue;
+      }
+      const nextDurability = Math.max(0, (player.inventoryDurability[index] || maxDurability) - 1);
+      player.inventoryDurability[index] = nextDurability;
+      if (nextDurability <= 0) {
+        player.hotbarTypes[index] = BLOCK.AIR;
+        player.hotbarCounts[index] = 0;
+        player.inventoryDurability[index] = 0;
+        queueToast(`${getItemName(itemType)} broke`, "Your tool ran out of durability.", 3.5, "bad");
+        break;
+      }
+    }
+    setHotbarImages();
+    if (inventoryOpen) renderInventoryUI();
+    if (world) world.saveDirty = true;
+    return true;
+  }
+
+  function damageArmorFromHit(amount = 1) {
+    if (!player || isCreativeMode()) return;
+    const hits = Math.max(1, Math.ceil((Number(amount) || 1) / 4));
+    const unbreaking = getArmorEnchantmentLevel("unbreaking");
+    for (let index = 0; index < ARMOR_SLOTS; index += 1) {
+      if ((player.armorCounts[index] || 0) <= 0) continue;
+      const itemType = player.armorTypes[index] || BLOCK.AIR;
+      const maxDurability = getItemMaxDurability(itemType);
+      if (maxDurability <= 0) continue;
+      for (let step = 0; step < hits; step += 1) {
+        if (unbreaking > 0 && Math.random() < unbreaking / (unbreaking + 1)) {
+          continue;
+        }
+        player.armorDurability[index] = Math.max(0, (player.armorDurability[index] || maxDurability) - 1);
+        if (player.armorDurability[index] <= 0) {
+          const brokenName = getItemName(itemType);
+          player.armorTypes[index] = BLOCK.AIR;
+          player.armorCounts[index] = 0;
+          player.armorDurability[index] = 0;
+          queueToast(`${brokenName} broke`, "Your armor could not take another hit.", 3.5, "bad");
+          break;
+        }
+      }
+    }
   }
 
   function preloadMusicTracks() {
@@ -9853,6 +12750,17 @@ export default function FreeCube2Game(engine) {
         #freecube2-xp-bar{height:10px;border-radius:999px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.14);overflow:hidden}
         #freecube2-xp-bar > div{height:100%;width:0%;background:linear-gradient(90deg, rgba(94,236,171,0.96), rgba(72,162,255,0.96))}
         #freecube2-xp-level{margin-top:6px;text-align:center;color:rgba(220,235,255,0.9);font:700 12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.6)}
+        #freecube2-effects{position:fixed;right:14px;top:64px;display:none;flex-direction:column;gap:8px;z-index:1001;pointer-events:none}
+        .fc-effect-chip{padding:8px 10px;background:rgba(10,22,18,0.72);border:1px solid rgba(126,229,178,0.34);border-radius:10px;color:#dfffea;font:700 12px/1.1 ui-monospace,Menlo,Consolas,monospace;box-shadow:0 8px 20px rgba(0,0,0,0.22)}
+        .fc-effect-chip.bad{background:rgba(30,12,12,0.76);border-color:rgba(255,120,120,0.38);color:#ffdada}
+        #freecube2-toast{position:fixed;right:14px;top:14px;display:flex;flex-direction:column;gap:8px;z-index:1002;pointer-events:none}
+        .fc-toast{min-width:min(280px,78vw);max-width:min(360px,82vw);padding:10px 12px;background:rgba(10,18,28,0.86);border:1px solid rgba(255,255,255,0.16);border-left:4px solid rgba(148,233,255,0.9);border-radius:12px;box-shadow:0 14px 34px rgba(0,0,0,0.34);color:#f2fbff;backdrop-filter:blur(8px)}
+        .fc-toast.adv{border-left-color:rgba(255,226,116,0.95)}
+        .fc-toast.bad{border-left-color:rgba(255,112,112,0.95)}
+        .fc-toast.buff{border-left-color:rgba(126,229,178,0.95)}
+        .fc-toast.sys{border-left-color:rgba(148,233,255,0.95)}
+        .fc-toast-title{font:900 13px/1.1 ui-monospace,Menlo,Consolas,monospace}
+        .fc-toast-detail{margin-top:4px;color:rgba(226,238,255,0.86);font:12px/1.3 ui-monospace,Menlo,Consolas,monospace}
         #freecube2-status{position:fixed;left:50%;bottom:122px;transform:translateX(-50%);width:min(820px,94vw);display:none;justify-content:space-between;gap:14px}
         .fc-armor,.fc-hearts,.fc-hunger{display:flex;gap:3px;align-items:center}
         .fc-heart,.fc-food,.fc-armor-icon{width:16px;height:16px;display:inline-block;background:rgba(0,0,0,0.25);border:1px solid rgba(0,0,0,0.55);box-shadow:0 2px 0 rgba(0,0,0,0.45);image-rendering:pixelated}
@@ -9931,6 +12839,8 @@ export default function FreeCube2Game(engine) {
         .freecube2-slot.sel{border-color:#ffffff;box-shadow:inset 2px 2px 0 #ffffff,inset -2px -2px 0 #2a2a2a}
         .freecube2-slot img{width:32px;height:32px;image-rendering:pixelated;pointer-events:none;-webkit-user-drag:none;user-select:none}
         .freecube2-slot .fc-count{position:absolute;right:6px;bottom:4px;color:rgba(255,255,255,0.95);font:900 12px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 0 rgba(0,0,0,0.75)}
+        .freecube2-slot .fc-durability{position:absolute;left:5px;right:5px;bottom:3px;height:5px;background:rgba(0,0,0,0.7);border:1px solid rgba(0,0,0,0.82)}
+        .freecube2-slot .fc-durability > div{height:100%;background:linear-gradient(90deg, rgba(255,92,92,0.96), rgba(255,226,116,0.96), rgba(126,229,178,0.96))}
         .fc-inv-preview{width:152px;min-height:192px;padding:12px;background:#1a1a1a;border:2px solid #373737;box-shadow:inset 2px 2px 0 #555555,inset -2px -2px 0 #101010;display:flex;align-items:center;justify-content:center}
         .fc-inv-player-canvas{width:96px;height:176px;image-rendering:pixelated;filter:drop-shadow(0 8px 10px rgba(0,0,0,0.42))}
         .fc-inv-player{position:relative;width:86px;height:168px;image-rendering:pixelated}
@@ -10043,25 +12953,63 @@ export default function FreeCube2Game(engine) {
         .fc-profile-input:focus,.fc-profile-select:focus{outline:2px solid rgba(255,255,255,0.9)}
         .fc-profile-note{color:rgba(230,230,230,0.88);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
         .fc-profile-actions{display:flex;flex-wrap:wrap;gap:10px}
-        .fc-mp-shell{display:grid;gap:12px;width:min(860px,100%)}
-        .fc-mp-browser{min-height:min(420px,52dvh);padding:14px;background:rgba(0,0,0,0.48);border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.08);display:grid;grid-template-rows:auto auto 1fr}
-        .fc-mp-title{font:900 22px/1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7)}
-        .fc-mp-status{color:rgba(236,245,255,0.88);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
-        .fc-mp-list{display:flex;flex-direction:column;gap:10px;margin-top:14px;overflow:auto}
-        .fc-mp-section{margin-top:12px;color:rgba(240,246,255,0.88);font:700 13px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:left}
-        .fc-mp-entry{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px;background:rgba(0,0,0,0.46);border:2px solid #000;text-align:left}
+        .fc-mp-shell{display:grid;gap:14px;width:min(700px,100%);margin:0 auto}
+        .fc-mp-browser{min-height:min(388px,54dvh);padding:0;background:rgba(0,0,0,0.7);border:3px solid #050505;box-shadow:inset 0 0 0 2px rgba(255,255,255,0.06),0 18px 40px rgba(0,0,0,0.4);display:grid;grid-template-rows:auto 1fr}
+        .fc-mp-title{padding:10px 14px 8px 14px;font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 0 rgba(0,0,0,0.75)}
+        .fc-mp-status,.fc-mp-note,.fc-mp-section{display:none}
+        .fc-mp-list{display:flex;flex-direction:column;gap:2px;padding:6px;background:rgba(0,0,0,0.32);overflow:auto}
+        .fc-mp-entry{position:relative;display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;min-height:64px;padding:6px 12px;background:rgba(0,0,0,0.78);border:1px solid rgba(255,255,255,0.08);text-align:left;cursor:pointer}
+        .fc-mp-entry:hover{background:rgba(16,16,16,0.92)}
+        .fc-mp-entry.sel{outline:2px solid rgba(255,255,255,0.95);outline-offset:-2px}
         .fc-mp-entry.locked{opacity:0.72}
-        .fc-mp-icon{width:44px;height:44px;display:grid;place-items:center;background:#111;border:2px solid #000;color:#fff;font:900 12px/1 ui-monospace,Menlo,Consolas,monospace}
-        .fc-mp-copy{display:grid;gap:4px;min-width:0}
-        .fc-mp-head{font:900 16px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
-        .fc-mp-sub{font:12px/1.25 ui-monospace,Menlo,Consolas,monospace;color:rgba(225,232,242,0.82);word-break:break-word}
-        .fc-mp-meta{display:grid;justify-items:end;gap:6px;color:rgba(245,245,245,0.88);font:12px/1.1 ui-monospace,Menlo,Consolas,monospace}
-        .fc-mp-signal{padding:4px 7px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:999px}
-        .fc-mp-controls{display:grid;gap:10px;margin-top:12px}
+        .fc-mp-thumb{width:56px;height:56px;border:2px solid #2a2a2a;background:
+          linear-gradient(180deg, rgba(164,164,164,0.85) 0 48%, rgba(116,116,116,0.85) 48% 62%, rgba(72,72,72,0.95) 62% 100%),
+          url('./assets/PNG/Tiles/dirt.png');background-size:cover,112px 112px;image-rendering:pixelated;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.18)}
+        .fc-mp-copy{display:grid;gap:2px;min-width:0}
+        .fc-mp-head{font:900 15px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 0 rgba(0,0,0,0.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .fc-mp-sub{font:12px/1.15 ui-monospace,Menlo,Consolas,monospace;color:rgba(196,196,196,0.95);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .fc-mp-sub.error{color:#ff3d32}
+        .fc-mp-meta{display:grid;justify-items:end;align-content:start;gap:4px;min-width:72px}
+        .fc-mp-players{font:900 12px/1 ui-monospace,Menlo,Consolas,monospace;color:#f1f1f1}
+        .fc-mp-bars{display:flex;gap:2px;align-items:flex-end;height:14px}
+        .fc-mp-bars span{display:block;width:3px;background:#40d84d;box-shadow:0 0 6px rgba(64,216,77,0.45)}
+        .fc-mp-bars span:nth-child(1){height:5px}
+        .fc-mp-bars span:nth-child(2){height:8px}
+        .fc-mp-bars span:nth-child(3){height:11px}
+        .fc-mp-bars span:nth-child(4){height:14px}
+        .fc-mp-bad{font:900 18px/1 ui-monospace,Menlo,Consolas,monospace;color:#ff3d32}
+        .fc-mp-empty{display:grid;place-items:center;min-height:120px;color:rgba(230,230,230,0.82);font:13px/1.2 ui-monospace,Menlo,Consolas,monospace;background:rgba(0,0,0,0.62);border:1px solid rgba(255,255,255,0.06)}
+        .fc-mp-controls{display:grid;gap:10px}
         .fc-mp-direct{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
-        .fc-mp-input{all:unset;box-sizing:border-box;height:38px;padding:0 10px;background:#111;border:2px solid #000;color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:left}
-        .fc-mp-input:focus{outline:2px solid rgba(255,255,255,0.9)}
-        .fc-mp-note{color:rgba(228,234,242,0.82);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;text-align:left}
+        .fc-mp-input{all:unset;box-sizing:border-box;height:38px;padding:0 10px;background:#0f0f0f;border:2px solid #000;box-shadow:inset 2px 2px 0 rgba(255,255,255,0.08),inset -2px -2px 0 rgba(0,0,0,0.55);color:#fff;font:14px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:left}
+        .fc-mp-input:focus{outline:2px solid rgba(255,255,255,0.92)}
+        .fc-mp-action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+        .fc-mp-action-grid .fc-btn{min-width:0;width:100%}
+        #freecube2-trade{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);display:none;pointer-events:auto;z-index:1003}
+        .fc-trade-panel{width:min(720px,94vw);max-height:min(82vh,720px);padding:18px;background:#c6c6c6;border:4px solid #1f1f1f;box-shadow:inset 4px 4px 0 #ffffff,inset -4px -4px 0 #555555,0 18px 48px rgba(0,0,0,0.42);display:grid;gap:12px}
+        .fc-trade-head{display:grid;gap:4px;text-align:center}
+        .fc-trade-title{font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;color:#303030}
+        .fc-trade-sub{font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#4a4a4a}
+        .fc-trade-list{display:grid;gap:8px;max-height:min(54vh,420px);overflow:auto;padding-right:4px}
+        .fc-trade-offer{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:10px;background:#8b8b8b;border:2px solid #373737;box-shadow:inset 2px 2px 0 #ffffff,inset -2px -2px 0 #555555}
+        .fc-trade-main{display:grid;gap:6px;text-align:left}
+        .fc-trade-name{font:900 14px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 0 rgba(0,0,0,0.55)}
+        .fc-trade-meta{font:12px/1.25 ui-monospace,Menlo,Consolas,monospace;color:rgba(236,241,255,0.92)}
+        .fc-trade-costs{display:flex;flex-wrap:wrap;gap:6px}
+        .fc-trade-chip{padding:4px 6px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.12);border-radius:999px;color:#fff;font:700 11px/1 ui-monospace,Menlo,Consolas,monospace}
+        .fc-trade-chip.missing{border-color:rgba(255,112,112,0.55);color:#ffd8d8}
+        .fc-trade-chip.reward{border-color:rgba(126,229,178,0.55);color:#dcfff0}
+        .fc-trade-actions{display:grid;justify-items:end;gap:6px}
+        .fc-trade-actions .fc-btn{min-width:140px}
+        .fc-trade-status{font:11px/1.25 ui-monospace,Menlo,Consolas,monospace;color:#f3f6ff;text-align:right}
+        .fc-trade-status.bad{color:#ffd0d0}
+        .fc-prog-list{display:grid;gap:8px;text-align:left}
+        .fc-prog-entry{padding:10px;background:rgba(0,0,0,0.48);border:2px solid #000;display:grid;gap:4px}
+        .fc-prog-entry.done{outline:2px solid rgba(126,229,178,0.7)}
+        .fc-prog-entry.locked{opacity:0.66}
+        .fc-prog-title{font:900 15px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.55)}
+        .fc-prog-desc,.fc-prog-time,.fc-stat-row{font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;color:rgba(233,239,250,0.9)}
+        .fc-stat-row{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;background:rgba(0,0,0,0.42);border:2px solid #000}
         #freecube2-error-overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,12,18,0.78);pointer-events:auto;z-index:1004}
         .fc-error-panel{width:min(560px,92vw);padding:18px;background:rgba(0,0,0,0.82);border:3px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.12),0 18px 48px rgba(0,0,0,0.42);display:grid;gap:10px;text-align:center}
         .fc-error-title{font:900 24px/1.1 ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.7)}
@@ -10095,6 +13043,8 @@ export default function FreeCube2Game(engine) {
         <div id="freecube2-boss-name">Boss</div>
         <div id="freecube2-boss-bar"><div></div></div>
       </div>
+      <div id="freecube2-toast"></div>
+      <div id="freecube2-effects"></div>
       <div id="freecube2-chat">
         <div id="freecube2-chat-log"></div>
         <div id="freecube2-chat-input-wrap">
@@ -10127,6 +13077,19 @@ export default function FreeCube2Game(engine) {
         <div id="freecube2-xp-level">0</div>
       </div>
       <div id="freecube2-hotbar"></div>
+      <div id="freecube2-trade">
+        <div class="fc-trade-panel">
+          <div class="fc-trade-head">
+            <div id="freecube2-trade-title" class="fc-trade-title">Villager Trades</div>
+            <div id="freecube2-trade-sub" class="fc-trade-sub">Trade goods, enchantments, and blessings.</div>
+          </div>
+          <div id="freecube2-trade-status" class="fc-small">Step close to a villager to trade.</div>
+          <div id="freecube2-trade-list" class="fc-trade-list"></div>
+          <div class="fc-row">
+            <button class="fc-btn" data-action="close-trade">Done</button>
+          </div>
+        </div>
+      </div>
       <div id="freecube2-inventory">
         <div id="freecube2-inventory-panel" class="fc-inv-panel">
           <div id="freecube2-inventory-title" class="fc-inv-title">Inventory</div>
@@ -10211,7 +13174,8 @@ export default function FreeCube2Game(engine) {
                 <input id="fc-profile-name" class="fc-profile-input" maxlength="16" placeholder="Name" autocomplete="nickname" spellcheck="false" />
                 <label class="fc-profile-label" for="fc-profile-skin-preset">Player Skin</label>
                 <select id="fc-profile-skin-preset" class="fc-profile-select">
-                  <option value="steve_large">Steve</option>
+                  <option value="steve">Steve</option>
+                  <option value="steve_large">Steve HD</option>
                   <option value="alex">Alex</option>
                   <option value="zombie">Zombie</option>
                   <option value="freecube">FreeCube</option>
@@ -10247,21 +13211,20 @@ export default function FreeCube2Game(engine) {
             <div class="fc-mp-shell">
               <div class="fc-mp-browser">
                 <div class="fc-mp-title">Play Multiplayer</div>
-                <div id="fc-multiplayer-status" class="fc-mp-status">Multiplayer is disabled in this build.</div>
                 <div id="fc-multiplayer-list" class="fc-mp-list"></div>
               </div>
-              <div class="fc-card fc-mp-controls">
+              <div class="fc-mp-controls">
                 <div class="fc-mp-direct">
-                  <input id="fc-multiplayer-direct-input" class="fc-mp-input" value="${DEFAULT_MULTIPLAYER_SERVER_URL}" spellcheck="false" />
-                  <button id="fc-multiplayer-direct-btn" class="fc-btn half disabled" type="button" disabled>Direct Connect</button>
+                  <input id="fc-multiplayer-direct-input" class="fc-mp-input" value="" placeholder="Join with code" spellcheck="false" />
+                  <button id="fc-multiplayer-direct-btn" class="fc-btn half disabled" type="button" disabled>Join with Code</button>
                 </div>
-                <div class="fc-row">
+                <div class="fc-mp-action-grid">
                   <button id="fc-multiplayer-join-btn" class="fc-btn small disabled" type="button" disabled>Join Server</button>
                   <button id="fc-multiplayer-add-btn" class="fc-btn small disabled" type="button" disabled>Add Server</button>
+                  <button id="fc-multiplayer-delete-btn" class="fc-btn small disabled" type="button" disabled>Delete</button>
                   <button id="fc-multiplayer-refresh-btn" class="fc-btn small disabled" type="button" disabled>Refresh</button>
                   <button class="fc-btn small" data-action="back-title">Cancel</button>
                 </div>
-                <div id="fc-multiplayer-note" class="fc-mp-note">Dedicated server code lives in <code>multiplayer-server/server.js</code>. The menu is present now, but the feature flag keeps it locked until the client networking pass is finished.</div>
               </div>
             </div>
           </div>
@@ -10345,7 +13308,7 @@ export default function FreeCube2Game(engine) {
                         <button class="fc-btn small" data-action="skin-zombie">Zombie</button>
                       </div>
                       <div class="fc-row" style="margin-top:2px">
-                        <button class="fc-btn half" data-action="skin-import">Import PNG Skin</button>
+                        <button class="fc-btn half" data-action="skin-import">Import Skin</button>
                         <button class="fc-btn half" data-action="skin-reset">Reset Skin</button>
                       </div>
                     </div>
@@ -10397,14 +13360,32 @@ export default function FreeCube2Game(engine) {
             <div class="fc-stack">
               <button class="fc-btn" data-action="resume">Back to Game</button>
               <div class="fc-row" style="max-width:min(420px,86vw)">
-                <button class="fc-btn half disabled" disabled>Advancements</button>
-                <button class="fc-btn half disabled" disabled>Statistics</button>
+                <button class="fc-btn half" data-action="open-advancements">Advancements</button>
+                <button class="fc-btn half" data-action="open-statistics">Statistics</button>
               </div>
               <div class="fc-row" style="max-width:min(420px,86vw)">
                 <button class="fc-btn half" data-action="open-settings">Options...</button>
-                <button class="fc-btn half disabled" disabled>Open to LAN</button>
+                <button class="fc-btn half" data-action="open-lan">Open to LAN</button>
               </div>
               <button class="fc-btn" data-action="quit-title">Save and Quit to Title</button>
+            </div>
+          </div>
+          <div id="fc-screen-advancements" style="display:none">
+            <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 10px auto">Advancements</div>
+            <div class="fc-card" style="margin:0 auto">
+              <div id="fc-advancement-list" class="fc-prog-list"></div>
+            </div>
+            <div class="fc-row" style="margin-top:10px">
+              <button class="fc-btn" data-action="back-pause">Done</button>
+            </div>
+          </div>
+          <div id="fc-screen-statistics" style="display:none">
+            <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 10px auto">Statistics</div>
+            <div class="fc-card" style="margin:0 auto">
+              <div id="fc-statistics-list" class="fc-prog-list"></div>
+            </div>
+            <div class="fc-row" style="margin-top:10px">
+              <button class="fc-btn" data-action="back-pause">Done</button>
             </div>
           </div>
         </div>
@@ -10419,6 +13400,8 @@ export default function FreeCube2Game(engine) {
     const timeChipEl = root.querySelector("#freecube2-time-chip");
     const bossNameEl = root.querySelector("#freecube2-boss-name");
     const bossFill = root.querySelector("#freecube2-boss-bar > div");
+    const toastEl = root.querySelector("#freecube2-toast");
+    const effectsEl = root.querySelector("#freecube2-effects");
     const chatLogEl = root.querySelector("#freecube2-chat-log");
     const chatInputWrap = root.querySelector("#freecube2-chat-input-wrap");
     const chatInput = root.querySelector("#freecube2-chat-input");
@@ -10444,6 +13427,11 @@ export default function FreeCube2Game(engine) {
     const xpFill = root.querySelector("#freecube2-xp-bar > div");
     const xpLevelEl = root.querySelector("#freecube2-xp-level");
     const hotbarEl = root.querySelector("#freecube2-hotbar");
+    const tradeEl = root.querySelector("#freecube2-trade");
+    const tradeTitleEl = root.querySelector("#freecube2-trade-title");
+    const tradeSubEl = root.querySelector("#freecube2-trade-sub");
+    const tradeStatusEl = root.querySelector("#freecube2-trade-status");
+    const tradeListEl = root.querySelector("#freecube2-trade-list");
     const inventoryEl = root.querySelector("#freecube2-inventory");
     const inventoryPanelEl = root.querySelector("#freecube2-inventory-panel");
     const inventoryTitleEl = root.querySelector("#freecube2-inventory-title");
@@ -10487,7 +13475,9 @@ export default function FreeCube2Game(engine) {
       settings: root.querySelector("#fc-screen-settings"),
       resourcePacks: root.querySelector("#fc-screen-resource-packs"),
       loading: root.querySelector("#fc-screen-loading"),
-      pause: root.querySelector("#fc-screen-pause")
+      pause: root.querySelector("#fc-screen-pause"),
+      advancements: root.querySelector("#fc-screen-advancements"),
+      statistics: root.querySelector("#fc-screen-statistics")
     };
 
     const profileNameInput = root.querySelector("#fc-profile-name");
@@ -10500,6 +13490,7 @@ export default function FreeCube2Game(engine) {
     const multiplayerDirectBtn = root.querySelector("#fc-multiplayer-direct-btn");
     const multiplayerJoinBtn = root.querySelector("#fc-multiplayer-join-btn");
     const multiplayerAddBtn = root.querySelector("#fc-multiplayer-add-btn");
+    const multiplayerDeleteBtn = root.querySelector("#fc-multiplayer-delete-btn");
     const multiplayerRefreshBtn = root.querySelector("#fc-multiplayer-refresh-btn");
     const multiplayerNoteEl = root.querySelector("#fc-multiplayer-note");
 
@@ -10540,13 +13531,15 @@ export default function FreeCube2Game(engine) {
     const loadBar = root.querySelector("#fc-load-bar");
     const loadSub = root.querySelector("#fc-load-sub");
     const loadText = root.querySelector("#fc-load-text");
+    const advancementListEl = root.querySelector("#fc-advancement-list");
+    const statisticsListEl = root.querySelector("#fc-statistics-list");
 
     const showScreen = (screen) => {
       Object.values(screens).forEach((el) => { el.style.display = "none"; });
       screens[screen].style.display = "block";
       root.classList.add("menu-open");
       menuEl.classList.add("show");
-      crosshairEl.style.display = screen === "loading" || screen === "menu" || screen === "profile" || screen === "title" || screen === "multiplayer" || screen === "worlds" || screen === "settings" || screen === "resourcePacks" || screen === "pause" ? "none" : "";
+      crosshairEl.style.display = "none";
     };
 
     const hideMenu = () => {
@@ -10570,10 +13563,17 @@ export default function FreeCube2Game(engine) {
       timeChipEl,
       bossNameEl,
       bossFill,
+      toastEl,
+      effectsEl,
       chatLogEl,
       chatInputWrap,
       chatInput,
       hotbarEl,
+      tradeEl,
+      tradeTitleEl,
+      tradeSubEl,
+      tradeStatusEl,
+      tradeListEl,
       menuEl,
       miningEl,
       miningBar,
@@ -10640,6 +13640,7 @@ export default function FreeCube2Game(engine) {
       multiplayerDirectBtn,
       multiplayerJoinBtn,
       multiplayerAddBtn,
+      multiplayerDeleteBtn,
       multiplayerRefreshBtn,
       multiplayerNoteEl,
       newWorldCard,
@@ -10676,6 +13677,8 @@ export default function FreeCube2Game(engine) {
       loadBar,
       loadSub,
       loadText,
+      advancementListEl,
+      statisticsListEl,
       showScreen,
       hideMenu,
       setHudVisible
@@ -10722,15 +13725,24 @@ export default function FreeCube2Game(engine) {
     return player ? (player.inventoryCounts[index] || 0) : 0;
   }
 
-  function setInventorySlot(index, type, count) {
+  function getInventorySlotDurability(index) {
+    if (!player || index < 0 || index >= INVENTORY_SLOTS) return 0;
+    return player.inventoryDurability[index] || 0;
+  }
+
+  function setInventorySlot(index, type, count, durability = null) {
     if (!player || index < 0 || index >= INVENTORY_SLOTS) return;
     if (!type || type === BLOCK.AIR || count <= 0) {
       player.inventoryTypes[index] = BLOCK.AIR;
       player.inventoryCounts[index] = 0;
+      player.inventoryDurability[index] = 0;
       return;
     }
     player.inventoryTypes[index] = type;
     player.inventoryCounts[index] = clamp(Math.floor(count), 0, getItemMaxStack(type));
+    player.inventoryDurability[index] = getItemMaxDurability(type) > 0
+      ? normalizeDurabilityValue(type, durability)
+      : 0;
   }
 
   function getArmorSlotType(index) {
@@ -10743,16 +13755,24 @@ export default function FreeCube2Game(engine) {
     return player.armorCounts[index] || 0;
   }
 
-  function setArmorSlot(index, type, count) {
+  function getArmorSlotDurability(index) {
+    if (!player || index < 0 || index >= ARMOR_SLOTS) return 0;
+    return player.armorDurability[index] || 0;
+  }
+
+  function setArmorSlot(index, type, count, durability = null) {
     if (!player || index < 0 || index >= ARMOR_SLOTS) return;
     const slotKey = ARMOR_SLOT_KEYS[index];
     if (!type || type === BLOCK.AIR || count <= 0 || getItemArmorSlot(type) !== slotKey) {
       player.armorTypes[index] = BLOCK.AIR;
       player.armorCounts[index] = 0;
+      player.armorDurability[index] = 0;
       return;
     }
     player.armorTypes[index] = type;
     player.armorCounts[index] = 1;
+    player.armorDurability[index] = normalizeDurabilityValue(type, durability);
+    unlockPlayerAchievement("suit_up");
   }
 
   function getFurnaceStateByKey(key, create = false) {
@@ -10997,7 +14017,7 @@ export default function FreeCube2Game(engine) {
     }
   }
 
-  function renderItemStack(slot, itemType, count = 0, showCount = true, placeholder = "") {
+  function renderItemStack(slot, itemType, count = 0, showCount = true, placeholder = "", durability = 0) {
     slot.innerHTML = "";
     slot.draggable = false;
     if (placeholder) {
@@ -11028,6 +14048,15 @@ export default function FreeCube2Game(engine) {
       c.textContent = String(count);
       slot.appendChild(c);
     }
+    const maxDurability = getItemMaxDurability(itemType);
+    if (maxDurability > 0 && durability > 0) {
+      const wrap = document.createElement("div");
+      wrap.className = "fc-durability";
+      const fill = document.createElement("div");
+      fill.style.width = `${getDurabilityPercent(itemType, durability)}%`;
+      wrap.appendChild(fill);
+      slot.appendChild(wrap);
+    }
   }
 
   function renderSlotContents(slot, inventoryIndex, isHotbar = false) {
@@ -11038,7 +14067,7 @@ export default function FreeCube2Game(engine) {
     const isCreative = settings.gameMode === GAME_MODE.CREATIVE;
     const itemType = isCreative && isHotbar ? getHotbarSlotItemType(inventoryIndex) : getInventorySlotType(inventoryIndex);
     const count = isCreative && isHotbar ? (itemType === BLOCK.AIR ? 0 : 1) : getInventorySlotCount(inventoryIndex);
-    renderItemStack(slot, itemType, count, !isCreative);
+    renderItemStack(slot, itemType, count, !isCreative, "", getInventorySlotDurability(inventoryIndex));
   }
 
   function updateInventoryCursorVisual() {
@@ -11049,7 +14078,7 @@ export default function FreeCube2Game(engine) {
       return;
     }
     ui.inventoryCursorEl.style.display = "grid";
-    renderItemStack(ui.inventoryCursorEl, inventoryCursor.type, inventoryCursor.count, true);
+    renderItemStack(ui.inventoryCursorEl, inventoryCursor.type, inventoryCursor.count, true, "", inventoryCursor.durability || 0);
   }
 
   function updateInventoryCursorPosition() {
@@ -11153,23 +14182,25 @@ export default function FreeCube2Game(engine) {
 
   function createMultiplayerEntryMarkup(server, section = "saved") {
     const name = String(server?.name || "Unnamed Server");
-    const subtitle = String(server?.subtitle || "");
-    const address = String(server?.address || "");
-    const playersLabel = String(server?.playersLabel || "--/--");
-    const signalLabel = String(server?.signalLabel || "OFF");
+    const subtitle = String(server?.subtitle || "Saved invite");
+    const statusText = String(server?.statusText || "");
+    const playersLabel = String(server?.roomCode || server?.playersLabel || "");
+    const selected = !!(server?.id && server.id === multiplayerState.selectedServerId);
     const lockedClass = MULTIPLAYER_ENABLED ? "" : " locked";
-    const iconLabel = section === "lan" ? "LAN" : "SRV";
+    const healthy = server?.healthy !== false;
     return `
-      <div class="fc-mp-entry${lockedClass}">
-        <div class="fc-mp-icon">${iconLabel}</div>
+      <div class="fc-mp-entry${lockedClass}${selected ? " sel" : ""}" data-mp-code="${server?.code || server?.address || ""}" data-mp-server-id="${server?.id || ""}">
+        <div class="fc-mp-thumb" aria-hidden="true"></div>
         <div class="fc-mp-copy">
           <div class="fc-mp-head">${name}</div>
           <div class="fc-mp-sub">${subtitle}</div>
-          <div class="fc-mp-sub">${address}</div>
+          ${statusText ? `<div class="fc-mp-sub${healthy ? "" : " error"}">${statusText}</div>` : ""}
         </div>
         <div class="fc-mp-meta">
-          <div>${playersLabel}</div>
-          <div class="fc-mp-signal">${signalLabel}</div>
+          <div class="fc-mp-players">${playersLabel}</div>
+          ${healthy
+            ? `<div class="fc-mp-bars" aria-hidden="true"><span></span><span></span><span></span><span></span></div>`
+            : `<div class="fc-mp-bad" aria-hidden="true">×</div>`}
         </div>
       </div>
     `;
@@ -11177,51 +14208,35 @@ export default function FreeCube2Game(engine) {
 
   function renderMultiplayerMenu() {
     if (!ui?.multiplayerListEl) return;
-    const storedName = playerUsername || getStoredCubeCraftUsername() || "Player";
-    const currentOrigin = globalThis.location?.origin || "file://";
-    const originSocketUrl = getWebSocketURL(currentOrigin) || DEFAULT_MULTIPLAYER_SERVER_URL;
-    multiplayerState.directConnectUrl = String(multiplayerState.directConnectUrl || DEFAULT_MULTIPLAYER_SERVER_URL);
-    if (ui.multiplayerDirectInputEl && document.activeElement !== ui.multiplayerDirectInputEl) {
-      ui.multiplayerDirectInputEl.value = multiplayerState.directConnectUrl;
-    }
-
-    const lanEntries = multiplayerState.lanServers.length > 0
-      ? multiplayerState.lanServers.map((server) => createMultiplayerEntryMarkup(server, "lan")).join("")
-      : `<div class="fc-mp-entry locked"><div class="fc-mp-icon">LAN</div><div class="fc-mp-copy"><div class="fc-mp-head">Scanning for games on your local network</div><div class="fc-mp-sub">LAN discovery will arrive in a later multiplayer pass.</div><div class="fc-mp-sub">WebRTC signaling and join codes are intentionally not exposed yet.</div></div><div class="fc-mp-meta"><div>--</div><div class="fc-mp-signal">WAIT</div></div></div>`;
-
-    const savedEntries = multiplayerState.savedServers.map((server) => createMultiplayerEntryMarkup(server, "saved")).join("");
-    ui.multiplayerListEl.innerHTML = `
-      <div class="fc-mp-section">Local player</div>
-      <div class="fc-mp-entry${MULTIPLAYER_ENABLED ? "" : " locked"}">
-        <div class="fc-mp-icon">YOU</div>
-        <div class="fc-mp-copy">
-          <div class="fc-mp-head">${storedName}</div>
-          <div class="fc-mp-sub">Profile skin: ${getSelectedPlayerSkinLabel(settings)}</div>
-          <div class="fc-mp-sub">Suggested socket origin: ${originSocketUrl}</div>
-        </div>
-        <div class="fc-mp-meta">
-          <div>LOCAL</div>
-          <div class="fc-mp-signal">READY</div>
-        </div>
-      </div>
-      <div class="fc-mp-section">Local players on network</div>
-      ${lanEntries}
-      <div class="fc-mp-section">Servers</div>
-      ${savedEntries}
-    `;
+    const entries = multiplayerState.savedServers.map((server) => createMultiplayerEntryMarkup(server, "saved")).join("");
+    ui.multiplayerListEl.innerHTML = entries || `<div class="fc-mp-empty">No saved servers</div>`;
 
     if (ui.multiplayerStatusEl) {
-      ui.multiplayerStatusEl.textContent = MULTIPLAYER_ENABLED
-        ? "Client networking is enabled. Join, direct connect, and server refresh are available."
-        : "Multiplayer is staged in the UI, but locked behind MULTIPLAYER_ENABLED for now.";
+      ui.multiplayerStatusEl.textContent = "";
+      ui.multiplayerStatusEl.style.display = "none";
     }
     if (ui.multiplayerNoteEl) {
-      ui.multiplayerNoteEl.innerHTML = `Dedicated server code lives in <code>multiplayer-server/server.js</code>. Use <code>${DEFAULT_MULTIPLAYER_SERVER_URL}</code> for local development, or convert HTTPS origins to <code>wss://</code>.`;
+      ui.multiplayerNoteEl.textContent = "";
+      ui.multiplayerNoteEl.style.display = "none";
     }
-    for (const button of [ui.multiplayerDirectBtn, ui.multiplayerJoinBtn, ui.multiplayerAddBtn, ui.multiplayerRefreshBtn]) {
+    for (const button of [ui.multiplayerDirectBtn, ui.multiplayerJoinBtn, ui.multiplayerAddBtn, ui.multiplayerDeleteBtn, ui.multiplayerRefreshBtn]) {
       if (!button) continue;
       button.disabled = !MULTIPLAYER_ENABLED;
       button.classList.toggle("disabled", !MULTIPLAYER_ENABLED);
+    }
+    if (ui.multiplayerDirectBtn && MULTIPLAYER_ENABLED) {
+      ui.multiplayerDirectBtn.disabled = false;
+      ui.multiplayerDirectBtn.classList.remove("disabled");
+    }
+    if (ui.multiplayerJoinBtn && MULTIPLAYER_ENABLED) {
+      const canJoin = !!multiplayerState.selectedServerId;
+      ui.multiplayerJoinBtn.disabled = !canJoin;
+      ui.multiplayerJoinBtn.classList.toggle("disabled", !canJoin);
+    }
+    if (ui.multiplayerDeleteBtn && MULTIPLAYER_ENABLED) {
+      const canDelete = !!multiplayerState.selectedServerId;
+      ui.multiplayerDeleteBtn.disabled = !canDelete;
+      ui.multiplayerDeleteBtn.classList.toggle("disabled", !canDelete);
     }
   }
 
@@ -11238,6 +14253,292 @@ export default function FreeCube2Game(engine) {
     }
     showHomeScreen();
     return true;
+  }
+
+  function renderAdvancementsScreen() {
+    if (!ui?.advancementListEl || !player) return;
+    ui.advancementListEl.innerHTML = "";
+    for (const [id, def] of Object.entries(ACHIEVEMENT_DEFS)) {
+      const state = player.achievements?.[id] || { done: false, unlockedAt: 0 };
+      const row = document.createElement("div");
+      row.className = `fc-prog-entry${state.done ? " done" : def.parent && !player.achievements?.[def.parent]?.done ? " locked" : ""}`;
+      row.innerHTML = `
+        <div class="fc-prog-title">${state.done ? "[x]" : "[ ]"} ${def.title}</div>
+        <div class="fc-prog-desc">${def.desc}</div>
+        <div class="fc-prog-time">${state.done ? `Unlocked ${new Date(state.unlockedAt || Date.now()).toLocaleString()}` : def.parent && !player.achievements?.[def.parent]?.done ? `Locked until ${ACHIEVEMENT_DEFS[def.parent]?.title || "parent"} is complete.` : "Not unlocked yet."}</div>
+      `;
+      ui.advancementListEl.appendChild(row);
+    }
+  }
+
+  function renderStatisticsScreen() {
+    if (!ui?.statisticsListEl || !player?.stats) return;
+    ui.statisticsListEl.innerHTML = "";
+    for (const key of PLAYER_STAT_ORDER) {
+      const row = document.createElement("div");
+      row.className = "fc-stat-row";
+      row.innerHTML = `<span>${PLAYER_STAT_LABELS[key] || key}</span><strong>${formatStatValue(key, player.stats[key] || 0)}</strong>`;
+      ui.statisticsListEl.appendChild(row);
+    }
+  }
+
+  function isVillagerTradeValid(mob = activeTradeVillager) {
+    if (!mob || mob.health <= 0 || mob.type !== "villager" || !player) return false;
+    const dx = mob.x - player.x;
+    const dz = mob.z - player.z;
+    return dx * dx + dz * dz <= 6.5 * 6.5;
+  }
+
+  function describeTradeReward(reward) {
+    if (!reward || typeof reward !== "object") return "Unknown reward";
+    if (reward.kind === "item") {
+      return `${reward.count} ${getItemName(reward.itemType)}`;
+    }
+    if (reward.kind === "enchant") {
+      return `${ENCHANTMENT_DEFS[reward.enchant]?.label || reward.enchant} +${reward.levels} (${reward.slot})`;
+    }
+    if (reward.kind === "effect") {
+      return `${EFFECT_DEFS[reward.effect]?.label || reward.effect} ${reward.level} for ${Math.ceil(reward.duration || 0)}s`;
+    }
+    return "Unknown reward";
+  }
+
+  function getTradeOfferState(offer) {
+    const costs = Array.isArray(offer?.costs) ? offer.costs : [];
+    const usedUp = (offer?.uses || 0) >= (offer?.maxUses || 0);
+    const missing = costs.map((cost) => ({
+      ...cost,
+      have: countInventoryItem(cost.itemType),
+      missing: Math.max(0, cost.count - countInventoryItem(cost.itemType))
+    }));
+    const inventoryBlocked = offer?.reward?.kind === "item" && getInventorySpaceForItem(offer.reward.itemType) < (offer.reward.count || 1);
+    const canTrade = !usedUp && !inventoryBlocked && missing.every((entry) => entry.missing <= 0);
+    let status = "Ready to trade";
+    if (usedUp) status = "Restocks after work";
+    else if (inventoryBlocked) status = "Inventory full";
+    else if (!canTrade) status = "Missing materials";
+    return { canTrade, usedUp, inventoryBlocked, missing, status };
+  }
+
+  function renderVillagerTradeUi() {
+    if (!ui?.tradeEl) return;
+    if (!tradeOpen || !isVillagerTradeValid()) {
+      ui.tradeEl.style.display = "none";
+      ui.root.classList.toggle("menu-open", inventoryOpen || mode === "menu" || mode === "paused" || chatOpen);
+      return;
+    }
+    ensureVillageMobData(activeTradeVillager, world);
+    ui.tradeEl.style.display = "block";
+    ui.root.classList.add("menu-open");
+    ui.tradeTitleEl.textContent = `${getVillagerProfessionLabel(activeTradeVillager.profession)} Villager`;
+    ui.tradeSubEl.textContent = `State: ${activeTradeVillager.villagerState || "mingle"} | Restocks when this villager works at ${getItemName(activeTradeVillager.jobTarget?.type || BLOCK.CRAFTING_TABLE)}.`;
+    ui.tradeStatusEl.textContent = `Emeralds: ${countInventoryItem(ITEM.EMERALD)} | Willingness: ${Math.round(clamp(activeTradeVillager.willingness || 0, 0, 1) * 100)}%`;
+    ui.tradeListEl.innerHTML = "";
+
+    for (let index = 0; index < (activeTradeVillager.offers || []).length; index += 1) {
+      const offer = activeTradeVillager.offers[index];
+      const state = getTradeOfferState(offer);
+      const row = document.createElement("div");
+      row.className = "fc-trade-offer";
+      const costsHtml = state.missing.map((cost) => `<span class="fc-trade-chip${cost.missing > 0 ? " missing" : ""}">${getItemName(cost.itemType)} ${cost.have}/${cost.count}</span>`).join("");
+      row.innerHTML = `
+        <div class="fc-trade-main">
+          <div class="fc-trade-name">${offer.label || "Trade"}</div>
+          <div class="fc-trade-costs">${costsHtml}<span class="fc-trade-chip reward">Reward: ${describeTradeReward(offer.reward)}</span></div>
+          <div class="fc-trade-meta">Uses ${offer.uses || 0}/${offer.maxUses || 0}</div>
+        </div>
+        <div class="fc-trade-actions">
+          <button class="fc-btn small${state.canTrade ? "" : " disabled"}" type="button" data-trade-offer="${index}" ${state.canTrade ? "" : "disabled"}>Trade</button>
+          <div class="fc-trade-status${state.canTrade ? "" : " bad"}">${state.status}</div>
+        </div>
+      `;
+      ui.tradeListEl.appendChild(row);
+    }
+  }
+
+  function closeTrade(lockMouse = true) {
+    tradeOpen = false;
+    activeTradeVillager = null;
+    if (ui?.tradeEl) {
+      ui.tradeEl.style.display = "none";
+    }
+    if (!inventoryOpen && !chatOpen && mode === "playing" && lockMouse) {
+      input.pointerLockEnabled = true;
+      input.requestPointerLock();
+    } else if (!inventoryOpen && !chatOpen && mode !== "menu" && mode !== "paused") {
+      ui?.root?.classList?.remove?.("menu-open");
+    }
+  }
+
+  function openVillagerTrade(mob) {
+    if (!mob || mob.type !== "villager" || !player || !world) return false;
+    ensureVillageMobData(mob, world);
+    activeTradeVillager = mob;
+    tradeOpen = true;
+    closeChat(false);
+    if (inventoryOpen) {
+      setInventoryOpen(false);
+    }
+    input.pointerLockEnabled = false;
+    if (document.exitPointerLock) {
+      document.exitPointerLock();
+    }
+    renderVillagerTradeUi();
+    return true;
+  }
+
+  function executeVillagerTrade(index) {
+    if (!tradeOpen || !isVillagerTradeValid()) return false;
+    const offer = activeTradeVillager.offers?.[index];
+    if (!offer) return false;
+    const offerState = getTradeOfferState(offer);
+    if (!offerState.canTrade) {
+      queueToast("Trade unavailable", offerState.status, 3.6, "bad");
+      renderVillagerTradeUi();
+      return false;
+    }
+
+    for (const cost of offer.costs || []) {
+      removeInventoryItem(cost.itemType, cost.count);
+    }
+
+    let granted = false;
+    if (offer.reward?.kind === "item") {
+      const left = addToInventory(offer.reward.itemType, offer.reward.count || 1, false);
+      if (left > 0 && player) {
+        const eye = player.getEyePosition();
+        spawnItemEntity(offer.reward.itemType, left, eye.x, eye.y - 0.2, eye.z, 0, 1.8, 0, 0.1);
+      }
+      granted = true;
+    } else if (offer.reward?.kind === "effect") {
+      granted = applyPlayerEffect(offer.reward.effect, offer.reward.level || 1, offer.reward.duration || 30, true);
+    } else if (offer.reward?.kind === "enchant") {
+      granted = addEnchantmentLevel(offer.reward.slot, offer.reward.enchant, offer.reward.levels || 1, true);
+    }
+
+    if (!granted) {
+      queueToast("Trade failed", "That reward could not be granted.", 3.6, "bad");
+      return false;
+    }
+
+    offer.uses = Math.min(offer.maxUses || 0, (offer.uses || 0) + 1);
+    activeTradeVillager.willingness = clamp((activeTradeVillager.willingness || 0) + 0.22, 0, 1);
+    addPlayerStat("villagerTrades", 1);
+    unlockPlayerAchievement("village_social");
+    queueToast("Trade complete", offer.label || "Villager trade", 3.4, "sys");
+    world.saveDirty = true;
+    setHotbarImages();
+    renderVillagerTradeUi();
+    return true;
+  }
+
+  function countVillageGolemsNearVillage(center, radius = 20) {
+    if (!center) return 0;
+    const radius2 = radius * radius;
+    let count = 0;
+    for (const mob of mobs) {
+      if (!mob || mob.type !== "iron_golem" || mob.health <= 0) continue;
+      const dx = mob.x - center.x;
+      const dz = mob.z - center.z;
+      if (dx * dx + dz * dz <= radius2) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  function spawnVillageVillager(center) {
+    if (!world || !center) return false;
+    const plan = getVillagePlanFromCenter(center, world.seed);
+    if (!plan || !plan.houses?.length) return false;
+    const mob = new Mob("villager");
+    const houseIndex = countVillagersNearVillage(center, 20) % plan.houses.length;
+    const house = plan.houses[houseIndex] || plan.houses[0];
+    const spawnX = house.originX + Math.floor(house.width * 0.5) + 0.5;
+    const spawnZ = house.originZ + Math.floor(house.depth * 0.5) + 0.5;
+    const spawnY = findLoadedWalkableY(world, spawnX, spawnZ, world.terrain.describeColumn(Math.floor(spawnX), Math.floor(spawnZ)).height + 1, 2);
+    if (!Number.isFinite(spawnY)) return false;
+    if (!isValidMobSpawnLocation("villager", spawnX, spawnY, spawnZ, getDayCycleInfo(worldTime), mob)) return false;
+    mob.setPosition(spawnX, spawnY, spawnZ);
+    mob.homeX = center.x;
+    mob.homeZ = center.z;
+    mob.villageSeed = center.seed || world.seed;
+    mob.profession = house.profession;
+    mob.bedTarget = { x: house.bed.x + 0.5, z: house.bed.z + 0.5 };
+    mob.jobTarget = { x: house.jobSite.x + 0.5, z: house.jobSite.z + 0.5, type: house.jobSite.type };
+    mob.offers = getVillagerTradeTable(mob.profession, (center.seed || world.seed) + houseIndex * 17);
+    mob.willingness = 0.1;
+    mobs.push(mob);
+    return true;
+  }
+
+  function spawnVillageGolem(center) {
+    if (!world || !center) return false;
+    const plan = getVillagePlanFromCenter(center, world.seed);
+    if (!plan) return false;
+    const mob = new Mob("iron_golem");
+    const candidates = [plan.gatherPoint, ...(plan.pathNodes || [])];
+    for (const node of candidates) {
+      const x = (node.x || center.x) + 0.5;
+      const z = (node.z || center.z) + 0.5;
+      const y = findLoadedWalkableY(world, x, z, world.terrain.describeColumn(Math.floor(x), Math.floor(z)).height + 1, 3);
+      if (!Number.isFinite(y)) continue;
+      if (!isValidMobSpawnLocation("iron_golem", x, y, z, getDayCycleInfo(worldTime), mob)) continue;
+      mob.setPosition(x, y, z);
+      mob.homeX = center.x;
+      mob.homeZ = center.z;
+      mob.villageSeed = center.seed || world.seed;
+      mob.patrolPoints = plan.pathNodes.map((pathNode) => ({ x: pathNode.x + 0.5, z: pathNode.z + 0.5 }));
+      mobs.push(mob);
+      return true;
+    }
+    return false;
+  }
+
+  function updateVillageLife(dt) {
+    if (!world || !player || mobs.length === 0) return;
+    villageLifeTimer += dt;
+    if (villageLifeTimer < 1) return;
+    villageLifeTimer = 0;
+    const cycle = getDayCycleInfo(worldTime);
+
+    for (const mob of mobs) {
+      if (!mob || mob.health <= 0 || mob.type !== "villager") continue;
+      ensureVillageMobData(mob, world);
+      if (cycle.phase === "Sunrise") {
+        mob.workedToday = false;
+      }
+      mob.willingness = clamp((mob.willingness || 0) + (mob.workedToday ? 0.03 : -0.01), 0, 1);
+    }
+
+    const villageRadius = Math.max(96, getMobCapRadius() * 1.2);
+    const centers = getNearbyVillageCenters(player.x, player.z, world.seed, villageRadius);
+    for (const center of centers) {
+      const plan = getVillagePlanFromCenter(center, world.seed);
+      if (!plan) continue;
+      const villagers = mobs.filter((mob) => mob?.type === "villager" && mob.health > 0 && (mob.x - center.x) ** 2 + (mob.z - center.z) ** 2 <= 20 * 20);
+      const hostileNearby = mobs.some((mob) => mob && mob.health > 0 && getMobDef(mob.type).hostile && (mob.x - center.x) ** 2 + (mob.z - center.z) ** 2 <= 18 * 18);
+      const golems = countVillageGolemsNearVillage(center, 22);
+      if (hostileNearby && golems > 0 && (player.x - center.x) ** 2 + (player.z - center.z) ** 2 <= 24 * 24) {
+        unlockPlayerAchievement("bodyguard");
+      }
+      if (golems < 1 && (hostileNearby || villagers.length >= 4)) {
+        spawnVillageGolem(center);
+      }
+      const freeBeds = Math.max(0, plan.houses.length - villagers.length);
+      const willingVillagers = villagers.filter((mob) => (mob.willingness || 0) >= 0.62);
+      if (!cycle.isNight && cycle.phase !== "Sunset" && freeBeds > 0 && willingVillagers.length >= 2 && Math.random() > 0.72) {
+        if (spawnVillageVillager(center)) {
+          willingVillagers[0].willingness = clamp((willingVillagers[0].willingness || 0) - 0.36, 0, 1);
+          willingVillagers[1].willingness = clamp((willingVillagers[1].willingness || 0) - 0.36, 0, 1);
+          queueToast("Village grew", "A new villager joined the settlement.", 4.5, "sys");
+        }
+      }
+    }
+
+    if (tradeOpen) {
+      renderVillagerTradeUi();
+    }
   }
 
   function updatePreviewCanvasLook(canvas, armorItems = null, skinOverride = null, mouse = null) {
@@ -11312,7 +14613,7 @@ export default function FreeCube2Game(engine) {
       const slot = document.createElement("div");
       slot.className = "freecube2-slot";
       slot.dataset.armorIndex = String(index);
-      renderItemStack(slot, getArmorSlotType(index), getArmorSlotCount(index), true, ARMOR_SLOT_LABELS[index]);
+      renderItemStack(slot, getArmorSlotType(index), getArmorSlotCount(index), true, ARMOR_SLOT_LABELS[index], getArmorSlotDurability(index));
       ui.inventoryArmorEl.appendChild(slot);
     }
     if (!showCreativePalette) {
@@ -11401,14 +14702,13 @@ export default function FreeCube2Game(engine) {
     } else {
       returnCraftItemsToInventory();
       if (inventoryCursor.type !== BLOCK.AIR && inventoryCursor.count > 0 && player) {
-        const left = addToInventory(inventoryCursor.type, inventoryCursor.count, false);
+        const left = addToInventory(inventoryCursor.type, inventoryCursor.count, false, inventoryCursor.durability || 0);
         if (left > 0) {
           const eye = player.getEyePosition();
-          spawnItemEntity(inventoryCursor.type, left, eye.x, eye.y - 0.35, eye.z, 0, 1.6, 0, 0.2);
+          spawnItemEntity(inventoryCursor.type, left, eye.x, eye.y - 0.35, eye.z, 0, 1.6, 0, 0.2, inventoryCursor.durability || 0);
         }
       }
-      inventoryCursor.type = BLOCK.AIR;
-      inventoryCursor.count = 0;
+      clearInventoryCursor();
       inventoryDrag = { pending: false, active: false, button: 0, origin: null, targets: [], targetKeys: new Set() };
       clearInventoryDragVisuals();
       updateInventoryCursorVisual();
@@ -11425,40 +14725,41 @@ export default function FreeCube2Game(engine) {
     }
   }
 
-  function moveCursorWithSlot(slotType, slotCount, setSlot) {
+  function moveCursorWithSlot(slotType, slotCount, slotDurability, setSlot) {
     if (inventoryCursor.type === BLOCK.AIR || inventoryCursor.count <= 0) {
       if (slotType === BLOCK.AIR || slotCount <= 0) return false;
       inventoryCursor.type = slotType;
       inventoryCursor.count = slotCount;
-      setSlot(BLOCK.AIR, 0);
+      inventoryCursor.durability = slotDurability || 0;
+      setSlot(BLOCK.AIR, 0, 0);
       return true;
     }
     if (slotType === BLOCK.AIR || slotCount <= 0) {
-      setSlot(inventoryCursor.type, inventoryCursor.count);
-      inventoryCursor.type = BLOCK.AIR;
-      inventoryCursor.count = 0;
+      setSlot(inventoryCursor.type, inventoryCursor.count, inventoryCursor.durability || 0);
+      clearInventoryCursor();
       return true;
     }
     const maxStack = getItemMaxStack(slotType);
     if (slotType === inventoryCursor.type && slotCount < maxStack) {
       const add = Math.min(maxStack - slotCount, inventoryCursor.count);
-      setSlot(slotType, slotCount + add);
+      setSlot(slotType, slotCount + add, slotDurability || inventoryCursor.durability || 0);
       inventoryCursor.count -= add;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
       return true;
     }
     const swapType = slotType;
     const swapCount = slotCount;
-    setSlot(inventoryCursor.type, inventoryCursor.count);
+    const swapDurability = slotDurability || 0;
+    setSlot(inventoryCursor.type, inventoryCursor.count, inventoryCursor.durability || 0);
     inventoryCursor.type = swapType;
     inventoryCursor.count = swapCount;
+    inventoryCursor.durability = swapDurability;
     return true;
   }
 
-  function moveStackIntoInventoryRange(itemType, count, start, end, reverse = false) {
+  function moveStackIntoInventoryRange(itemType, count, start, end, reverse = false, durability = 0) {
     if (!player || !itemType || itemType === BLOCK.AIR || count <= 0) {
       return count;
     }
@@ -11482,6 +14783,9 @@ export default function FreeCube2Game(engine) {
       const add = Math.min(left, maxStack);
       player.inventoryTypes[index] = itemType;
       player.inventoryCounts[index] = add;
+      player.inventoryDurability[index] = getItemMaxDurability(itemType) > 0
+        ? normalizeDurabilityValue(itemType, durability)
+        : 0;
       left -= add;
     }
 
@@ -11506,12 +14810,12 @@ export default function FreeCube2Game(engine) {
     return count - add;
   }
 
-  function moveStackIntoArmorSlot(itemType, count) {
+  function moveStackIntoArmorSlot(itemType, count, durability = 0) {
     const slotKey = getItemArmorSlot(itemType);
     if (!slotKey || count <= 0) return count;
     const armorIndex = ARMOR_SLOT_KEYS.indexOf(slotKey);
     if (armorIndex < 0 || getArmorSlotCount(armorIndex) > 0) return count;
-    setArmorSlot(armorIndex, itemType, 1);
+    setArmorSlot(armorIndex, itemType, 1, durability || 0);
     return count - 1;
   }
 
@@ -11519,6 +14823,7 @@ export default function FreeCube2Game(engine) {
     if (!player || index < 0 || index >= INVENTORY_SLOTS) return false;
     const type = getInventorySlotType(index);
     const count = getInventorySlotCount(index);
+    const durability = getInventorySlotDurability(index);
     if (!type || type === BLOCK.AIR || count <= 0) return false;
 
     let left = count;
@@ -11532,7 +14837,7 @@ export default function FreeCube2Game(engine) {
     }
 
     if (left > 0) {
-      const armorLeft = moveStackIntoArmorSlot(type, left);
+      const armorLeft = moveStackIntoArmorSlot(type, left, durability);
       if (armorLeft !== left) {
         left = armorLeft;
       }
@@ -11540,22 +14845,23 @@ export default function FreeCube2Game(engine) {
 
     if (left > 0) {
       if (index < HOTBAR_SLOTS) {
-        left = moveStackIntoInventoryRange(type, left, MAIN_INVENTORY_START, INVENTORY_SLOTS);
+        left = moveStackIntoInventoryRange(type, left, MAIN_INVENTORY_START, INVENTORY_SLOTS, false, durability);
       } else {
-        left = moveStackIntoInventoryRange(type, left, 0, HOTBAR_SLOTS, true);
+        left = moveStackIntoInventoryRange(type, left, 0, HOTBAR_SLOTS, true, durability);
       }
     }
 
     if (left === count) return false;
-    setInventorySlot(index, type, left);
+    setInventorySlot(index, type, left, left > 0 ? durability : 0);
     return true;
   }
 
   function quickMoveArmorSlot(index) {
     const type = getArmorSlotType(index);
     const count = getArmorSlotCount(index);
+    const durability = getArmorSlotDurability(index);
     if (!type || type === BLOCK.AIR || count <= 0) return false;
-    const left = addToInventory(type, count, false);
+    const left = addToInventory(type, count, false, durability);
     if (left >= count) return false;
     setArmorSlot(index, BLOCK.AIR, 0);
     return true;
@@ -11587,6 +14893,16 @@ export default function FreeCube2Game(engine) {
       }
       addToInventory(recipe.result.itemType, count, false);
       consumeCraftingIngredients(recipe);
+      addPlayerStat("itemsCrafted", count);
+      if (
+        recipe.result.itemType === ITEM.WOODEN_PICKAXE ||
+        recipe.result.itemType === ITEM.WOODEN_AXE ||
+        recipe.result.itemType === ITEM.WOODEN_SHOVEL ||
+        recipe.result.itemType === ITEM.WOODEN_SWORD ||
+        recipe.result.itemType === ITEM.WOODEN_HOE
+      ) {
+        unlockPlayerAchievement("benchmarking");
+      }
       crafted = true;
     }
     return crafted;
@@ -11632,7 +14948,12 @@ export default function FreeCube2Game(engine) {
       renderInventoryUI();
       return;
     }
-    const changed = moveCursorWithSlot(getInventorySlotType(index), getInventorySlotCount(index), (type, count) => setInventorySlot(index, type, count));
+    const changed = moveCursorWithSlot(
+      getInventorySlotType(index),
+      getInventorySlotCount(index),
+      getInventorySlotDurability(index),
+      (type, count, durability) => setInventorySlot(index, type, count, durability)
+    );
     if (!changed) return;
     world.saveDirty = true;
     setHotbarImages();
@@ -11642,13 +14963,16 @@ export default function FreeCube2Game(engine) {
   function handleCreativeSlotClick(index, options = {}) {
     const itemType = getCreativePaletteItem(index);
     if (!itemType || itemType === BLOCK.AIR || !player) return;
+    const durability = normalizeDurabilityValue(itemType, getItemMaxDurability(itemType));
 
     if (options.shiftKey) {
       player.hotbarTypes[player.selectedHotbarSlot] = itemType;
       player.hotbarCounts[player.selectedHotbarSlot] = 1;
+      player.inventoryDurability[player.selectedHotbarSlot] = durability;
     } else {
       inventoryCursor.type = itemType;
       inventoryCursor.count = options.single ? 1 : getItemMaxStack(itemType);
+      inventoryCursor.durability = durability;
     }
 
     world.saveDirty = true;
@@ -11673,26 +14997,28 @@ export default function FreeCube2Game(engine) {
       if (slotType === BLOCK.AIR || slotCount <= 0) return;
       inventoryCursor.type = slotType;
       inventoryCursor.count = slotCount;
+      inventoryCursor.durability = getArmorSlotDurability(index);
       setArmorSlot(index, BLOCK.AIR, 0);
     } else {
       if (getItemArmorSlot(inventoryCursor.type) !== slotKey) return;
       const swapType = slotType;
       const swapCount = slotCount;
-      setArmorSlot(index, inventoryCursor.type, 1);
+      const swapDurability = getArmorSlotDurability(index);
+      setArmorSlot(index, inventoryCursor.type, 1, inventoryCursor.durability || 0);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
       if (swapType !== BLOCK.AIR && swapCount > 0) {
         if (inventoryCursor.type === BLOCK.AIR) {
           inventoryCursor.type = swapType;
           inventoryCursor.count = swapCount;
+          inventoryCursor.durability = swapDurability;
         } else {
-          const left = addToInventory(swapType, swapCount, false);
+          const left = addToInventory(swapType, swapCount, false, swapDurability);
           if (left > 0 && player) {
             const eye = player.getEyePosition();
-            spawnItemEntity(swapType, left, eye.x, eye.y - 0.35, eye.z, 0, 1.4, 0, 0.2);
+            spawnItemEntity(swapType, left, eye.x, eye.y - 0.35, eye.z, 0, 1.4, 0, 0.2, swapDurability);
           }
         }
       }
@@ -11704,7 +15030,7 @@ export default function FreeCube2Game(engine) {
   }
 
   function handleCraftSlotClick(index) {
-    const changed = moveCursorWithSlot(getCraftSlotType(index), getCraftSlotCount(index), (type, count) => setCraftSlot(index, type, count));
+    const changed = moveCursorWithSlot(getCraftSlotType(index), getCraftSlotCount(index), 0, (type, count) => setCraftSlot(index, type, count));
     if (!changed) return;
     world.saveDirty = true;
     renderInventoryUI();
@@ -11728,6 +15054,17 @@ export default function FreeCube2Game(engine) {
     consumeCraftingIngredients(recipe);
     inventoryCursor.type = resultType;
     inventoryCursor.count = Math.min(maxStack, (inventoryCursor.count || 0) + resultCount);
+    inventoryCursor.durability = normalizeDurabilityValue(resultType, getItemMaxDurability(resultType));
+    addPlayerStat("itemsCrafted", resultCount);
+    if (
+      resultType === ITEM.WOODEN_PICKAXE ||
+      resultType === ITEM.WOODEN_AXE ||
+      resultType === ITEM.WOODEN_SHOVEL ||
+      resultType === ITEM.WOODEN_SWORD ||
+      resultType === ITEM.WOODEN_HOE
+    ) {
+      unlockPlayerAchievement("benchmarking");
+    }
     world.saveDirty = true;
     setHotbarImages();
     renderInventoryUI();
@@ -11751,6 +15088,7 @@ export default function FreeCube2Game(engine) {
       if (add <= 0) return;
       inventoryCursor.type = slotValue.type;
       inventoryCursor.count = (inventoryCursor.count || 0) + add;
+      inventoryCursor.durability = 0;
       setFurnaceSlotValue("output", slotValue.type, slotValue.count - add);
       world.saveDirty = true;
       renderInventoryUI();
@@ -11772,13 +15110,13 @@ export default function FreeCube2Game(engine) {
       if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) return;
       inventoryCursor.type = slotValue.type;
       inventoryCursor.count = slotValue.count;
+      inventoryCursor.durability = 0;
       setFurnaceSlotValue(slot, BLOCK.AIR, 0);
       changed = true;
     } else if (slotValue.type === BLOCK.AIR || slotValue.count <= 0) {
       if (!canAccept) return;
       setFurnaceSlotValue(slot, inventoryCursor.type, inventoryCursor.count);
-      inventoryCursor.type = BLOCK.AIR;
-      inventoryCursor.count = 0;
+      clearInventoryCursor();
       changed = true;
     } else if (slotValue.type === inventoryCursor.type && slotValue.count < getItemMaxStack(slotValue.type)) {
       const add = Math.min(getItemMaxStack(slotValue.type) - slotValue.count, inventoryCursor.count);
@@ -11786,8 +15124,7 @@ export default function FreeCube2Game(engine) {
       setFurnaceSlotValue(slot, slotValue.type, slotValue.count + add);
       inventoryCursor.count -= add;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
       changed = true;
     } else if (canAccept) {
@@ -11813,20 +15150,19 @@ export default function FreeCube2Game(engine) {
       const take = Math.ceil(slotCount / 2);
       inventoryCursor.type = slotType;
       inventoryCursor.count = take;
-      setInventorySlot(index, slotType, slotCount - take);
+      inventoryCursor.durability = getInventorySlotDurability(index);
+      setInventorySlot(index, slotType, slotCount - take, slotCount - take > 0 ? getInventorySlotDurability(index) : 0);
     } else if (slotType === BLOCK.AIR || slotCount <= 0) {
-      setInventorySlot(index, inventoryCursor.type, 1);
+      setInventorySlot(index, inventoryCursor.type, 1, inventoryCursor.durability || 0);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     } else if (slotType === inventoryCursor.type && slotCount < getItemMaxStack(slotType)) {
-      setInventorySlot(index, slotType, slotCount + 1);
+      setInventorySlot(index, slotType, slotCount + 1, getInventorySlotDurability(index) || inventoryCursor.durability || 0);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     } else {
       return;
@@ -11846,20 +15182,19 @@ export default function FreeCube2Game(engine) {
       const take = Math.ceil(slotCount / 2);
       inventoryCursor.type = slotType;
       inventoryCursor.count = take;
+      inventoryCursor.durability = 0;
       setCraftSlot(index, slotType, slotCount - take);
     } else if (slotType === BLOCK.AIR || slotCount <= 0) {
       setCraftSlot(index, inventoryCursor.type, 1);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     } else if (slotType === inventoryCursor.type && slotCount < getItemMaxStack(slotType)) {
       setCraftSlot(index, slotType, slotCount + 1);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     } else {
       return;
@@ -11878,6 +15213,7 @@ export default function FreeCube2Game(engine) {
       if (inventoryCursor.type === slotValue.type && inventoryCursor.count >= maxStack) return;
       inventoryCursor.type = slotValue.type;
       inventoryCursor.count = Math.min(maxStack, (inventoryCursor.count || 0) + 1);
+      inventoryCursor.durability = 0;
       setFurnaceSlotValue("output", slotValue.type, slotValue.count - 1);
       world.saveDirty = true;
       renderInventoryUI();
@@ -11889,6 +15225,7 @@ export default function FreeCube2Game(engine) {
       const take = Math.ceil(slotValue.count / 2);
       inventoryCursor.type = slotValue.type;
       inventoryCursor.count = take;
+      inventoryCursor.durability = 0;
       setFurnaceSlotValue(slot, slotValue.type, slotValue.count - take);
     } else {
       const canAccept = slot === "input" ? isSmeltableItem(inventoryCursor.type) : isFuelItem(inventoryCursor.type);
@@ -11903,8 +15240,7 @@ export default function FreeCube2Game(engine) {
         return;
       }
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     }
 
@@ -11922,14 +15258,14 @@ export default function FreeCube2Game(engine) {
       if (slotType === BLOCK.AIR || slotCount <= 0) return;
       inventoryCursor.type = slotType;
       inventoryCursor.count = 1;
+      inventoryCursor.durability = getArmorSlotDurability(index);
       setArmorSlot(index, BLOCK.AIR, 0);
     } else {
       if (slotType !== BLOCK.AIR || getItemArmorSlot(inventoryCursor.type) !== slotKey) return;
-      setArmorSlot(index, inventoryCursor.type, 1);
+      setArmorSlot(index, inventoryCursor.type, 1, inventoryCursor.durability || 0);
       inventoryCursor.count -= 1;
       if (inventoryCursor.count <= 0) {
-        inventoryCursor.type = BLOCK.AIR;
-        inventoryCursor.count = 0;
+        clearInventoryCursor();
       }
     }
 
@@ -11973,19 +15309,19 @@ export default function FreeCube2Game(engine) {
   }
 
   function getSlotDescriptorValue(desc) {
-    if (!desc) return { type: BLOCK.AIR, count: 0 };
-    if (desc.kind === "inventory") return { type: getInventorySlotType(desc.index), count: getInventorySlotCount(desc.index) };
-    if (desc.kind === "craft") return { type: getCraftSlotType(desc.index), count: getCraftSlotCount(desc.index) };
-    if (desc.kind === "armor") return { type: getArmorSlotType(desc.index), count: getArmorSlotCount(desc.index) };
-    if (desc.kind === "furnace") return getFurnaceSlotValue(desc.slot);
-    return { type: BLOCK.AIR, count: 0 };
+    if (!desc) return { type: BLOCK.AIR, count: 0, durability: 0 };
+    if (desc.kind === "inventory") return { type: getInventorySlotType(desc.index), count: getInventorySlotCount(desc.index), durability: getInventorySlotDurability(desc.index) };
+    if (desc.kind === "craft") return { type: getCraftSlotType(desc.index), count: getCraftSlotCount(desc.index), durability: 0 };
+    if (desc.kind === "armor") return { type: getArmorSlotType(desc.index), count: getArmorSlotCount(desc.index), durability: getArmorSlotDurability(desc.index) };
+    if (desc.kind === "furnace") return { ...getFurnaceSlotValue(desc.slot), durability: 0 };
+    return { type: BLOCK.AIR, count: 0, durability: 0 };
   }
 
-  function setSlotDescriptorValue(desc, type, count) {
+  function setSlotDescriptorValue(desc, type, count, durability = 0) {
     if (!desc) return;
-    if (desc.kind === "inventory") setInventorySlot(desc.index, type, count);
+    if (desc.kind === "inventory") setInventorySlot(desc.index, type, count, durability);
     else if (desc.kind === "craft") setCraftSlot(desc.index, type, count);
-    else if (desc.kind === "armor") setArmorSlot(desc.index, type, count);
+    else if (desc.kind === "armor") setArmorSlot(desc.index, type, count, durability);
     else if (desc.kind === "furnace") setFurnaceSlotValue(desc.slot, type, count);
   }
 
@@ -12022,7 +15358,7 @@ export default function FreeCube2Game(engine) {
       for (const entry of eligible) {
         if (inventoryCursor.count <= 0) break;
         const nextCount = entry.current + 1;
-        setSlotDescriptorValue(entry.desc, inventoryCursor.type, nextCount);
+        setSlotDescriptorValue(entry.desc, inventoryCursor.type, nextCount, inventoryCursor.durability || 0);
         inventoryCursor.count -= 1;
         changed = true;
       }
@@ -12034,7 +15370,7 @@ export default function FreeCube2Game(engine) {
         const ideal = Math.max(1, Math.ceil(remaining / remainingSlots));
         const add = Math.min(entry.capacity, ideal);
         if (add > 0) {
-          setSlotDescriptorValue(entry.desc, inventoryCursor.type, entry.current + add);
+          setSlotDescriptorValue(entry.desc, inventoryCursor.type, entry.current + add, inventoryCursor.durability || 0);
           inventoryCursor.count -= add;
           remaining -= add;
           changed = true;
@@ -12044,8 +15380,7 @@ export default function FreeCube2Game(engine) {
     }
 
     if (inventoryCursor.count <= 0) {
-      inventoryCursor.type = BLOCK.AIR;
-      inventoryCursor.count = 0;
+      clearInventoryCursor();
     }
     return changed;
   }
@@ -12060,7 +15395,8 @@ export default function FreeCube2Game(engine) {
     const take = desc.kind === "armor" ? 1 : (split ? Math.ceil(value.count / 2) : value.count);
     inventoryCursor.type = value.type;
     inventoryCursor.count = take;
-    setSlotDescriptorValue(desc, value.type, value.count - take);
+    inventoryCursor.durability = value.durability || 0;
+    setSlotDescriptorValue(desc, value.type, value.count - take, value.count - take > 0 ? (value.durability || 0) : 0);
     return true;
   }
 
@@ -12125,7 +15461,7 @@ export default function FreeCube2Game(engine) {
     return isCreativeMode() ? 999 : (player.hotbarCounts[player.selectedHotbarSlot] || 0);
   }
 
-  function addToInventory(itemType, count, refreshUi = true) {
+  function addToInventory(itemType, count, refreshUi = true, durability = 0) {
     if (!itemType || itemType === BLOCK.AIR) return count;
     if (isFluidBlock(itemType) || itemType === BLOCK.BEDROCK) return count;
     let left = Math.max(0, Math.floor(count));
@@ -12152,11 +15488,17 @@ export default function FreeCube2Game(engine) {
       const add = Math.min(left, maxStack);
       player.inventoryTypes[i] = itemType;
       player.inventoryCounts[i] = add;
+      player.inventoryDurability[i] = getItemMaxDurability(itemType) > 0
+        ? normalizeDurabilityValue(itemType, durability)
+        : 0;
       left -= add;
       changed = true;
     }
 
     if (changed) {
+      if (itemType === ITEM.DIAMOND || itemType === ITEM.EMERALD) {
+        unlockPlayerAchievement("shiny_stones");
+      }
       if (refreshUi) {
         setHotbarImages();
       }
@@ -12177,17 +15519,19 @@ export default function FreeCube2Game(engine) {
     if (next <= 0) {
       player.hotbarTypes[idx] = BLOCK.AIR;
       player.hotbarCounts[idx] = 0;
+      player.inventoryDurability[idx] = 0;
     }
     setHotbarImages();
     world.saveDirty = true;
     return true;
   }
 
-  function spawnItemEntity(itemType, count, x, y, z, vx = 0, vy = 3.8, vz = 0, pickupDelay = 0.55) {
+  function spawnItemEntity(itemType, count, x, y, z, vx = 0, vy = 3.8, vz = 0, pickupDelay = 0.55, durability = 0) {
     items.push({
       kind: "item",
       itemType,
       count: clamp(Math.floor(count) || 1, 1, getItemMaxStack(itemType)),
+      durability: getItemMaxDurability(itemType) > 0 ? normalizeDurabilityValue(itemType, durability) : 0,
       x,
       y,
       z,
@@ -12203,6 +15547,7 @@ export default function FreeCube2Game(engine) {
     if (isCreativeMode()) return;
     const type = getSelectedHeldItemType();
     const count = getSelectedHeldCount();
+    const durability = getInventorySlotDurability(player.selectedHotbarSlot);
     if (!type || count <= 0) return;
     if (!consumeFromSelectedSlot(1)) return;
     const eye = player.getEyePosition();
@@ -12210,7 +15555,7 @@ export default function FreeCube2Game(engine) {
     const x = eye.x + dir.x * 0.8;
     const y = eye.y + dir.y * 0.2;
     const z = eye.z + dir.z * 0.8;
-    spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4, 0.55);
+    spawnItemEntity(type, 1, x, y, z, dir.x * 2.4, 2.6, dir.z * 2.4, 0.55, durability);
   }
 
   function getMobTargetAABB(mob) {
@@ -12226,18 +15571,50 @@ export default function FreeCube2Game(engine) {
 
   function getHeldAttackDamage(itemType = getSelectedHeldItemType()) {
     if (isCreativeMode()) return 999;
+    let damage = 1;
     switch (itemType) {
       case ITEM.WOODEN_SWORD:
-        return 4;
+        damage = 4;
+        break;
       case ITEM.WOODEN_AXE:
-        return 3;
+        damage = 3;
+        break;
       case ITEM.WOODEN_PICKAXE:
-        return 2;
+        damage = 2;
+        break;
       case ITEM.WOODEN_SHOVEL:
-        return 1.5;
+        damage = 1.5;
+        break;
+      case ITEM.IRON_SWORD:
+        damage = 6;
+        break;
+      case ITEM.IRON_AXE:
+        damage = 5;
+        break;
+      case ITEM.IRON_PICKAXE:
+        damage = 3.5;
+        break;
+      case ITEM.IRON_SHOVEL:
+        damage = 2.5;
+        break;
+      case ITEM.DIAMOND_SWORD:
+        damage = 7;
+        break;
+      case ITEM.DIAMOND_AXE:
+        damage = 6;
+        break;
+      case ITEM.DIAMOND_PICKAXE:
+        damage = 4.5;
+        break;
+      case ITEM.DIAMOND_SHOVEL:
+        damage = 3;
+        break;
       default:
-        return 1;
+        damage = 1;
     }
+    damage += getHeldEnchantmentLevel("sharpness") * 1.25;
+    damage += player?.getEffectLevel?.("strength") * 3 || 0;
+    return damage;
   }
 
   function addXp(amount) {
@@ -12284,11 +15661,20 @@ export default function FreeCube2Game(engine) {
   function attackTargetMob() {
     if (!currentEntityTarget?.mob || !player) return false;
     const mob = currentEntityTarget.mob;
-    const killed = mob.takeDamage(getHeldAttackDamage(), player.x, player.z);
+    const damage = getHeldAttackDamage();
+    const killed = mob.takeDamage(damage, player.x, player.z);
+    addPlayerStat("damageDealt", damage);
+    if (!isCreativeMode()) {
+      damageSelectedHeldItem(1);
+    }
     player.breakCooldown = Math.max(player.breakCooldown, isCreativeMode() ? 0.08 : 0.24);
     if (killed) {
       dropMobLoot(mob);
       addXp(getMobDef(mob.type).hostile ? 0.35 : 0.18);
+      addPlayerStat("mobsKilled", 1);
+      if (getMobDef(mob.type).hostile) {
+        unlockPlayerAchievement("monster_hunter");
+      }
       removeMob(mob);
     }
     if (world) {
@@ -12354,7 +15740,7 @@ export default function FreeCube2Game(engine) {
       const dz = item.z - player.z;
       const dist = Math.hypot(dx, dy, dz);
       if (dist < 1.25 && item.age > (item.pickupDelay ?? 0.55)) {
-        const left = addToInventory(item.itemType ?? item.blockType, item.count);
+        const left = addToInventory(item.itemType ?? item.blockType, item.count, true, item.durability || 0);
         if (left <= 0) {
           continue;
         }
@@ -12534,6 +15920,8 @@ export default function FreeCube2Game(engine) {
           } else {
             state.outputCount += 1;
           }
+          addPlayerStat("itemsSmelted", 1);
+          unlockPlayerAchievement("hot_stuff");
           changed = true;
         }
       } else if ((state.cookTime || 0) > 0) {
@@ -12877,7 +16265,7 @@ export default function FreeCube2Game(engine) {
   }
 
   function biomeGetsRain(biome = getPlayerCurrentBiome()) {
-    return biome !== "desert" && biome !== "mountains" && biome !== "cliff";
+    return biome !== "desert";
   }
 
   function canSleepNow() {
@@ -12890,6 +16278,9 @@ export default function FreeCube2Game(engine) {
     weather.timer = Math.max(1, Number(durationSeconds) || getRandomWeatherDurationSeconds(normalizedType));
     weather.flash = 0;
     weather.lightningTimer = normalizedType === WEATHER_TYPES.THUNDER ? 2 + Math.random() * 6 : 0;
+    if (normalizedType === WEATHER_TYPES.CLEAR) {
+      weatherVisualIntensity = Math.min(weatherVisualIntensity, 0.28);
+    }
     if (world) {
       world.saveDirty = true;
     }
@@ -12912,6 +16303,8 @@ export default function FreeCube2Game(engine) {
   }
 
   function updateWeather(dt) {
+    const targetIntensity = getWeatherBaseIntensity(weather.type);
+    weatherVisualIntensity = lerp(weatherVisualIntensity, targetIntensity, clamp(dt * 2, 0, 1));
     weather.flash = Math.max(0, (weather.flash || 0) - dt * 3.2);
     if (weather.type === WEATHER_TYPES.THUNDER) {
       weather.lightningTimer -= dt;
@@ -12923,7 +16316,7 @@ export default function FreeCube2Game(engine) {
       weather.lightningTimer = 0;
     }
 
-    if (gamerules.doWeatherCycle !== false) {
+    if (!isMultiplayerGuest() && gamerules.doWeatherCycle !== false) {
       weather.timer -= dt;
       if (weather.timer <= 0) {
         advanceWeatherState();
@@ -12939,19 +16332,8 @@ export default function FreeCube2Game(engine) {
       ui.lightningFlashEl.style.opacity = "0";
       return;
     }
-    const rainingHere = weather.type !== WEATHER_TYPES.CLEAR && biomeGetsRain();
-    ui.weatherOverlayEl.className = "";
-    ui.weatherOverlayEl.id = "freecube2-weather-overlay";
-    if (rainingHere) {
-      ui.weatherOverlayEl.classList.add(weather.type === WEATHER_TYPES.THUNDER ? "thunder" : "rain");
-      ui.weatherOverlayEl.style.opacity = weather.type === WEATHER_TYPES.THUNDER ? "0.6" : "0.4";
-    } else {
-      ui.weatherOverlayEl.style.opacity = "0";
-      ui.weatherOverlayEl.style.display = "none";
-    }
-    if (rainingHere) {
-      ui.weatherOverlayEl.style.display = "block";
-    }
+    ui.weatherOverlayEl.style.opacity = "0";
+    ui.weatherOverlayEl.style.display = "none";
     ui.lightningFlashEl.style.display = weather.flash > 0.01 ? "block" : "none";
     ui.lightningFlashEl.style.opacity = weather.flash > 0.01 ? String(clamp(weather.flash * 0.55, 0, 0.55)) : "0";
   }
@@ -13120,7 +16502,7 @@ export default function FreeCube2Game(engine) {
     const groundBlock = world.peekBlock(Math.floor(x), groundY, Math.floor(z));
     const light = getApproxLightLevel(x, y, z, cycle);
     const hostile = !!getMobDef(type).hostile;
-    const requireGrass = !hostile && type !== "villager";
+    const requireGrass = !hostile && type !== "villager" && type !== "iron_golem";
     if (!isValidSpawnGround(groundBlock, requireGrass)) {
       return false;
     }
@@ -13181,7 +16563,7 @@ export default function FreeCube2Game(engine) {
       .filter((entry) => getMobDef(entry.mob.type).hostile && !hostileWindow)
       .sort((a, b) => b.dist2 - a.dist2);
     const loosePassives = inRange
-      .filter((entry) => entry.mob.type !== "villager" && !getMobDef(entry.mob.type).hostile)
+      .filter((entry) => entry.mob.type !== "villager" && entry.mob.type !== "iron_golem" && !getMobDef(entry.mob.type).hostile)
       .sort((a, b) => b.dist2 - a.dist2);
     const hostilesAnyTime = inRange
       .filter((entry) => getMobDef(entry.mob.type).hostile && (cycle.isNight || !hostilesInDay.includes(entry)))
@@ -13243,6 +16625,7 @@ export default function FreeCube2Game(engine) {
         mob.homeX = center.x;
         mob.homeZ = center.z;
         mobs.push(mob);
+        ensureVillageMobData(mob, world);
         return true;
       }
       return false;
@@ -13376,6 +16759,9 @@ export default function FreeCube2Game(engine) {
     for (const mob of mobs) {
       renderEntities.push(mob);
     }
+    for (const remotePlayer of multiplayerSession.remotePlayers.values()) {
+      renderEntities.push(remotePlayer);
+    }
     for (const item of items) {
       renderEntities.push(item);
     }
@@ -13498,14 +16884,14 @@ export default function FreeCube2Game(engine) {
     setAutoRepairUi(true, "Resetting controls and UI...");
     resetRuntimeInteractionState();
     closeChat(false);
+    closeTrade(false);
     if (inventoryOpen) {
       ui.inventoryEl.style.display = "none";
       inventoryOpen = false;
     }
     inventoryContext = "inventory";
     activeFurnaceKey = null;
-    inventoryCursor.type = BLOCK.AIR;
-    inventoryCursor.count = 0;
+    clearInventoryCursor();
     resetInventoryDragState();
     updateInventoryCursorVisual();
     renderEntities.length = 0;
@@ -13772,7 +17158,7 @@ export default function FreeCube2Game(engine) {
     const args = parts;
 
     if (!cmd || cmd === "help") {
-      pushChatLine("Commands: /help, /give, /gm, /tp, /time, /weather, /gamerule, /setblock, /fill, /kill, /spawnpoint, /setworldspawn, /locate, /summon, /rd, /sysinfo, /clear", "sys");
+      pushChatLine("Commands: /help, /give, /gm, /tp, /time, /weather, /gamerule, /setblock, /fill, /kill, /spawnpoint, /setworldspawn, /locate, /summon, /effect, /enchant, /rd, /sysinfo, /clear", "sys");
       pushChatLine("Examples: /time set night, /weather thunder 6000, /setblock ~ ~-1 ~ bed, /fill ~-2 ~ ~-2 ~2 ~ ~2 glass", "sys");
       return;
     }
@@ -13780,6 +17166,11 @@ export default function FreeCube2Game(engine) {
     if (cmd === "clear") {
       chatLines = [];
       chatNeedsRender = true;
+      return;
+    }
+
+    if (isMultiplayerGuest() && !["help", "clear", "rd", "renderdistance", "sysinfo"].includes(cmd)) {
+      pushChatLine("Only the host can run world-changing commands in multiplayer.", "err");
       return;
     }
 
@@ -13818,6 +17209,44 @@ export default function FreeCube2Game(engine) {
       } else {
         pushChatLine("Inventory full.", "err");
       }
+      return;
+    }
+
+    if (cmd === "effect") {
+      const effectKey = sanitizeEffectKey(args[0]);
+      const level = clamp(Math.floor(Number(args[1]) || 1), 1, 10);
+      const durationSeconds = Math.max(1, Number(args[2]) || 30);
+      if (!effectKey || !EFFECT_DEFS[effectKey]) {
+        pushChatLine("Usage: /effect <speed|strength|regeneration|jump_boost|resistance|poison> [level] [seconds]", "err");
+        return;
+      }
+      applyPlayerEffect(effectKey, level, durationSeconds, true);
+      world.saveDirty = true;
+      return;
+    }
+
+    if (cmd === "enchant") {
+      const slotArg = String(args[0] || "held").trim().toLowerCase();
+      const slotKey = slotArg === "armor" ? "armor" : "held";
+      const enchantKey = String(args[1] || "").trim().toLowerCase();
+      const levels = clamp(Math.floor(Number(args[2]) || 1), 1, 5);
+      if (!ENCHANTMENT_DEFS[enchantKey]) {
+        pushChatLine("Usage: /enchant <held|armor> <sharpness|efficiency|unbreaking|protection> [levels]", "err");
+        return;
+      }
+      if (slotKey === "held" && (!getSelectedHeldItemType() || getSelectedHeldCount() <= 0)) {
+        pushChatLine("Hold an item first.", "err");
+        return;
+      }
+      if (slotKey === "armor" && !player.armorCounts.some((count) => count > 0)) {
+        pushChatLine("Equip armor first.", "err");
+        return;
+      }
+      if (!addEnchantmentLevel(slotKey, enchantKey, levels, true)) {
+        pushChatLine("That enchantment could not be applied.", "err");
+        return;
+      }
+      world.saveDirty = true;
       return;
     }
 
@@ -14079,11 +17508,15 @@ export default function FreeCube2Game(engine) {
     if (player.hurtCooldown > 0) return;
     const base = Math.max(0, Number(amount) || 0);
     const armorPoints = player.getArmorPoints();
-    const reduction = clamp(armorPoints * 0.04, 0, 0.8);
+    const protectionReduction = getArmorEnchantmentLevel("protection") * 0.04;
+    const resistanceReduction = player.getEffectLevel("resistance") * 0.08;
+    const reduction = clamp(armorPoints * 0.04 + protectionReduction + resistanceReduction, 0, 0.85);
     const dmg = Math.max(0, Math.ceil(base * (1 - reduction)));
     if (dmg <= 0) return;
     player.health = Math.max(0, player.health - dmg);
     player.hurtCooldown = 0.45;
+    damageArmorFromHit(dmg);
+    addPlayerStat("damageTaken", dmg);
     world.saveDirty = true;
     if (reason) {
       pushChatLine(`Ouch (${reason})`, "sys");
@@ -14093,8 +17526,7 @@ export default function FreeCube2Game(engine) {
   function clearPlayerInventory() {
     if (!player) return;
     player.initializeInventory();
-    inventoryCursor.type = BLOCK.AIR;
-    inventoryCursor.count = 0;
+    clearInventoryCursor();
     inventoryCraftTypes.fill(0);
     inventoryCraftCounts.fill(0);
     tableCraftTypes.fill(0);
@@ -14129,6 +17561,52 @@ export default function FreeCube2Game(engine) {
   function updatePlayerVitals(dt) {
     if (!player) return;
     player.hurtCooldown = Math.max(0, player.hurtCooldown - dt);
+    let effectsChanged = false;
+    const effectTimers = player.effectTickTimers || (player.effectTickTimers = {});
+
+    for (const [key, effect] of Object.entries(player.effects || {})) {
+      if (!effect || effect.time <= 0 || effect.level <= 0) {
+        delete player.effects[key];
+        delete effectTimers[key];
+        effectsChanged = true;
+        continue;
+      }
+      effect.time = Math.max(0, effect.time - dt);
+      effect.maxTime = Math.max(effect.maxTime || 0, effect.time);
+      effectsChanged = true;
+      if (effect.time <= 0) {
+        delete player.effects[key];
+        delete effectTimers[key];
+        continue;
+      }
+      if (settings.gameMode === GAME_MODE.CREATIVE) {
+        continue;
+      }
+      if (key === "regeneration" || key === "poison") {
+        effectTimers[key] = (effectTimers[key] || 0) + dt;
+        const interval = key === "regeneration"
+          ? Math.max(0.6, 2.2 - effect.level * 0.3)
+          : Math.max(0.7, 1.9 - effect.level * 0.22);
+        while (effectTimers[key] >= interval) {
+          effectTimers[key] -= interval;
+          if (key === "regeneration" && player.health < player.maxHealth) {
+            player.health = Math.min(player.maxHealth, player.health + Math.max(1, Math.floor(effect.level)));
+          } else if (key === "poison" && player.health > 1) {
+            player.health = Math.max(1, player.health - 1);
+            player.hurtCooldown = Math.max(player.hurtCooldown, 0.12);
+          }
+        }
+      }
+    }
+
+    for (const key of Object.keys(effectTimers)) {
+      if (!player.effects[key]) {
+        delete effectTimers[key];
+      }
+    }
+    if (effectsChanged && world) {
+      world.saveDirty = true;
+    }
 
     // Only simulate vitals while the game is actively running.
     if (mode !== "playing") {
@@ -14248,10 +17726,16 @@ export default function FreeCube2Game(engine) {
     const cycle = getDayCycleInfo(worldTime);
     const effectiveDaylight = getEffectiveDaylight(cycle, weather.type);
     const effectiveDarkness = 1 - effectiveDaylight;
-    const weatherLabel = getWeatherLabel(weather.type);
+    const currentColumn = world ? world.terrain.describeColumn(Math.floor(player?.x || 0), Math.floor(player?.z || 0)) : null;
+    const snowyWeather = weather.type !== WEATHER_TYPES.CLEAR && getColumnPrecipitationType(currentColumn) === "snow";
+    const weatherLabel = snowyWeather
+      ? (weather.type === WEATHER_TYPES.THUNDER ? "Snowstorm" : "Snow")
+      : getWeatherLabel(weather.type);
     ui.timeChipEl.style.display = mode === "playing" && !sleepState.active ? "block" : "none";
     ui.timeChipEl.textContent = `${cycle.phase} - ${weatherLabel}${isHostileSpawnWindow(cycle) ? " - Hostiles Active" : ""}`;
-    ui.timeChipEl.style.background = weather.type === WEATHER_TYPES.THUNDER
+    ui.timeChipEl.style.background = snowyWeather
+      ? "rgba(76, 98, 126, 0.78)"
+      : weather.type === WEATHER_TYPES.THUNDER
       ? "rgba(18,20,34,0.82)"
       : weather.type === WEATHER_TYPES.RAIN
         ? "rgba(24,42,62,0.76)"
@@ -14260,7 +17744,9 @@ export default function FreeCube2Game(engine) {
           : cycle.phase === "Sunset"
             ? "rgba(66,38,18,0.68)"
             : "rgba(0,0,0,0.32)";
-    ui.timeTintEl.style.background = weather.type === WEATHER_TYPES.THUNDER
+    ui.timeTintEl.style.background = snowyWeather
+      ? "rgba(82, 106, 132, 1)"
+      : weather.type === WEATHER_TYPES.THUNDER
       ? "rgba(16,20,36,1)"
       : weather.type === WEATHER_TYPES.RAIN
         ? "rgba(24,44,76,1)"
@@ -14514,6 +18000,7 @@ export default function FreeCube2Game(engine) {
 
   function renderResourcePackEntry(packName, selected = false) {
     const meta = getResourcePackMeta(packName, settings);
+    const customPack = getCustomResourcePack(settings, packName);
     const entry = document.createElement("div");
     entry.className = `fc-pack-entry${selected ? " selected" : ""}`;
     entry.dataset.packId = packName;
@@ -14524,7 +18011,9 @@ export default function FreeCube2Game(engine) {
     const icon = document.createElement("img");
     icon.className = "fc-pack-icon";
     icon.alt = meta.name;
-    icon.src = getBlockTexturePath(meta.iconBlock || BLOCK.GRASS, "top", { ...settings, texturePack: packName }) || getBlockTexturePath(BLOCK.GRASS, "top", DEFAULT_SETTINGS);
+    icon.src = customPack?.iconDataUrl
+      || getBlockTexturePath(meta.iconBlock || BLOCK.GRASS, "top", { ...settings, texturePack: packName })
+      || getBlockTexturePath(BLOCK.GRASS, "top", DEFAULT_SETTINGS);
     entry.appendChild(icon);
 
     const copy = document.createElement("div");
@@ -14557,9 +18046,7 @@ export default function FreeCube2Game(engine) {
   }
 
   function markWorldDirty() {
-    if (world) {
-      world.saveDirty = true;
-    }
+    saveGlobalSettings();
   }
 
   function applyLightingSetting() {
@@ -14612,6 +18099,7 @@ export default function FreeCube2Game(engine) {
     if (ui?.resourcePackAvailableEl && ui?.resourcePackSelectedEl) {
       renderResourcePackUI();
     }
+    saveGlobalSettings();
   }
 
   function saveWorld(force = false) {
@@ -14625,7 +18113,6 @@ export default function FreeCube2Game(engine) {
       fluidStates: serializeFluidStates(world.fluidStates),
       furnaces: serializeFurnaceStates(furnaceStates),
       player: player.serialize(),
-      settings,
       worldState: serializeCurrentWorldState()
     };
     store.saveWorld(activeWorldId, payload);
@@ -14815,9 +18302,15 @@ export default function FreeCube2Game(engine) {
     }
     const packSection = rawMeta.pack && typeof rawMeta.pack === "object" ? rawMeta.pack : null;
     const descriptionValue = packSection?.description ?? rawMeta.description;
+    let description = "Imported custom pack.";
+    if (typeof descriptionValue === "string") {
+      description = descriptionValue.trim() || description;
+    } else if (descriptionValue && typeof descriptionValue === "object") {
+      description = String(descriptionValue.text || descriptionValue.translate || description).trim() || description;
+    }
     return {
       name: String(rawMeta.name || fallbackName).trim() || fallbackName,
-      description: String(descriptionValue || "Imported custom pack.").trim()
+      description
     };
   }
 
@@ -14828,6 +18321,7 @@ export default function FreeCube2Game(engine) {
     }
 
     let packMeta = null;
+    let packIconDataUrl = "";
     const assets = {};
     let rootFolderName = "";
 
@@ -14854,6 +18348,17 @@ export default function FreeCube2Game(engine) {
         continue;
       }
 
+      if (lowerNormalizedPath.endsWith("/pack.png") || lowerNormalizedPath === "./pack.png") {
+        if (typeof entry.dataUrl === "string" && entry.dataUrl) {
+          packIconDataUrl = entry.dataUrl;
+        } else if (entry.file) {
+          packIconDataUrl = await readFileAsDataUrl(entry.file);
+        } else if (entry.bytes instanceof Uint8Array) {
+          packIconDataUrl = await blobToDataUrl(new Blob([entry.bytes], { type: getMimeTypeForPath(relativePath) }));
+        }
+        continue;
+      }
+
       if (typeof entry.dataUrl === "string" && entry.dataUrl) {
         assets[normalizedPath] = entry.dataUrl;
       } else if (entry.file) {
@@ -14866,12 +18371,19 @@ export default function FreeCube2Game(engine) {
     const defaultName = defaultNameHint || rootFolderName || `Custom Pack ${getCustomResourcePacks(settings).length + 1}`;
     const meta = parseResourcePackMetadata(packMeta, defaultName);
     const packIdBase = meta.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || generateId();
-    const packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}`;
+    let packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}`;
+    let duplicateIndex = 2;
+    const existingIds = new Set(getCustomResourcePacks(settings).map((existing) => existing.id));
+    while (existingIds.has(packId)) {
+      packId = `${CUSTOM_RESOURCE_PACK_PREFIX}${packIdBase}-${duplicateIndex}`;
+      duplicateIndex += 1;
+    }
     const pack = {
       id: packId,
       name: meta.name,
       description: meta.description,
       iconBlock: Number.isFinite(packMeta?.iconBlock) ? Number(packMeta.iconBlock) : inferIconBlockFromAssets(assets),
+      iconDataUrl: packIconDataUrl,
       assets
     };
 
@@ -14966,33 +18478,10 @@ export default function FreeCube2Game(engine) {
     });
     worldTime = savedWorldState.time;
     weather = savedWorldState.weather;
+    weatherVisualIntensity = getWeatherBaseIntensity(weather.type);
     gamerules = savedWorldState.gamerules;
     worldSpawnPoint = savedWorldState.worldSpawnPoint || { x: defaultSpawn.x, y: defaultSpawn.y, z: defaultSpawn.z, source: "world" };
-    settings = { ...DEFAULT_SETTINGS, ...settings, ...(save?.settings || {}) };
-    settings.renderDistanceChunks = clamp(settings.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 6);
-    settings.mouseSensitivity = clamp(settings.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity, 0.0012, 0.006);
-    settings.fovDegrees = clamp(Math.round(settings.fovDegrees || DEFAULT_SETTINGS.fovDegrees), 55, 95);
-    settings.showFps = settings.showFps !== false;
-    settings.viewBobbing = settings.viewBobbing !== false;
-    settings.graphicsMode = settings.graphicsMode === "fancy" ? "fancy" : DEFAULT_SETTINGS.graphicsMode;
-    settings.chunkLagFix = settings.chunkLagFix !== false;
-    settings.fullscreen = !!settings.fullscreen;
-    settings.masterVolume = clamp(Number.isFinite(settings.masterVolume) ? settings.masterVolume : DEFAULT_SETTINGS.masterVolume, 0, 1);
-    settings.musicVolume = clamp(Number.isFinite(settings.musicVolume) ? settings.musicVolume : DEFAULT_SETTINGS.musicVolume, 0, 1);
-    settings.performancePreset = PERFORMANCE_PRESETS.includes(settings.performancePreset) ? settings.performancePreset : DEFAULT_SETTINGS.performancePreset;
-    settings.customResourcePacks = getCustomResourcePacks(settings);
-    settings.texturePack = getAvailableResourcePackNames(settings).includes(settings.texturePack) ? settings.texturePack : DEFAULT_SETTINGS.texturePack;
-    settings.playerSkinPreset = isValidPlayerSkinPreset(settings.playerSkinPreset) ? settings.playerSkinPreset : DEFAULT_SETTINGS.playerSkinPreset;
-    if (settings.playerSkinPreset === "freecube" || settings.playerSkinPreset === "hoodie") {
-      settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
-    }
-    settings.playerSkinDataUrl = typeof settings.playerSkinDataUrl === "string" ? settings.playerSkinDataUrl : "";
-    if (settings.playerSkinPreset === "custom" && !settings.playerSkinDataUrl) {
-      settings.playerSkinPreset = DEFAULT_SETTINGS.playerSkinPreset;
-    }
-    settings.mobModels = settings.mobModels !== false;
-    settings.invertY = !!settings.invertY;
-    settings.gameMode = settings.gameMode === GAME_MODE.CREATIVE ? GAME_MODE.CREATIVE : GAME_MODE.SURVIVAL;
+    settings = normalizeSettingsState(settings);
     if (settings.playerSkinPreset === "custom") {
       getCustomPlayerSkinCanvas(settings.playerSkinDataUrl);
     }
@@ -15068,6 +18557,9 @@ export default function FreeCube2Game(engine) {
   }
 
   function startWorld(worldId) {
+    if (isMultiplayerSessionActive()) {
+      teardownMultiplayerSession({ preserveBrowser: true });
+    }
     activeWorldId = worldId;
     store.selectWorld(worldId);
     store.markPlayed(worldId);
@@ -15085,9 +18577,9 @@ export default function FreeCube2Game(engine) {
     currentTarget = null;
     currentEntityTarget = null;
     inventoryOpen = false;
+    closeTrade(false);
     inventoryContext = "inventory";
-    inventoryCursor.type = BLOCK.AIR;
-    inventoryCursor.count = 0;
+    clearInventoryCursor();
     activeFurnaceKey = null;
     inventoryCraftTypes.fill(0);
     inventoryCraftCounts.fill(0);
@@ -15141,6 +18633,13 @@ export default function FreeCube2Game(engine) {
   }
 
   function quitToTitle() {
+    if (isMultiplayerSessionActive()) {
+      sendMultiplayerSignal({
+        type: isMultiplayerHost() ? "signal_close_room" : "signal_leave_room",
+        roomCode: multiplayerSession.roomCode
+      });
+      teardownMultiplayerSession({ preserveBrowser: true });
+    }
     saveWorld(true);
     activeWorldId = null;
     mode = "menu";
@@ -15152,9 +18651,9 @@ export default function FreeCube2Game(engine) {
     currentTarget = null;
     currentEntityTarget = null;
     inventoryOpen = false;
+    closeTrade(false);
     inventoryContext = "inventory";
-    inventoryCursor.type = BLOCK.AIR;
-    inventoryCursor.count = 0;
+    clearInventoryCursor();
     activeFurnaceKey = null;
     inventoryCraftTypes.fill(0);
     inventoryCraftCounts.fill(0);
@@ -15201,15 +18700,33 @@ export default function FreeCube2Game(engine) {
   function breakCurrentTarget() {
     if (!currentTarget || player.breakCooldown > 0) return false;
     if (currentTarget.type === BLOCK.BEDROCK || isFluidBlock(currentTarget.type)) return false;
+    const heldItemType = getSelectedHeldItemType();
+    if (isMultiplayerGuest()) {
+      sendMultiplayerPeerMessage(multiplayerSession.hostPeerId, {
+        type: "break_block_request",
+        x: currentTarget.x,
+        y: currentTarget.y,
+        z: currentTarget.z
+      });
+      if (!isCreativeMode()) {
+        damageSelectedHeldItem(1);
+      }
+      player.breakCooldown = settings.gameMode === GAME_MODE.CREATIVE ? 0.06 : 0.12;
+      return true;
+    }
     if (world.setBlock(currentTarget.x, currentTarget.y, currentTarget.z, BLOCK.AIR)) {
       if (currentTarget.type === BLOCK.BED) {
         clearPlayerBedSpawnIfNeeded(currentTarget.x, currentTarget.y, currentTarget.z, true);
+      }
+      addPlayerStat("blocksMined", 1);
+      if (currentTarget.type === BLOCK.WOOD) {
+        unlockPlayerAchievement("get_wood");
       }
       if (!isCreativeMode()) {
         if (currentTarget.type === BLOCK.FURNACE) {
           dropFurnaceContentsAt(currentTarget.x, currentTarget.y, currentTarget.z);
         }
-        if (canHarvestBlock(getSelectedHeldItemType(), currentTarget.type)) {
+        if (canHarvestBlock(heldItemType, currentTarget.type)) {
           const drop = getBlockDrop(currentTarget.type, currentTarget.x, currentTarget.y, currentTarget.z, world.seed);
           const jx = (random3(currentTarget.x, currentTarget.y, currentTarget.z, world.seed + 2001) - 0.5) * 2.2;
           const jz = (random3(currentTarget.z, currentTarget.y, currentTarget.x, world.seed + 2002) - 0.5) * 2.2;
@@ -15225,6 +18742,16 @@ export default function FreeCube2Game(engine) {
             0.55
           );
         }
+        damageSelectedHeldItem(1);
+      }
+      if (isMultiplayerHost()) {
+        broadcastMultiplayerPeerMessage({
+          type: "block_update",
+          x: currentTarget.x,
+          y: currentTarget.y,
+          z: currentTarget.z,
+          blockType: BLOCK.AIR
+        });
       }
       player.breakCooldown = settings.gameMode === GAME_MODE.CREATIVE ? 0.06 : 0.12;
       return true;
@@ -15288,9 +18815,10 @@ export default function FreeCube2Game(engine) {
 
     const heldItemType = getSelectedHeldItemType();
     const toolMultiplier = getToolBreakMultiplier(heldItemType, mining.type);
+    const efficiencyBoost = 1 + getHeldEnchantmentLevel("efficiency") * 0.28;
     const canHarvest = canHarvestBlock(heldItemType, mining.type);
     const penalty = canHarvest ? 1 : getRequiredToolForBlock(mining.type) ? 3.2 : 1;
-    const time = getBreakTime(mining.type) * penalty / Math.max(1, toolMultiplier);
+    const time = getBreakTime(mining.type) * penalty / Math.max(1, toolMultiplier * efficiencyBoost);
     mining.progress += dt / time;
     setMiningProgress(mining.progress);
 
@@ -15317,9 +18845,34 @@ export default function FreeCube2Game(engine) {
     if (type === BLOCK.TORCH && !isCollidable(world.getBlock(place.x, place.y - 1, place.z))) return;
     if (type === BLOCK.BED && !isCollidable(world.getBlock(place.x, place.y - 1, place.z))) return;
     if (!isCreativeMode() && getSelectedHeldCount() <= 0) return;
+    if (isMultiplayerGuest()) {
+      sendMultiplayerPeerMessage(multiplayerSession.hostPeerId, {
+        type: "place_block_request",
+        x: place.x,
+        y: place.y,
+        z: place.z,
+        blockType: type
+      });
+      if (!isCreativeMode()) {
+        consumeFromSelectedSlot(1);
+      }
+      addPlayerStat("blocksPlaced", 1);
+      player.placeCooldown = 0.14;
+      return;
+    }
     if (world.setBlock(place.x, place.y, place.z, type)) {
       if (!isCreativeMode()) {
         consumeFromSelectedSlot(1);
+      }
+      addPlayerStat("blocksPlaced", 1);
+      if (isMultiplayerHost()) {
+        broadcastMultiplayerPeerMessage({
+          type: "block_update",
+          x: place.x,
+          y: place.y,
+          z: place.z,
+          blockType: type
+        });
       }
       player.placeCooldown = 0.14;
     }
@@ -15333,6 +18886,7 @@ export default function FreeCube2Game(engine) {
     if (!consumeFromSelectedSlot(1)) return false;
     player.hunger = Math.min(player.maxHunger, player.hunger + food);
     player.regenTimer = 0;
+    addPlayerStat("foodsEaten", 1);
     world.saveDirty = true;
     if (inventoryOpen) {
       renderInventoryUI();
@@ -15380,6 +18934,9 @@ export default function FreeCube2Game(engine) {
       }
     }
     if (input.consumeMousePress(2)) {
+      if (currentEntityTarget?.mob?.type === "villager" && openVillagerTrade(currentEntityTarget.mob)) {
+        return;
+      }
       if (currentTarget?.type === BLOCK.BED && tryUseBed(currentTarget)) {
         return;
       }
@@ -16259,6 +19816,26 @@ export default function FreeCube2Game(engine) {
         return;
       }
 
+      const tradeOffer = event.target.closest("[data-trade-offer]");
+      if (tradeOffer?.dataset.tradeOffer) {
+        executeVillagerTrade(Number(tradeOffer.dataset.tradeOffer));
+        return;
+      }
+
+      const multiplayerEntry = event.target.closest("[data-mp-code],[data-mp-server-id]");
+      if (multiplayerEntry && multiplayerEntry.dataset.mpCode !== undefined) {
+        multiplayerState.selectedRoomCode = String(multiplayerEntry.dataset.mpCode || "");
+        multiplayerState.selectedServerId = String(multiplayerEntry.dataset.mpServerId || "");
+        if (multiplayerState.selectedServerId) {
+          const saved = multiplayerState.savedServers.find((server) => server.id === multiplayerState.selectedServerId);
+          if (saved?.address && ui?.multiplayerDirectInputEl) {
+            ui.multiplayerDirectInputEl.value = saved.address;
+          }
+        }
+        renderMultiplayerMenu();
+        return;
+      }
+
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (!action) return;
 
@@ -16288,6 +19865,14 @@ export default function FreeCube2Game(engine) {
       } else if (action === "open-settings") {
         ui.showScreen("settings");
         setSettingsUI();
+      } else if (action === "open-advancements") {
+        renderAdvancementsScreen();
+        ui.showScreen("advancements");
+      } else if (action === "open-statistics") {
+        renderStatisticsScreen();
+        ui.showScreen("statistics");
+      } else if (action === "back-pause") {
+        ui.showScreen("pause");
       } else if (action === "open-resource-packs-screen") {
         ui.showScreen("resourcePacks");
         renderResourcePackUI();
@@ -16311,10 +19896,7 @@ export default function FreeCube2Game(engine) {
         setSettingsUI();
         if (inventoryOpen) renderInventoryUI();
       } else if (action === "skin-freecube" || action === "skin-steve" || action === "skin-alex" || action === "skin-zombie") {
-        let preset = action.replace("skin-", "");
-        if (preset === "steve") {
-          preset = "steve_large";
-        }
+        const preset = action.replace("skin-", "");
         settings.playerSkinPreset = preset;
         settings.playerSkinDataUrl = "";
         customPlayerSkinCache = { dataUrl: "", canvas: null, loading: false, failed: false };
@@ -16357,8 +19939,14 @@ export default function FreeCube2Game(engine) {
         ui.hideMenu();
         input.pointerLockEnabled = true;
         input.requestPointerLock();
+      } else if (action === "open-lan") {
+        hostWorldOnLan().catch((error) => {
+          alert("Can't connect.");
+        });
       } else if (action === "save-now") {
         saveWorld(true);
+      } else if (action === "close-trade") {
+        closeTrade(true);
       } else if (action === "quit-title") {
         mode = "menu";
         quitToTitle();
@@ -16410,12 +19998,88 @@ export default function FreeCube2Game(engine) {
     if (ui.multiplayerDirectInputEl) {
       ui.multiplayerDirectInputEl.addEventListener("input", () => {
         multiplayerState.directConnectUrl = ui.multiplayerDirectInputEl.value;
+        multiplayerState.selectedServerId = "";
+        multiplayerState.selectedRoomCode = "";
+        renderMultiplayerMenu();
+      });
+    }
+
+    if (ui.multiplayerDirectBtn) {
+      ui.multiplayerDirectBtn.addEventListener("click", async () => {
+        if (!MULTIPLAYER_ENABLED) return;
+        try {
+          const joined = await joinMultiplayerRoom(ui.multiplayerDirectInputEl?.value || "");
+          if (!joined) {
+            alert("Can't connect.");
+          }
+        } catch (error) {
+          alert("Can't connect.");
+        }
+      });
+    }
+
+    if (ui.multiplayerJoinBtn) {
+      ui.multiplayerJoinBtn.addEventListener("click", async () => {
+        if (!MULTIPLAYER_ENABLED) return;
+        const saved = multiplayerState.savedServers.find((server) => server.id === multiplayerState.selectedServerId);
+        try {
+          const joined = await joinMultiplayerRoom(saved?.address || multiplayerState.selectedRoomCode || "");
+          if (!joined) {
+            alert("Can't connect.");
+          }
+        } catch (error) {
+          alert("Can't connect.");
+        }
+      });
+    }
+
+    if (ui.multiplayerAddBtn) {
+      ui.multiplayerAddBtn.addEventListener("click", async () => {
+        const address = String(ui.multiplayerDirectInputEl?.value || "").trim();
+        if (!address) {
+          alert("Can't connect.");
+          return;
+        }
+        const inviteMeta = await describeManualInviteCode(address);
+        if (!inviteMeta.roomCode) {
+          alert("Can't connect.");
+          return;
+        }
+        const label = String(prompt("Saved server name:", "New Server") || "").trim() || "New Server";
+        const savedEntry = {
+          id: `saved-${generateId()}`,
+          name: label,
+          subtitle: inviteMeta.subtitle,
+          address,
+          statusText: inviteMeta.statusText,
+          roomCode: inviteMeta.roomCode,
+          playersLabel: "",
+          healthy: true
+        };
+        multiplayerState.savedServers = [
+          ...multiplayerState.savedServers.filter((server) => server.address !== address),
+          savedEntry
+        ];
+        multiplayerState.selectedServerId = savedEntry.id;
+        multiplayerState.selectedRoomCode = address;
+        renderMultiplayerMenu();
+      });
+    }
+
+    if (ui.multiplayerDeleteBtn) {
+      ui.multiplayerDeleteBtn.addEventListener("click", () => {
+        if (!MULTIPLAYER_ENABLED || !multiplayerState.selectedServerId) return;
+        multiplayerState.savedServers = multiplayerState.savedServers.filter((server) => server.id !== multiplayerState.selectedServerId);
+        multiplayerState.selectedServerId = "";
+        multiplayerState.selectedRoomCode = "";
+        renderMultiplayerMenu();
       });
     }
 
     if (ui.multiplayerRefreshBtn) {
       ui.multiplayerRefreshBtn.addEventListener("click", () => {
         if (!MULTIPLAYER_ENABLED) return;
+        multiplayerState.lanServers = [];
         renderMultiplayerMenu();
       });
     }
@@ -16628,6 +20292,7 @@ export default function FreeCube2Game(engine) {
 
     document.addEventListener("fullscreenchange", () => {
       settings.fullscreen = !!document.fullscreenElement;
+      saveGlobalSettings();
       setSettingsUI();
     });
   }
@@ -16643,6 +20308,7 @@ export default function FreeCube2Game(engine) {
   return {
     start() {
       ensureStore();
+      loadGlobalSettings();
       input = new BrowserInput(engine);
       input.pointerLockEnabled = false;
 
@@ -16688,6 +20354,7 @@ export default function FreeCube2Game(engine) {
       console.log("Debug Console: Ctrl+Shift+Alt+Z (Sirco). DevTools: Ctrl+Shift+D (Sirco).");
 
       window.addEventListener("beforeunload", () => {
+        saveGlobalSettings();
         saveWorld(true);
       });
     },
@@ -16714,6 +20381,8 @@ export default function FreeCube2Game(engine) {
       updateChat(dt);
       updateWeather(dt);
       updateHud(dt);
+      updateToasts(dt);
+      updateEffectsHud();
       updateMusicState(dt);
       debugUiMs += performance.now() - uiStartMs;
       debugState.metrics.frameMs = dt * 1000;
@@ -16748,6 +20417,11 @@ export default function FreeCube2Game(engine) {
         }
         if (inventoryOpen) {
           setInventoryOpen(false);
+          return;
+        }
+        if (tradeOpen) {
+          closeTrade(true);
+          finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
           return;
         }
         if (mode === "playing") {
@@ -16831,6 +20505,32 @@ export default function FreeCube2Game(engine) {
         return;
       }
 
+      if (tradeOpen) {
+        if (!isVillagerTradeValid()) {
+          closeTrade(true);
+          finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+          return;
+        }
+        renderVillagerTradeUi();
+        input.consumeLook();
+        player.isSprinting = false;
+        player.isCrouching = false;
+        currentTarget = null;
+        currentEntityTarget = null;
+        if (useWebGL && glRenderer) glRenderer.setTargetBlock(null);
+        setMiningProgress(0);
+        player.breakCooldown = Math.max(0, player.breakCooldown - dt);
+        player.placeCooldown = Math.max(0, player.placeCooldown - dt);
+        if (!isMultiplayerGuest()) {
+          updateBlockTicks(dt);
+          updateFurnaces(dt);
+        }
+        updatePlayerVitals(dt);
+        saveWorld(false);
+        finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
+        return;
+      }
+
       if (!chatOpen && !inventoryOpen && (input.consumePress("t") || input.consumePress("T"))) {
         openChat("");
         finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
@@ -16855,8 +20555,10 @@ export default function FreeCube2Game(engine) {
         setMiningProgress(0);
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
-        updateBlockTicks(dt);
-        updateFurnaces(dt);
+        if (!isMultiplayerGuest()) {
+          updateBlockTicks(dt);
+          updateFurnaces(dt);
+        }
         updatePlayerVitals(dt);
         saveWorld(false);
         finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
@@ -16872,14 +20574,17 @@ export default function FreeCube2Game(engine) {
         player.breakCooldown = Math.max(0, player.breakCooldown - dt);
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
         updateInventoryCursorPosition();
-        updateBlockTicks(dt);
-        updateFurnaces(dt);
+        if (!isMultiplayerGuest()) {
+          updateBlockTicks(dt);
+          updateFurnaces(dt);
+        }
         updatePlayerVitals(dt);
         saveWorld(false);
         finalizeDebugUpdateMetrics(updateStartMs, debugUiMs, debugChunkMs, dt * 1000);
         return;
       }
 
+      addPlayerStat("playTime", dt);
       updateSelectedSlotFromInput();
       if (input.consumePress("q") || input.consumePress("Q")) {
         dropSelectedItem();
@@ -16887,9 +20592,12 @@ export default function FreeCube2Game(engine) {
 
       let look = { x: 0, y: 0 };
       if (input.locked) {
+        const prevX = player.x;
+        const prevZ = player.z;
         look = input.consumeLook();
         player.applyLook(look.x, look.y, settings);
         player.update(dt, input, world, settings);
+        addPlayerStat("distanceWalked", Math.hypot(player.x - prevX, player.z - prevZ));
         if (player.pendingFallDamage > 0) {
           applyDamage(player.pendingFallDamage, "fell");
           player.pendingFallDamage = 0;
@@ -16900,7 +20608,11 @@ export default function FreeCube2Game(engine) {
         player.isCrouching = false;
       }
 
-      updateBlockTicks(dt);
+      const multiplayerGuest = isMultiplayerGuest();
+      updateMultiplayerSession(dt);
+      if (!multiplayerGuest) {
+        updateBlockTicks(dt);
+      }
       player.ensureSafePosition(world);
       updatePlayerVitals(dt);
 
@@ -16943,16 +20655,18 @@ export default function FreeCube2Game(engine) {
       updateCombat();
       updateMining(dt);
       updateInteractions();
-      updateItems(dt);
-      updateFurnaces(dt);
-      updateSpawning(dt);
+      if (!multiplayerGuest) {
+        updateItems(dt);
+        updateFurnaces(dt);
+        updateSpawning(dt);
+      }
 
       // Mobs update + render feed.
       const cycle = getDayCycleInfo(worldTime);
       const nextMobs = [];
       let removedMob = false;
-      for (const mob of mobs) {
-        mob.update(dt, world, player, cycle);
+      for (const mob of multiplayerGuest ? [] : mobs) {
+        mob.update(dt, world, player, cycle, mobs, weather);
         if (mob.health <= 0) {
           removedMob = true;
           continue;
@@ -17018,13 +20732,44 @@ export default function FreeCube2Game(engine) {
         }
         nextMobs.push(mob);
       }
+
+      for (const mob of nextMobs) {
+        if (!mob || mob.type !== "iron_golem" || mob.health <= 0) continue;
+        const golemDef = getMobDef(mob.type);
+        const threat = findNearestVillageThreat(mob, nextMobs, 3.5);
+        if (!threat) continue;
+        const dxThreat = threat.x - mob.x;
+        const dzThreat = threat.z - mob.z;
+        const distThreat = Math.hypot(dxThreat, dzThreat);
+        if (distThreat > (golemDef.attackReach || 1.8) + threat.radius || mob.attackCooldown > 0) {
+          continue;
+        }
+        mob.attackCooldown = 1.15;
+        const killed = threat.takeDamage(golemDef.meleeDamage || 7, mob.x, mob.z);
+        if (killed && !threat._droppedLoot) {
+          threat._droppedLoot = true;
+          dropMobLoot(threat);
+          world.saveDirty = true;
+          if ((player.x - mob.x) ** 2 + (player.z - mob.z) ** 2 <= 24 * 24) {
+            unlockPlayerAchievement("bodyguard");
+          }
+        }
+      }
+
+      const livingMobs = nextMobs.filter((mob) => mob && mob.health > 0);
+      if (livingMobs.length !== nextMobs.length) {
+        removedMob = true;
+      }
       if (removedMob) {
-        mobs = nextMobs;
+        mobs = livingMobs;
         world.saveDirty = true;
+      }
+      if (!multiplayerGuest) {
+        updateVillageLife(dt);
       }
       syncRenderEntityList();
       if (canvasRenderer) {
-        canvasRenderer.mobs = mobs;
+        canvasRenderer.mobs = multiplayerGuest ? Array.from(multiplayerSession.remotePlayers.values()) : [...mobs, ...Array.from(multiplayerSession.remotePlayers.values())];
         canvasRenderer.items = items;
       }
 
@@ -17046,6 +20791,7 @@ export default function FreeCube2Game(engine) {
       }
 
       if (useWebGL && glRenderer && atlas?.texture) {
+        glRenderer.setWeatherState(buildWeatherRenderState());
         const cycle = getDayCycleInfo(worldTime);
         const effectiveDarkness = clamp((1 - getEffectiveDaylight(cycle, weather.type)) + getWeatherSkyDarkness(weather.type) * 0.25, 0, 1);
         const clear = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), effectiveDarkness * 0.92);
@@ -17057,6 +20803,7 @@ export default function FreeCube2Game(engine) {
         glRenderer.renderFrame();
       } else if (canvasRenderer) {
         canvasRenderer.setSettings(settings);
+        canvasRenderer.setWeatherState(buildWeatherRenderState());
         canvasRenderer.renderFrame(dt, mode === "paused" ? "paused" : mode === "loading" ? "loading" : "playing", {
           loadingInfo: { progress: textures.progress || 0, loaded: 0, total: 1, textureProgress: textures.progress || 0 },
           selectedSlot: player.selectedHotbarSlot,
