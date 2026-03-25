@@ -1,4 +1,4 @@
-const GAME_VERSION = "7.5.4 (beta)";
+const GAME_VERSION = "7.8.2 (beta)";
 const STORAGE_NAMESPACE_VERSION = 6;
 const STORAGE_KEY = `freecube2-static-save-v${STORAGE_NAMESPACE_VERSION}`;
 const GLOBAL_SETTINGS_KEY = `freecube2-global-settings-v${STORAGE_NAMESPACE_VERSION}`;
@@ -9515,7 +9515,7 @@ class WebGLVoxelRenderer {
   _getEffectiveRenderDistance() {
     let distance = this.renderDistanceChunks;
     if (this.runtimeInCave) {
-      distance -= this.runtimeLowFps ? 2 : 1;
+      distance -= this.runtimeLowFps ? 3 : 2;
     } else if (this.runtimeLowFps && distance >= 4) {
       distance -= 1;
     }
@@ -9583,6 +9583,11 @@ class WebGLVoxelRenderer {
     let distance = preset.entityDistance;
     if (this.settings?.graphicsMode === "fancy") {
       distance += 4;
+    }
+    if (this.runtimeInCave) {
+      distance -= this.runtimeLowFps ? 14 : 8;
+    } else if (this.runtimeLowFps) {
+      distance -= 6;
     }
     return distance;
   }
@@ -10747,6 +10752,8 @@ export default function FreeCube2Game(engine) {
   let fpsSmoothed = 0;
   let caveCheckTimer = 0;
   let runtimePlayerInCave = false;
+  let villageCheckTimer = 0;
+  let runtimePlayerInVillage = false;
   let targetScanTimer = 0;
   let currentTarget = null;
   let currentEntityTarget = null;
@@ -10785,6 +10792,10 @@ export default function FreeCube2Game(engine) {
   let runtimeMaintenanceTimer = 0;
   let waterFlowTimer = 0;
   let lavaFlowTimer = 0;
+  let randomTickChunkCache = [];
+  let randomTickChunkCacheTimer = 0;
+  let randomTickCacheChunkX = Number.NaN;
+  let randomTickCacheChunkZ = Number.NaN;
   let debugState = {
     visible: false,
     chunkBorders: false,
@@ -11354,7 +11365,13 @@ export default function FreeCube2Game(engine) {
     runtimeMaintenanceTimer = 0;
     caveCheckTimer = 0;
     runtimePlayerInCave = false;
+    villageCheckTimer = 0;
+    runtimePlayerInVillage = false;
     targetScanTimer = 0;
+    randomTickChunkCache = [];
+    randomTickChunkCacheTimer = 0;
+    randomTickCacheChunkX = Number.NaN;
+    randomTickCacheChunkZ = Number.NaN;
     renderEntities.length = 0;
     stopSleeping(false);
     runtimeFault = null;
@@ -12272,6 +12289,10 @@ export default function FreeCube2Game(engine) {
     }
   }
 
+  function pushToast(title, detail = "", duration = 4.5, kind = "sys") {
+    queueToast(title, detail, duration, kind);
+  }
+
   function updateToasts(dt) {
     if (!ui?.toastEl) return;
     toastQueue = toastQueue
@@ -12569,10 +12590,10 @@ export default function FreeCube2Game(engine) {
 
   function getGameplayMusicTrack() {
     if (!player || !world) return "";
-    if (isPlayerInCave()) {
+    if (runtimePlayerInCave) {
       return MUSIC_TRACKS.gameplay.cave;
     }
-    if (isPlayerInVillage()) {
+    if (runtimePlayerInVillage) {
       return MUSIC_TRACKS.gameplay.village;
     }
     const column = world.terrain.describeColumn(Math.floor(player.x), Math.floor(player.z));
@@ -16119,27 +16140,38 @@ export default function FreeCube2Game(engine) {
       return;
     }
 
-    const cycle = getDayCycleInfo(worldTime);
     const playerChunkX = Math.floor(player.x / CHUNK_SIZE);
     const playerChunkZ = Math.floor(player.z / CHUNK_SIZE);
     const maxChunkDistance = (settings?.renderDistanceChunks || DEFAULT_RENDER_DISTANCE) + 1;
-    const candidateChunks = [];
-    for (const chunk of world.chunks.values()) {
-      if (!chunk?.generated) continue;
-      const dist = Math.max(Math.abs(chunk.chunkX - playerChunkX), Math.abs(chunk.chunkZ - playerChunkZ));
-      if (dist <= maxChunkDistance) {
-        candidateChunks.push(chunk);
+    randomTickChunkCacheTimer -= dt;
+    if (
+      randomTickChunkCacheTimer <= 0 ||
+      playerChunkX !== randomTickCacheChunkX ||
+      playerChunkZ !== randomTickCacheChunkZ ||
+      randomTickChunkCache.length === 0
+    ) {
+      randomTickChunkCache = [];
+      for (const chunk of world.chunks.values()) {
+        if (!chunk?.generated) continue;
+        const dist = Math.max(Math.abs(chunk.chunkX - playerChunkX), Math.abs(chunk.chunkZ - playerChunkZ));
+        if (dist <= maxChunkDistance) {
+          randomTickChunkCache.push(chunk);
+        }
       }
+      randomTickCacheChunkX = playerChunkX;
+      randomTickCacheChunkZ = playerChunkZ;
+      randomTickChunkCacheTimer = runtimePlayerInCave || (fpsSmoothed > 0 && fpsSmoothed < 48) ? 0.85 : 0.45;
     }
-    if (candidateChunks.length === 0) {
+    if (randomTickChunkCache.length === 0) {
       worldTickTimer = 0;
       return;
     }
 
+    const cycle = getDayCycleInfo(worldTime);
     while (worldTickTimer >= RANDOM_BLOCK_TICK_INTERVAL) {
       worldTickTimer -= RANDOM_BLOCK_TICK_INTERVAL;
       for (let i = 0; i < RANDOM_BLOCK_TICKS_PER_STEP; i += 1) {
-        const chunk = candidateChunks[(Math.random() * candidateChunks.length) | 0];
+        const chunk = randomTickChunkCache[(Math.random() * randomTickChunkCache.length) | 0];
         const localX = (Math.random() * CHUNK_SIZE) | 0;
         const localZ = (Math.random() * CHUNK_SIZE) | 0;
         const worldX = chunk.chunkX * CHUNK_SIZE + localX;
@@ -16157,20 +16189,25 @@ export default function FreeCube2Game(engine) {
       return;
     }
     const preset = getPerformancePresetConfig(settings.performancePreset);
+    const runtimeLowFps = fpsSmoothed > 0 && fpsSmoothed < (runtimePlayerInCave ? 50 : 44);
+    const waterStepLimit = runtimePlayerInCave ? 1 : runtimeLowFps ? 2 : 3;
+    const lavaStepLimit = runtimePlayerInCave ? 1 : runtimeLowFps ? 1 : 2;
+    const waterFlowSteps = Math.max(4, Math.round(preset.waterSteps * (runtimePlayerInCave ? (runtimeLowFps ? 0.35 : 0.55) : runtimeLowFps ? 0.72 : 1)));
+    const lavaFlowSteps = Math.max(2, Math.round(preset.lavaSteps * (runtimePlayerInCave ? 0.7 : runtimeLowFps ? 0.82 : 1)));
     waterFlowTimer += dt;
     lavaFlowTimer += dt;
 
     let waterSteps = 0;
-    while (waterFlowTimer >= WATER_FLOW_TICK_SECONDS && waterSteps < 3) {
+    while (waterFlowTimer >= WATER_FLOW_TICK_SECONDS && waterSteps < waterStepLimit) {
       waterFlowTimer -= WATER_FLOW_TICK_SECONDS;
-      world.stepFluidSimulation(BLOCK.WATER, preset.waterSteps);
+      world.stepFluidSimulation(BLOCK.WATER, waterFlowSteps);
       waterSteps += 1;
     }
 
     let lavaSteps = 0;
-    while (lavaFlowTimer >= LAVA_FLOW_TICK_SECONDS && lavaSteps < 2) {
+    while (lavaFlowTimer >= LAVA_FLOW_TICK_SECONDS && lavaSteps < lavaStepLimit) {
       lavaFlowTimer -= LAVA_FLOW_TICK_SECONDS;
-      world.stepFluidSimulation(BLOCK.LAVA, preset.lavaSteps);
+      world.stepFluidSimulation(BLOCK.LAVA, lavaFlowSteps);
       lavaSteps += 1;
     }
   }
@@ -16257,6 +16294,10 @@ export default function FreeCube2Game(engine) {
       return { x: worldSpawnPoint.x, y: worldSpawnPoint.y, z: worldSpawnPoint.z };
     }
     return world ? world.findSpawn(0, 0) : { x: 0.5, y: SEA_LEVEL + 2, z: 0.5 };
+  }
+
+  function getPreferredRespawnPoint() {
+    return getRespawnPoint();
   }
 
   function getPlayerCurrentBiome() {
@@ -17945,12 +17986,17 @@ export default function FreeCube2Game(engine) {
       meshBudgetMs *= 0.75;
     }
     if (runtimePlayerInCave) {
-      genBudgetMs *= fpsSmoothed > 0 && fpsSmoothed < 52 ? 0.72 : 0.86;
-      meshBudgetMs *= fpsSmoothed > 0 && fpsSmoothed < 52 ? 0.68 : 0.84;
-      if (fpsSmoothed > 0 && fpsSmoothed < 52) {
-        genLimit = 1;
-        meshLimit = 1;
-      }
+      const caveLowFps = fpsSmoothed > 0 && fpsSmoothed < 56;
+      genBudgetMs *= caveLowFps ? 0.6 : 0.78;
+      meshBudgetMs *= caveLowFps ? 0.56 : 0.72;
+      genLimit = Math.min(genLimit, caveLowFps ? 1 : 2);
+      meshLimit = Math.min(meshLimit, caveLowFps ? 1 : 2);
+    }
+    if (fpsSmoothed > 0 && fpsSmoothed < 36) {
+      genBudgetMs *= 0.72;
+      meshBudgetMs *= 0.68;
+      genLimit = 1;
+      meshLimit = 1;
     }
 
     return {
@@ -18517,7 +18563,13 @@ export default function FreeCube2Game(engine) {
     blockTickAccumulator = 0;
     caveCheckTimer = 0;
     runtimePlayerInCave = false;
+    villageCheckTimer = 0;
+    runtimePlayerInVillage = false;
     targetScanTimer = 0;
+    randomTickChunkCache = [];
+    randomTickChunkCacheTimer = 0;
+    randomTickCacheChunkX = Number.NaN;
+    randomTickCacheChunkZ = Number.NaN;
     renderEntities.length = 0;
     setBossBar(false);
   }
@@ -18594,7 +18646,13 @@ export default function FreeCube2Game(engine) {
     runtimeMaintenanceTimer = 0;
     caveCheckTimer = 0;
     runtimePlayerInCave = false;
+    villageCheckTimer = 0;
+    runtimePlayerInVillage = false;
     targetScanTimer = 0;
+    randomTickChunkCache = [];
+    randomTickChunkCacheTimer = 0;
+    randomTickCacheChunkX = Number.NaN;
+    randomTickCacheChunkZ = Number.NaN;
     renderEntities.length = 0;
     stopSleeping(false);
     runtimeFault = null;
@@ -18664,7 +18722,13 @@ export default function FreeCube2Game(engine) {
     runtimeMaintenanceTimer = 0;
     caveCheckTimer = 0;
     runtimePlayerInCave = false;
+    villageCheckTimer = 0;
+    runtimePlayerInVillage = false;
     targetScanTimer = 0;
+    randomTickChunkCache = [];
+    randomTickChunkCacheTimer = 0;
+    randomTickCacheChunkX = Number.NaN;
+    randomTickCacheChunkZ = Number.NaN;
     renderEntities.length = 0;
     runtimeFault = null;
     runtimeRepairPromise = null;
@@ -19650,6 +19714,13 @@ export default function FreeCube2Game(engine) {
       compactRuntimeState(fpsSmoothed < 34);
       runtimeLowFpsTimer = 0;
       runtimeCompactCooldown = 18;
+    } else if (runtimePlayerInCave && fpsSmoothed > 0 && fpsSmoothed < 50 && runtimeCompactCooldown <= 0) {
+      runtimeLowFpsTimer += dt * 0.6;
+      if (runtimeLowFpsTimer >= 3.5) {
+        compactRuntimeState(fpsSmoothed < 40);
+        runtimeLowFpsTimer = 0;
+        runtimeCompactCooldown = 10;
+      }
     }
   }
 
@@ -20617,9 +20688,14 @@ export default function FreeCube2Game(engine) {
       updatePlayerVitals(dt);
 
       caveCheckTimer = Math.max(0, caveCheckTimer - dt);
+      villageCheckTimer = Math.max(0, villageCheckTimer - dt);
       if (caveCheckTimer <= 0) {
         runtimePlayerInCave = isPlayerInCave();
-        caveCheckTimer = 0.25;
+        caveCheckTimer = fpsSmoothed > 0 && fpsSmoothed < 48 ? 0.5 : 0.25;
+      }
+      if (villageCheckTimer <= 0) {
+        runtimePlayerInVillage = isPlayerInVillage();
+        villageCheckTimer = fpsSmoothed > 0 && fpsSmoothed < 48 ? 0.9 : 0.45;
       }
 
       if (useWebGL && glRenderer && atlas.texture) {
@@ -20638,6 +20714,9 @@ export default function FreeCube2Game(engine) {
         currentTarget = null;
         currentEntityTarget = null;
       } else {
+        const targetScanInterval = runtimePlayerInCave
+          ? (fpsSmoothed > 0 && fpsSmoothed < 52 ? 1 / 12 : 1 / 18)
+          : (fpsSmoothed > 0 && fpsSmoothed < 48 ? 1 / 18 : TARGET_SCAN_INTERVAL_SECONDS);
         const shouldRefreshTargets =
           targetScanTimer <= 0 ||
           input.buttonsDown[0] ||
@@ -20648,7 +20727,7 @@ export default function FreeCube2Game(engine) {
           const blockTarget = world.raycast(player.getEyePosition(), player.getLookVector(), MAX_REACH);
           currentEntityTarget = findTargetMob(blockTarget);
           currentTarget = currentEntityTarget ? null : blockTarget;
-          targetScanTimer = TARGET_SCAN_INTERVAL_SECONDS;
+          targetScanTimer = targetScanInterval;
         }
       }
       if (useWebGL && glRenderer) glRenderer.setTargetBlock(currentTarget);
