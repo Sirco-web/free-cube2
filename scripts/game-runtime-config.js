@@ -130,7 +130,16 @@ export const GAME_MODE = {
 };
 
 export const MULTIPLAYER_ENABLED = true;
-export const DEFAULT_MULTIPLAYER_SERVER_URL = "ws://localhost:3000";
+export const DEFAULT_MULTIPLAYER_SERVER_URL = (() => {
+  const fallback = "ws://localhost:3000";
+  const locationRef = globalThis?.location;
+  if (!locationRef || locationRef.protocol === "file:") {
+    return fallback;
+  }
+  const hostname = String(locationRef.hostname || "localhost").trim() || "localhost";
+  const protocol = locationRef.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${hostname}:3000`;
+})();
 export const DEFAULT_MULTIPLAYER_STUN_SERVERS = [{
   urls: [
     "stun:stun.l.google.com:19302",

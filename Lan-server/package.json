@@ -1,0 +1,13 @@
+{
+  "name": "cubes-and-caves-lan-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LAN and dedicated multiplayer server for Cubes and Caves / FreeCube2",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

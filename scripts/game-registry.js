@@ -157,6 +157,9 @@ export function createGameRegistry({
     "wolf"
   ]);
 
+  const HOSTILE_MOB_TYPES = Array.from(EXTENDED_HOSTILE_MOB_TYPES);
+  const PASSIVE_MOB_TYPES = Array.from(EXTENDED_PASSIVE_MOB_TYPES).filter((type) => type !== "villager");
+
   const EXTENDED_MOB_DEF_OVERRIDES = {
     allay: { radius: 0.22, height: 0.6, maxHealth: 20, speed: 1.45 },
     axolotl: { radius: 0.34, height: 0.42, maxHealth: 14, speed: 1.05 },
@@ -479,8 +482,10 @@ export function createGameRegistry({
   const MAX_ACTIVE_MOBS = 15;
 
   return {
+    HOSTILE_MOB_TYPES,
     MAX_ACTIVE_MOBS,
     MOB_DEFS,
+    PASSIVE_MOB_TYPES,
     VILLAGER_PROFESSION_DEFS,
     VILLAGER_PROFESSIONS,
     buildExtendedMobDef,

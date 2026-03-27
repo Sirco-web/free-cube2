@@ -136,6 +136,31 @@ python3 -m http.server 8080
 open http://localhost:8080
 ```
 
+### Multiplayer / LAN Server
+```bash
+cd Lan-server
+npm install
+npm start
+```
+
+The default multiplayer endpoint used by the game is:
+
+```text
+ws://localhost:3000
+```
+
+When the game is opened from a LAN host like `http://192.168.1.20:8080`, multiplayer now defaults to that same machine automatically:
+
+```text
+ws://192.168.1.20:3000
+```
+
+To join from another device on the same network, point the game to:
+
+```text
+ws://YOUR_COMPUTER_IP:3000
+```
+
 ### Deployment
 Simply copy all files to a web server. The game runs entirely in-browser with no build step required!
 

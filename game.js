@@ -1969,7 +1969,9 @@ const {
 } = createGameplayData(BLOCK, ITEM, buildCreativeMenuItems);
 
 const {
+  HOSTILE_MOB_TYPES,
   MAX_ACTIVE_MOBS,
+  PASSIVE_MOB_TYPES,
   getMobDef,
   getNearbyVillageCenters,
   getNearestVillageCenter,
@@ -6222,13 +6224,13 @@ export default function CubesAndCavesGame(engine) {
     const savedEntries = multiplayerState.savedServers.map((server) => createMultiplayerEntryMarkup(server, "saved")).join("");
     ui.multiplayerListEl.innerHTML = (serverEntries || savedEntries)
       ? `${serverEntries}${savedEntries}`
-      : `<div class="fc-mp-empty">No servers found yet. Press Refresh.</div>`;
+      : `<div class="fc-mp-empty">No LAN servers found yet. Press Refresh.</div>`;
 
     if (ui.multiplayerDirectInputEl) {
       if (!ui.multiplayerDirectInputEl.value.trim()) {
         ui.multiplayerDirectInputEl.value = multiplayerState.directConnectUrl || DEFAULT_MULTIPLAYER_SERVER_URL;
       }
-      ui.multiplayerDirectInputEl.placeholder = "Server URL or LAN code";
+      ui.multiplayerDirectInputEl.placeholder = "Same-network server or LAN code";
     }
     if (ui.multiplayerDirectBtn) {
       ui.multiplayerDirectBtn.textContent = "Connect";
