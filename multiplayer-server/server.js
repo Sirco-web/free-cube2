@@ -2,6 +2,7 @@ const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const ROOM_CODE_LENGTH = 5;
 const DEFAULT_MAX_PLAYERS = 8;
 const DEFAULT_SERVER_ID = String(process.env.DEFAULT_SERVER_ID || "default").trim() || "default";
 const DEFAULT_SERVER_NAME = String(process.env.SERVER_NAME || "FreeCube2 Dedicated Server").trim() || "FreeCube2 Dedicated Server";
@@ -37,7 +38,7 @@ function hashString(value) {
 function generateRoomCode() {
   let code = "";
   do {
-    code = Array.from({ length: 6 }, () => ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)]).join("");
+    code = Array.from({ length: ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)]).join("");
   } while (signalRooms.has(code));
   return code;
 }
@@ -514,7 +515,7 @@ function handleDedicatedBreakBlock(client, payload) {
   const x = normalizeInt(payload.x, 0);
   const y = normalizeInt(payload.y, 0);
   const z = normalizeInt(payload.z, 0);
-  server.modifiedBlocks.delete(packBlockKey(x, y, z));
+  server.modifiedBlocks.set(packBlockKey(x, y, z), { x, y, z, blockType: 0 });
   broadcastDedicatedServer(server, {
     type: "block_update",
     serverId: server.id,

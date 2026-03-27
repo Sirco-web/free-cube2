@@ -1451,7 +1451,7 @@ const __engine = (() => {
       // Draw player
       DrawingUtils.drawCharacter(ctx, player);
     }
-    
+
     static drawDoor(ctx, door) {
       // Wood door with frame
       ctx.fillStyle = '#6B4423';
@@ -1474,11 +1474,11 @@ const __engine = (() => {
       ctx.strokeRect(door.x + 5, door.y + 5, door.width - 10, door.height / 2 - 5);
       ctx.strokeRect(door.x + 5, door.y + door.height / 2, door.width - 10, door.height / 2 - 5);
     }
-    
+
     static drawCharacter(ctx, player) {
       ctx.save();
       ctx.translate(player.x + player.width/2, player.y);
-      
+
       // Head
       ctx.fillStyle = '#FFB6C1';
       ctx.beginPath();
@@ -1510,7 +1510,7 @@ const __engine = (() => {
       
       ctx.restore();
     }
-    
+
     static drawNPC(ctx, npc) {
       ctx.save();
       ctx.translate(npc.x, npc.y);
@@ -2702,6 +2702,105 @@ const __engine = (() => {
     }
   }
 
+  function toSircoUrlObject(urlLike = import.meta.url) {
+    return urlLike instanceof URL ? urlLike : new URL(String(urlLike), import.meta.url);
+  }
+
+  function resolveSircoModuleUrl(path, baseUrl = import.meta.url) {
+    const base = toSircoUrlObject(baseUrl);
+    const rawPath = String(path || '').trim();
+    if (!rawPath) return '';
+    if (rawPath.startsWith('http://') || rawPath.startsWith('https://') || rawPath.startsWith('/')) {
+      return new URL(rawPath, base).href;
+    }
+    return new URL(rawPath, new URL('.', base)).href;
+  }
+
+  function normalizeSircoScriptList(value) {
+    if (Array.isArray(value)) {
+      return value.map((entry) => String(entry || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+      return value.split(',').map((entry) => entry.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  function getBootstrapOptions(urlLike = import.meta.url) {
+    const moduleUrl = toSircoUrlObject(urlLike);
+    return {
+      moduleUrl,
+      game: moduleUrl.searchParams.get('game') || './game.js',
+      exportName: moduleUrl.searchParams.get('export') || '',
+      scripts: normalizeSircoScriptList(moduleUrl.searchParams.get('scripts') || ''),
+      title: moduleUrl.searchParams.get('title') || ''
+    };
+  }
+
+  async function importSircoModule(path, baseUrl = import.meta.url) {
+    const resolved = resolveSircoModuleUrl(path, baseUrl);
+    console.log(`🔗 Trying game path: ${resolved}`);
+    const module = await import(resolved);
+    console.log(`✅ Successfully imported game from: ${resolved}`);
+    return { module, resolved };
+  }
+
+  async function loadSircoProjectConfig(configOrPath, baseUrl = import.meta.url) {
+    if (!configOrPath) {
+      return { __baseUrl: toSircoUrlObject(baseUrl).href };
+    }
+    if (typeof configOrPath === 'string') {
+      const { module, resolved } = await importSircoModule(configOrPath, baseUrl);
+      const config = module?.default ?? module?.gameConfig ?? module;
+      return { ...(config || {}), __module: module, __baseUrl: resolved };
+    }
+    return { ...(configOrPath || {}), __baseUrl: toSircoUrlObject(baseUrl).href };
+  }
+
+  function pickSircoGameExport(module, exportName = '') {
+    if (!module) return null;
+    if (exportName && module[exportName]) {
+      return module[exportName];
+    }
+    return module.default || module.game || module;
+  }
+
+  async function startSircoProject(engineInstance, configOrPath, baseUrl = import.meta.url) {
+    const config = await loadSircoProjectConfig(configOrPath, baseUrl);
+    const configBaseUrl = config.__baseUrl || toSircoUrlObject(baseUrl).href;
+    const scripts = normalizeSircoScriptList(config.scripts || config.modules);
+
+    for (const scriptPath of scripts) {
+      await importSircoModule(scriptPath, configBaseUrl);
+    }
+
+    if (config.title && typeof document !== 'undefined') {
+      document.title = config.title;
+    }
+
+    const inlineGameExport = config.gameModule || config.gameExport || config.factory || null;
+    if (inlineGameExport) {
+      engineInstance.start(inlineGameExport);
+      return { config, gameExport: inlineGameExport };
+    }
+
+    const entryPath = config.entry || config.game || config.main || '';
+    if (!entryPath) {
+      throw new Error('Game config is missing an entry module.');
+    }
+    const { module } = await importSircoModule(entryPath, configBaseUrl);
+    const gameExport = pickSircoGameExport(module, config.exportName || '');
+    if (!gameExport) {
+      throw new Error(`Game entry did not export a runnable module: ${entryPath}`);
+    }
+    engineInstance.start(gameExport);
+    return { config, gameExport, module };
+  }
+
+  Engine.prototype.startProject = async function startProject(projectConfig, baseUrl = import.meta.url) {
+    return startSircoProject(this, projectConfig, baseUrl);
+  };
+
   // --- bootstrap logic: find game path from import.meta.url query param ---
   return { 
     Engine, ResourceLoader, Vec2, Vec3, Transform, Sprite, PhysicsBody2D, Camera2D, Scene, Entity,
@@ -2710,7 +2809,8 @@ const __engine = (() => {
     ImageProcessor, SpriteRenderer, SpriteLayer, Animator, Tilemap, Particle, ParticleEmitter, TextRenderer,
     Prefab, SceneManager, AssetImporter, Renderer2D, Canvas2DRenderer,
     GameTree, AvatarRenderer, CommandSystem, DebugConsole,
-    Room, NPC, GameItem, Player, DialogueUI, DrawingUtils
+    Room, NPC, GameItem, Player, DialogueUI, DrawingUtils,
+    getBootstrapOptions, resolveSircoModuleUrl, importSircoModule, loadSircoProjectConfig, startSircoProject
   };
 })();
 
@@ -2723,7 +2823,8 @@ window.SircoEngine = __engine;
     console.log('🎮 Sirco Engine Bootstrap Starting...');
     const moduleUrl = new URL(import.meta.url);
     console.log('📍 Engine module URL:', moduleUrl.href);
-    const gamePath = moduleUrl.searchParams.get('game') || './game.js';
+    const bootstrapOptions = __engine.getBootstrapOptions(moduleUrl);
+    const gamePath = bootstrapOptions.game || './game.js';
     console.log('🎯 Game path from query:', gamePath);
     const engineInstance = new __engine.Engine();
     console.log('✨ Engine instance created');
@@ -2747,15 +2848,28 @@ window.SircoEngine = __engine;
     // Try multiple game paths
     let gameExport = null;
     const pathsToTry = [];
-    
-    if (gamePath && gamePath !== './game.js' && gamePath !== '/game.js') {
-      pathsToTry.push(gamePath);
+
+    if (bootstrapOptions.scripts.length || bootstrapOptions.exportName || bootstrapOptions.title) {
+      const startResult = await __engine.startSircoProject(engineInstance, {
+        title: bootstrapOptions.title,
+        scripts: bootstrapOptions.scripts,
+        entry: gamePath,
+        exportName: bootstrapOptions.exportName
+      }, moduleUrl);
+      console.log('📦 Game bootstrap config:', startResult.config);
+      gameExport = startResult.gameExport;
     }
-    pathsToTry.push('./game.js', '/game.js');
     
-    for (const path of pathsToTry) {
-      gameExport = await tryImportGame(path);
-      if (gameExport) break;
+    if (!gameExport) {
+      if (gamePath && gamePath !== './game.js' && gamePath !== '/game.js') {
+        pathsToTry.push(gamePath);
+      }
+      pathsToTry.push('./game.js', '/game.js');
+
+      for (const path of pathsToTry) {
+        gameExport = await tryImportGame(path);
+        if (gameExport) break;
+      }
     }
     
     if (gameExport) {
