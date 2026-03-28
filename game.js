@@ -917,9 +917,9 @@ const BLOCK_TEXTURE_PATHS = {
     bottom: "assets/PNG/Tiles/trunk_top.png"
   },
   [BLOCK.LEAVES]: {
-    top: "assets/PNG/Tiles/leaves.png",
-    side: "assets/PNG/Tiles/leaves.png",
-    bottom: "assets/PNG/Tiles/leaves.png"
+    top: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
+    side: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png",
+    bottom: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png"
   },
   [BLOCK.WATER]: {
     top: "assets/PNG/Tiles/water.png",
@@ -1573,6 +1573,112 @@ const ACHIEVEMENT_DEFS = {
   }
 };
 
+const TITLE_SPLASH_TEXTS = [
+  "Also try digging straight down",
+  "Now with more caves",
+  "Blocks, bats, and bad ideas",
+  "Mind the creepers",
+  "Runs great on a LAN party",
+  "Stone age speedrun ready",
+  "Tree punching simulator",
+  "Grass approved",
+  "Craft first, panic later",
+  "Bring extra torches",
+  "Totally not dangerous",
+  "You hear skeletons nearby",
+  "Bed before boss fight",
+  "Chunky and cheerful",
+  "Now 100% more cavey",
+  "Punch wood responsibly",
+  "Night is coming",
+  "Diggy diggy maybe no",
+  "Locally saved, globally bold",
+  "Keep inventory, keep calm",
+  "Mobs not included in warranty",
+  "Certified block classic",
+  "Powered by questionable courage",
+  "Do not mine bedrock",
+  "Rendered with grit",
+  "Open to LAN and vanish",
+  "No purple menu in sight",
+  "Voxel vibes only",
+  "Fast hands, square lands",
+  "Respawn point recommended",
+  "This cave goes deeper",
+  "Hold onto your diamonds",
+  "A fine day for blocks",
+  "Rain, thunder, repeat",
+  "Inventory Tetris champion",
+  "Place block. Regret block.",
+  "Made for one more world",
+  "Survival with sharp edges",
+  "Chunk loading wizardry",
+  "Please pet the sheep",
+  "Now leaving the stone age",
+  "Procedurally suspicious",
+  "Take the scenic mineshaft",
+  "Looks cozy from up here",
+  "Lava says hello",
+  "One block at a time",
+  "Biome sweet biome",
+  "Dangerously craftable",
+  "Built different, one cube at a time",
+  "The hills are blocky today",
+  "Room for one more tunnel",
+  "May contain villagers",
+  "Approved by iron golems",
+  "A bold new hole",
+  "Adventure, squared",
+  "More ore, less chore",
+  "Sunset hits different underground",
+  "Cubes today, caves tonight",
+  "Straight lines, wild worlds",
+  "Try not to anger the warden",
+  "A little dirt never hurt",
+  "Now featuring better splash text",
+  "Mining your own business",
+  "The mountain called back",
+  "Infinite ambition, finite torches",
+  "Block by glorious block",
+  "Never trust a silent cave",
+  "Start with wood, end with legend",
+  "Looks almost safe",
+  "Live laugh mine",
+  "If lost, dig up",
+  "Night shift approved",
+  "Fresh world smell",
+  "Zero percent flat",
+  "Built for just one more hour",
+  "Please close the door, zombie nearby",
+  "Now entering cave goblin mode",
+  "A sunset worth surviving",
+  "Courage sold separately",
+  "Low risk, high depth",
+  "Did someone say diamonds",
+  "Punch tree, acquire destiny",
+  "Mood: strip mining",
+  "The blocks yearn to be stacked",
+  "Fear the hiss",
+  "Home is where the chest is",
+  "Highly expandable horizons",
+  "Just enough danger",
+  "Generated with enthusiasm",
+  "Square by square",
+  "One torch from disaster",
+  "Beautiful, until nighttime",
+  "Deep thoughts, deeper caves",
+  "Cobblestone core aesthetic",
+  "Respawn stylishly",
+  "Also try going outside",
+  "Mined over matter",
+  "Strong opinions on gravel"
+];
+
+const MENU_PANORAMA_STORAGE_KEY = `${GAME_STORAGE_SLUG}-menu-panorama`;
+const MENU_PANORAMA_SLICE_COUNT = 6;
+const MENU_PANORAMA_SLICE_WIDTH = 320;
+const MENU_PANORAMA_SLICE_HEIGHT = 180;
+
 const EFFECT_DEFS = {
   speed: { label: "Speed", positive: true },
   strength: { label: "Strength", positive: true },
@@ -1718,6 +1824,48 @@ function getPlayerEffectLevel(player, key) {
   if (!player?.effects) return 0;
   const normalized = sanitizeEffectKey(key);
   return Math.max(0, Math.floor(Number(player.effects[normalized]?.level) || 0));
+}
+
+let lastTitleSplashIndex = -1;
+
+function pickTitleSplashText() {
+  if (!TITLE_SPLASH_TEXTS.length) {
+    return "Adventure, squared";
+  }
+  if (TITLE_SPLASH_TEXTS.length === 1) {
+    lastTitleSplashIndex = 0;
+    return TITLE_SPLASH_TEXTS[0];
+  }
+  let index = lastTitleSplashIndex;
+  while (index === lastTitleSplashIndex) {
+    index = Math.floor(Math.random() * TITLE_SPLASH_TEXTS.length);
+  }
+  lastTitleSplashIndex = index;
+  return TITLE_SPLASH_TEXTS[index];
+}
+
+function loadStoredMenuPanorama() {
+  try {
+    const raw = localStorage.getItem(MENU_PANORAMA_STORAGE_KEY);
+    return typeof raw === "string" && raw.startsWith("data:image/") ? raw : "";
+  } catch (error) {
+    console.warn("Menu panorama load failed:", error.message);
+    return "";
+  }
+}
+
+function saveStoredMenuPanorama(dataUrl = "") {
+  try {
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) {
+      localStorage.setItem(MENU_PANORAMA_STORAGE_KEY, dataUrl);
+    } else {
+      localStorage.removeItem(MENU_PANORAMA_STORAGE_KEY);
+    }
+    return true;
+  } catch (error) {
+    console.warn("Menu panorama save failed:", error.message);
+    return false;
+  }
 }
 
 function formatStatValue(key, value) {
@@ -2382,6 +2530,9 @@ export default function CubesAndCavesGame(engine) {
   let spawnTimer = 0;
   let worldTickTimer = 0;
   let blockTickAccumulator = 0;
+  let furnaceTickAccumulator = 0;
+  let spawnTickAccumulator = 0;
+  let multiplayerTickAccumulator = 0;
   let saveTimer = 0;
   let fps = 0;
   let fpsTimer = 0;
@@ -3241,6 +3392,7 @@ export default function CubesAndCavesGame(engine) {
       closeMultiplayerPeer(peerId);
     }
     resetRemotePlayerEntities();
+    multiplayerTickAccumulator = 0;
     if (!keepSocket && multiplayerSession.socket) {
       try {
         multiplayerSession.socket.close();
@@ -3358,6 +3510,11 @@ export default function CubesAndCavesGame(engine) {
     mobs = [];
     items = [];
     spawnTimer = 0;
+    worldTickTimer = 0;
+    blockTickAccumulator = 0;
+    furnaceTickAccumulator = 0;
+    spawnTickAccumulator = 0;
+    multiplayerTickAccumulator = 0;
     mining.key = null;
     mining.progress = 0;
     currentTarget = null;
@@ -4340,11 +4497,17 @@ export default function CubesAndCavesGame(engine) {
     if (!isMultiplayerSessionActive() || !player || mode !== "playing") {
       return;
     }
-    multiplayerSession.lastPlayerSyncAt += dt;
-    multiplayerSession.lastWorldSyncAt += dt;
+    multiplayerSession.lastPlayerSyncAt = Math.min(
+      multiplayerSession.lastPlayerSyncAt + dt,
+      MULTIPLAYER_PLAYER_SYNC_INTERVAL * 2
+    );
+    multiplayerSession.lastWorldSyncAt = Math.min(
+      multiplayerSession.lastWorldSyncAt + dt,
+      MULTIPLAYER_WORLD_SYNC_INTERVAL * 2
+    );
     if (isMultiplayerGuest()) {
       if (multiplayerSession.lastPlayerSyncAt >= MULTIPLAYER_PLAYER_SYNC_INTERVAL) {
-        multiplayerSession.lastPlayerSyncAt = 0;
+        multiplayerSession.lastPlayerSyncAt %= MULTIPLAYER_PLAYER_SYNC_INTERVAL;
         if (isDedicatedMultiplayerSession()) {
           sendMultiplayerSignal({
             type: "player_state",
@@ -4360,7 +4523,7 @@ export default function CubesAndCavesGame(engine) {
       return;
     }
     if (multiplayerSession.lastPlayerSyncAt >= MULTIPLAYER_PLAYER_SYNC_INTERVAL) {
-      multiplayerSession.lastPlayerSyncAt = 0;
+      multiplayerSession.lastPlayerSyncAt %= MULTIPLAYER_PLAYER_SYNC_INTERVAL;
       broadcastMultiplayerPeerMessage({
         type: "players_state",
         players: [
@@ -4383,7 +4546,7 @@ export default function CubesAndCavesGame(engine) {
         worldState: buildMultiplayerWorldStatePacket()
       });
     } else if (multiplayerSession.lastWorldSyncAt >= MULTIPLAYER_WORLD_SYNC_INTERVAL) {
-      multiplayerSession.lastWorldSyncAt = 0;
+      multiplayerSession.lastWorldSyncAt %= MULTIPLAYER_WORLD_SYNC_INTERVAL;
       broadcastMultiplayerPeerMessage({
         type: "players_state",
         players: [
@@ -4420,7 +4583,7 @@ export default function CubesAndCavesGame(engine) {
 
   function normalizeSettingsState(value = {}, previousState = {}) {
     const next = { ...DEFAULT_SETTINGS, ...previousState, ...(value && typeof value === "object" ? value : {}) };
-    next.renderDistanceChunks = clamp(next.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 6);
+    next.renderDistanceChunks = clamp(next.renderDistanceChunks || DEFAULT_RENDER_DISTANCE, 2, 12);
     next.mouseSensitivity = clamp(next.mouseSensitivity || DEFAULT_SETTINGS.mouseSensitivity, 0.0012, 0.006);
     next.fovDegrees = clamp(Math.round(next.fovDegrees || DEFAULT_SETTINGS.fovDegrees), 55, 95);
     next.showFps = next.showFps !== false;
@@ -4878,14 +5041,23 @@ export default function CubesAndCavesGame(engine) {
         .fc-repair-title{color:#f4fbff;font:900 20px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 2px 10px rgba(0,0,0,0.45)}
         .fc-repair-copy{max-width:min(420px,82vw);text-align:center;color:rgba(223,239,255,0.9);font:13px/1.4 ui-monospace,Menlo,Consolas,monospace}
         @keyframes fc-repair-spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#2b2b2b url('./assets/PNG/Tiles/dirt.png') repeat; background-size:256px 256px; image-rendering:pixelated; animation:fc-menu-pan 32s linear infinite}
-        @keyframes fc-menu-pan{0%{background-position:0 0}100%{background-position:-256px -256px}}
+        #freecube2-menu{position:fixed;inset:0;display:none;align-items:stretch;justify-content:center;overflow:auto;pointer-events:auto;background:#09131d}
+        #freecube2-menu-panorama-wrap{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+        #freecube2-menu-panorama{position:absolute;inset:-8%;background-repeat:repeat-x;background-position:0 center;background-size:auto 118%;transform:scale(1.16);transform-origin:center;filter:saturate(1.08) contrast(1.04);opacity:0.96;animation:fc-menu-panorama-scroll 76s linear infinite}
+        #freecube2-menu-panorama.fallback{background-image:linear-gradient(180deg, rgba(100,140,196,0.7), rgba(20,32,54,0.92)),url('./assets/PNG/Tiles/dirt.png');background-size:auto,256px 256px;image-rendering:pixelated;filter:saturate(1.02)}
+        @keyframes fc-menu-panorama-scroll{0%{background-position:0 center}100%{background-position:-1920px center}}
         #freecube2-menu::before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 50% 20%, rgba(255,255,255,0.06), transparent 52%),linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.55));pointer-events:none}
         #freecube2-menu.show{display:flex}
         #freecube2-panel{position:relative;width:min(920px,96vw);min-height:calc(100dvh - 24px);margin:auto;padding:12px 0;background:transparent;border:none;box-shadow:none;text-align:center;display:flex;flex-direction:column;justify-content:center}
         #fc-screen-profile,#fc-screen-title,#fc-screen-multiplayer,#fc-screen-worlds,#fc-screen-settings,#fc-screen-resource-packs,#fc-screen-loading,#fc-screen-pause{width:min(860px,100%);margin:0 auto}
-        .fc-title{font:900 72px/1 ui-monospace,Menlo,Consolas,monospace;color:#fff;letter-spacing:4px;text-shadow:0 6px 0 rgba(0,0,0,0.45),0 18px 60px rgba(0,0,0,0.6);margin:0 auto 10px auto}
-        .fc-sub{color:rgba(255,255,255,0.85);font:700 18px/1.1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 26px auto;transform:rotate(-10deg);display:inline-block}
+        .fc-title-wrap{position:relative;display:grid;justify-items:center;margin:0 auto 26px auto;padding-top:8px}
+        .fc-title{position:relative;display:grid;gap:2px;justify-items:center;margin:0 auto;color:#fff;text-transform:uppercase;line-height:0.88}
+        .fc-title-main{display:flex;align-items:flex-end;justify-content:center;gap:12px;flex-wrap:wrap;font:900 clamp(44px,9vw,94px)/0.88 ui-monospace,Menlo,Consolas,monospace;letter-spacing:3px}
+        .fc-title-word{display:inline-block;padding:8px 14px 10px 14px;background:linear-gradient(180deg,#f4f4f4 0%,#d8d8d8 48%,#a9a9a9 49%,#f6f6f6 100%);border:4px solid #1b1b1b;box-shadow:0 4px 0 #000,8px 10px 0 rgba(0,0,0,0.58);color:#f9f9f9;text-shadow:-2px -2px 0 rgba(255,255,255,0.22),2px 2px 0 rgba(0,0,0,0.66)}
+        .fc-title-edition{display:inline-block;margin-top:4px;padding:4px 12px 5px 12px;background:#262626;border:3px solid #111;box-shadow:0 3px 0 rgba(0,0,0,0.55);font:900 clamp(18px,3vw,34px)/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:2px;color:#f4f4f4}
+        .fc-sub{position:absolute;right:max(12px,9%);top:18px;max-width:min(280px,36vw);color:#ffe100;font:900 clamp(20px,3.2vw,38px)/0.95 ui-monospace,Menlo,Consolas,monospace;text-shadow:2px 2px 0 #5f5400,4px 4px 0 rgba(0,0,0,0.55);transform:rotate(-15deg);display:inline-block;transform-origin:center}
+        @keyframes fc-splash-wobble{0%,100%{transform:rotate(-15deg) scale(1)}50%{transform:rotate(-12deg) scale(1.06)}}
+        .fc-sub{animation:fc-splash-wobble 2.6s ease-in-out infinite}
         .fc-row{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
         .fc-stack{display:flex;flex-direction:column;gap:10px;align-items:center}
         .fc-btn{all:unset;cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:center;min-width:min(420px,86vw);height:42px;padding:0 14px;background:#c6c6c6;border:2px solid #000;box-shadow:inset 0 2px 0 rgba(255,255,255,0.35), inset 0 -2px 0 rgba(0,0,0,0.25), 0 10px 30px rgba(0,0,0,0.25);color:#1a1a1a;font:800 16px/1 ui-monospace,Menlo,Consolas,monospace;text-shadow:0 1px 0 rgba(255,255,255,0.55)}
@@ -5010,8 +5182,10 @@ export default function CubesAndCavesGame(engine) {
         .fc-error-detail{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:rgba(196,210,230,0.82)}
         @media (max-width: 760px){
           #freecube2-panel{width:min(96vw,96vw);min-height:calc(100dvh - 12px);padding:6px 0}
-          .fc-title{font-size:clamp(42px,12vw,64px);letter-spacing:2px}
-          .fc-sub{font-size:14px;margin-bottom:18px}
+          .fc-title-main{gap:8px}
+          .fc-title-word{padding:6px 10px 8px 10px;border-width:3px}
+          .fc-title-edition{margin-top:2px}
+          .fc-sub{position:relative;right:auto;top:auto;max-width:80vw;margin:6px auto 0 auto;font-size:clamp(18px,5vw,28px)}
           .fc-grid{grid-template-columns:1fr}
           .fc-video-grid{grid-template-columns:1fr}
           .fc-profile-shell{grid-template-columns:1fr}
@@ -5154,6 +5328,9 @@ export default function CubesAndCavesGame(engine) {
         </div>
       </div>
       <div id="freecube2-menu" class="show">
+        <div id="freecube2-menu-panorama-wrap">
+          <div id="freecube2-menu-panorama" class="fallback"></div>
+        </div>
         <div id="freecube2-panel">
           <div id="fc-screen-profile" style="display:none">
             <div style="font:900 22px ui-monospace,Menlo,Consolas,monospace;color:#fff;text-shadow:0 3px 10px rgba(0,0,0,0.7);margin:0 auto 12px auto">Create Profile</div>
@@ -5187,8 +5364,17 @@ export default function CubesAndCavesGame(engine) {
             </div>
           </div>
           <div id="fc-screen-title" style="display:none">
-            <div class="fc-title">FREECUBE</div>
-            <div class="fc-sub">Also try digging straight down</div>
+            <div class="fc-title-wrap">
+              <div class="fc-title">
+                <div id="fc-title-main" class="fc-title-main">
+                  <span class="fc-title-word">Cubes</span>
+                  <span class="fc-title-word">and</span>
+                  <span class="fc-title-word">Caves</span>
+                </div>
+                <div class="fc-title-edition">Java-ish Edition</div>
+              </div>
+              <div id="fc-title-splash" class="fc-sub">Also try digging straight down</div>
+            </div>
             <div class="fc-stack">
               <button class="fc-btn" data-action="singleplayer">Singleplayer</button>
               <button class="fc-btn${MULTIPLAYER_ENABLED ? "" : " disabled"}" data-action="open-multiplayer" ${MULTIPLAYER_ENABLED ? "" : "disabled"}>Multiplayer</button>
@@ -5360,6 +5546,7 @@ export default function CubesAndCavesGame(engine) {
                 <button class="fc-btn half" data-action="open-settings">Options...</button>
                 <button class="fc-btn half" data-action="open-lan">Open to LAN</button>
               </div>
+              <button class="fc-btn" data-action="capture-panorama">Capture Title Panorama</button>
               <button class="fc-btn" data-action="quit-title">Save and Quit to Title</button>
             </div>
           </div>
@@ -5459,6 +5646,9 @@ export default function CubesAndCavesGame(engine) {
     const errorMessageEl = root.querySelector("#freecube2-error-message");
     const errorDetailEl = root.querySelector("#freecube2-error-detail");
     const menuEl = root.querySelector("#freecube2-menu");
+    const menuPanoramaEl = root.querySelector("#freecube2-menu-panorama");
+    const titleMainEl = root.querySelector("#fc-title-main");
+    const titleSplashEl = root.querySelector("#fc-title-splash");
 
     const screens = {
       profile: root.querySelector("#fc-screen-profile"),
@@ -5568,6 +5758,9 @@ export default function CubesAndCavesGame(engine) {
       tradeStatusEl,
       tradeListEl,
       menuEl,
+      menuPanoramaEl,
+      titleMainEl,
+      titleSplashEl,
       miningEl,
       miningBar,
       weatherOverlayEl,
@@ -5678,6 +5871,124 @@ export default function CubesAndCavesGame(engine) {
     };
 
     return ui;
+  }
+
+  function setMenuPanoramaImage(dataUrl = loadStoredMenuPanorama()) {
+    ensureUI();
+    const hasPanorama = typeof dataUrl === "string" && dataUrl.startsWith("data:image/");
+    ui.menuPanoramaEl.classList.toggle("fallback", !hasPanorama);
+    ui.menuPanoramaEl.style.backgroundImage = hasPanorama ? `url("${dataUrl}")` : "";
+  }
+
+  function renderPanoramaSliceView(yaw, pitch = -0.08) {
+    if (!world || !player) {
+      return false;
+    }
+    player.yaw = yaw;
+    player.pitch = pitch;
+    if (useWebGL && glRenderer && atlas?.texture) {
+      glRenderer.setWeatherState(buildWeatherRenderState());
+      glRenderer.setTargetBlock(null);
+      const cycle = getDayCycleInfo(worldTime);
+      const effectiveDarkness = clamp((1 - getEffectiveDaylight(cycle, weather.type)) + getWeatherSkyDarkness(weather.type) * 0.25, 0, 1);
+      const clear = mixRgb(rgb(99, 183, 255), rgb(18, 24, 56), effectiveDarkness * 0.92);
+      const flash = clamp(weather.flash || 0, 0, 1);
+      const clearRgb = flash > 0.001 ? mixRgb(clear, rgb(232, 238, 255), flash * 0.5) : clear;
+      gl.clearColor(clearRgb[0] / 255, clearRgb[1] / 255, clearRgb[2] / 255, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      glRenderer.updateCamera();
+      glRenderer.renderFrame();
+      gl.finish?.();
+      return true;
+    }
+    if (canvasRenderer) {
+      canvasRenderer.setSettings(settings);
+      canvasRenderer.setWeatherState(buildWeatherRenderState());
+      canvasRenderer.renderFrame(0, "playing", {
+        loadingInfo: { progress: textures?.progress || 0, loaded: 0, total: 1, textureProgress: textures?.progress || 0 },
+        selectedSlot: player.selectedHotbarSlot,
+        notices: [],
+        locked: false,
+        buttons: [],
+        hoveredButton: null,
+        settings,
+        hasSave: true
+      }, null);
+      return true;
+    }
+    return false;
+  }
+
+  function captureMenuPanorama() {
+    if (!world || !player) {
+      alert("Load a world before capturing a title panorama.");
+      return false;
+    }
+
+    ensureUI();
+    const previousYaw = player.yaw;
+    const previousPitch = player.pitch;
+    const previousTarget = currentTarget;
+    const previousEntityTarget = currentEntityTarget;
+    const previousScreen = Object.entries(ui.screens).find(([, el]) => el.style.display !== "none")?.[0] || "pause";
+    const hadMenu = ui.menuEl.classList.contains("show");
+
+    currentTarget = null;
+    currentEntityTarget = null;
+    ui.hideMenu();
+    ui.setHudVisible(false);
+
+    const stripCanvas = document.createElement("canvas");
+    stripCanvas.width = MENU_PANORAMA_SLICE_WIDTH * MENU_PANORAMA_SLICE_COUNT;
+    stripCanvas.height = MENU_PANORAMA_SLICE_HEIGHT;
+    const stripCtx = stripCanvas.getContext("2d");
+    if (!stripCtx) {
+      if (hadMenu) {
+        ui.showScreen(previousScreen);
+      }
+      return false;
+    }
+
+    for (let index = 0; index < MENU_PANORAMA_SLICE_COUNT; index += 1) {
+      const yaw = previousYaw + ((Math.PI * 2) / MENU_PANORAMA_SLICE_COUNT) * index;
+      if (!renderPanoramaSliceView(yaw)) {
+        continue;
+      }
+      stripCtx.drawImage(
+        engine.canvas,
+        0,
+        0,
+        engine.canvas.width,
+        engine.canvas.height,
+        index * MENU_PANORAMA_SLICE_WIDTH,
+        0,
+        MENU_PANORAMA_SLICE_WIDTH,
+        MENU_PANORAMA_SLICE_HEIGHT
+      );
+    }
+
+    const dataUrl = stripCanvas.toDataURL("image/jpeg", 0.82);
+    saveStoredMenuPanorama(dataUrl);
+    setMenuPanoramaImage(dataUrl);
+
+    player.yaw = previousYaw;
+    player.pitch = previousPitch;
+    currentTarget = previousTarget;
+    currentEntityTarget = previousEntityTarget;
+    renderPanoramaSliceView(previousYaw, previousPitch);
+    if (useWebGL && glRenderer) {
+      glRenderer.setTargetBlock(currentTarget);
+    }
+
+    if (hadMenu) {
+      ui.showScreen(previousScreen);
+    } else if (mode === "playing") {
+      ui.hideMenu();
+      ui.setHudVisible(hud.visible);
+    }
+
+    pushToast("Title panorama updated", "The menu now uses your captured world view.");
+    return true;
   }
 
   function setHotbarImages() {
@@ -6169,6 +6480,10 @@ export default function CubesAndCavesGame(engine) {
       return;
     }
     ensureUI();
+    setMenuPanoramaImage();
+    if (ui.titleSplashEl) {
+      ui.titleSplashEl.textContent = pickTitleSplashText();
+    }
     renderMultiplayerMenu();
     ui.showScreen("title");
   }
@@ -8393,6 +8708,50 @@ export default function CubesAndCavesGame(engine) {
     flushPendingMultiplayerBlockUpdates();
   }
 
+  function updateFurnaceTicks(dt) {
+    if (!world) return;
+    furnaceTickAccumulator = Math.min(
+      furnaceTickAccumulator + dt,
+      BLOCK_TICK_STEP_SECONDS * MAX_BLOCK_TICK_STEPS_PER_FRAME
+    );
+    let steps = 0;
+    while (furnaceTickAccumulator >= BLOCK_TICK_STEP_SECONDS && steps < MAX_BLOCK_TICK_STEPS_PER_FRAME) {
+      updateFurnaces(BLOCK_TICK_STEP_SECONDS);
+      furnaceTickAccumulator -= BLOCK_TICK_STEP_SECONDS;
+      steps += 1;
+    }
+  }
+
+  function updateSpawnTicks(dt) {
+    if (!world || !player) return;
+    spawnTickAccumulator = Math.min(
+      spawnTickAccumulator + dt,
+      BLOCK_TICK_STEP_SECONDS * MAX_BLOCK_TICK_STEPS_PER_FRAME
+    );
+    let steps = 0;
+    while (spawnTickAccumulator >= BLOCK_TICK_STEP_SECONDS && steps < MAX_BLOCK_TICK_STEPS_PER_FRAME) {
+      updateSpawning(BLOCK_TICK_STEP_SECONDS);
+      spawnTickAccumulator -= BLOCK_TICK_STEP_SECONDS;
+      steps += 1;
+    }
+  }
+
+  function updateMultiplayerSessionTicks(dt) {
+    if (!player || mode !== "playing" || !isMultiplayerSessionActive()) {
+      return;
+    }
+    multiplayerTickAccumulator = Math.min(
+      multiplayerTickAccumulator + dt,
+      BLOCK_TICK_STEP_SECONDS * MAX_BLOCK_TICK_STEPS_PER_FRAME
+    );
+    let steps = 0;
+    while (multiplayerTickAccumulator >= BLOCK_TICK_STEP_SECONDS && steps < MAX_BLOCK_TICK_STEPS_PER_FRAME) {
+      updateMultiplayerSession(BLOCK_TICK_STEP_SECONDS);
+      multiplayerTickAccumulator -= BLOCK_TICK_STEP_SECONDS;
+      steps += 1;
+    }
+  }
+
   function serializeCurrentWorldState() {
     return {
       time: normalizeWorldTimeSeconds(worldTime),
@@ -8618,6 +8977,30 @@ export default function CubesAndCavesGame(engine) {
     return light >= 9;
   }
 
+  function isValidDungeonSpawnLocation(type, x, y, z, cycle = getDayCycleInfo(worldTime), mob = new Mob(type)) {
+    if (!world || !player || !Number.isFinite(y)) {
+      return false;
+    }
+    const dx = x - player.x;
+    const dz = z - player.z;
+    const dist2 = dx * dx + dz * dz;
+    if (dist2 < 8 * 8 || dist2 > 28 * 28) {
+      return false;
+    }
+    const groundY = Math.floor(y) - 1;
+    const groundBlock = world.peekBlock(Math.floor(x), groundY, Math.floor(z));
+    if (!isValidSpawnGround(groundBlock, false)) {
+      return false;
+    }
+    if (!hasMobSpawnSpace(x, y, z, mob)) {
+      return false;
+    }
+    if (entityWouldCollide(world, x, y, z, mob.radius, mob.height)) {
+      return false;
+    }
+    return getApproxLightLevel(x, y, z, cycle) <= 9;
+  }
+
   function getMobCapRadius() {
     const renderDistance = settings?.renderDistanceChunks || DEFAULT_RENDER_DISTANCE;
     return Math.max(42, (renderDistance + 0.6) * CHUNK_SIZE);
@@ -8748,6 +9131,34 @@ export default function CubesAndCavesGame(engine) {
     return false;
   }
 
+  function spawnMobFromDungeonSpawner() {
+    if (!world || !player || !runtimePlayerInCave) {
+      return false;
+    }
+    const cycle = getDayCycleInfo(worldTime);
+    const anchors = world.getNearbyDungeonSpawners(player.x, player.z, Math.max(84, getMobCapRadius() * 1.35));
+    for (const anchor of anchors) {
+      if (!anchor || Math.abs(anchor.y - player.y) > 18) {
+        continue;
+      }
+      const mobType = anchor.mobType || "zombie";
+      const mob = new Mob(mobType);
+      for (let tries = 0; tries < 12; tries += 1) {
+        const angle = ((Math.PI * 2) / 12) * tries + random2(anchor.seed, tries, world.seed + 4811) * 0.45;
+        const dist = 1.5 + random2(anchor.seed + tries, tries * 3, world.seed + 4812) * 3.2;
+        const x = anchor.x + Math.sin(angle) * dist;
+        const z = anchor.z + Math.cos(angle) * dist;
+        const y = findLoadedWalkableY(world, x, z, anchor.y + 1, mob.height > 1.2 ? 2 : 1);
+        if (!Number.isFinite(y) || Math.abs(y - anchor.y) > 3) continue;
+        if (!isValidDungeonSpawnLocation(mobType, x, y, z, cycle, mob)) continue;
+        mob.setPosition(x, y, z);
+        mobs.push(mob);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function summonMobNearPlayer(type = "zombie") {
     if (!world || !player) return false;
     const mob = new Mob(type);
@@ -8813,6 +9224,11 @@ export default function CubesAndCavesGame(engine) {
 
     if (nearbyTotal >= MAX_ACTIVE_MOBS) {
       spawnTimer = hostileWindow ? 1.4 : 2.2;
+      return;
+    }
+
+    if (hostiles < 8 && spawnMobFromDungeonSpawner()) {
+      spawnTimer = hostileWindow ? 1.8 : 2.6;
       return;
     }
 
@@ -9083,6 +9499,7 @@ export default function CubesAndCavesGame(engine) {
     ui.deleteWorldBtn.classList.toggle("disabled", !canUseSelection);
   }
 
+  const RENDER_DISTANCE_PRESETS = [2, 3, 4, 5, 6, 8, 10, 12];
   const FOV_PRESETS = [60, 70, 80, 90, 95];
   const MOUSE_SENSITIVITY_PRESETS = [0.0015, 0.0021, 0.0026, 0.0032, 0.004, 0.005];
 
@@ -9472,7 +9889,11 @@ export default function CubesAndCavesGame(engine) {
     activeFurnaceKey = null;
     waterFlowTimer = 0;
     lavaFlowTimer = 0;
+    worldTickTimer = 0;
     blockTickAccumulator = 0;
+    furnaceTickAccumulator = 0;
+    spawnTickAccumulator = 0;
+    multiplayerTickAccumulator = 0;
     caveCheckTimer = 0;
     runtimePlayerInCave = false;
     villageCheckTimer = 0;
@@ -9532,6 +9953,11 @@ export default function CubesAndCavesGame(engine) {
     mobs = [];
     items = [];
     spawnTimer = 0;
+    worldTickTimer = 0;
+    blockTickAccumulator = 0;
+    furnaceTickAccumulator = 0;
+    spawnTickAccumulator = 0;
+    multiplayerTickAccumulator = 0;
     for (let i = 0; i < 4; i += 1) {
       spawnMobNearPlayer("sheep");
     }
@@ -9626,6 +10052,12 @@ export default function CubesAndCavesGame(engine) {
     input.pointerLockEnabled = false;
     mobs = [];
     items = [];
+    spawnTimer = 0;
+    worldTickTimer = 0;
+    blockTickAccumulator = 0;
+    furnaceTickAccumulator = 0;
+    spawnTickAccumulator = 0;
+    multiplayerTickAccumulator = 0;
     mining.key = null;
     mining.progress = 0;
     currentTarget = null;
@@ -10174,7 +10606,7 @@ export default function CubesAndCavesGame(engine) {
         pushChatLine("Chat cleared.", "sys");
         return true;
       case "increase_rd":
-        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks + 1, 2, 6);
+        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks + 1, 2, 12);
         if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
         if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
         setSettingsUI();
@@ -10182,7 +10614,7 @@ export default function CubesAndCavesGame(engine) {
         pushChatLine(`Render distance: ${settings.renderDistanceChunks}`, "sys");
         return true;
       case "decrease_rd":
-        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks - 1, 2, 6);
+        settings.renderDistanceChunks = clamp(settings.renderDistanceChunks - 1, 2, 12);
         if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
         if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
         setSettingsUI();
@@ -10690,6 +11122,12 @@ export default function CubesAndCavesGame(engine) {
         hostWorldOnLan().catch((error) => {
           alert(String(error?.message || "Can't connect."));
         });
+      } else if (action === "capture-panorama") {
+        try {
+          captureMenuPanorama();
+        } catch (error) {
+          alert(`Panorama capture failed: ${error.message}`);
+        }
       } else if (action === "save-now") {
         saveWorld(true);
       } else if (action === "close-trade") {
@@ -10956,7 +11394,8 @@ export default function CubesAndCavesGame(engine) {
     });
 
     ui.videoRenderDistanceBtn.addEventListener("click", () => {
-      settings.renderDistanceChunks = settings.renderDistanceChunks >= 6 ? 2 : settings.renderDistanceChunks + 1;
+      const currentIndex = Math.max(0, RENDER_DISTANCE_PRESETS.indexOf(settings.renderDistanceChunks));
+      settings.renderDistanceChunks = RENDER_DISTANCE_PRESETS[(currentIndex + 1) % RENDER_DISTANCE_PRESETS.length];
       if (glRenderer) glRenderer.setRenderDistance(settings.renderDistanceChunks);
       if (canvasRenderer) canvasRenderer.setRenderDistance(settings.renderDistanceChunks);
       markWorldDirty();
@@ -11086,6 +11525,7 @@ export default function CubesAndCavesGame(engine) {
       }
 
       ensureUI();
+      setMenuPanoramaImage();
       wireUiEvents();
       engine.canvas.addEventListener("webglcontextlost", handleWebGLContextLost);
       engine.canvas.addEventListener("webglcontextrestored", handleWebGLContextRestored);
@@ -11290,7 +11730,7 @@ export default function CubesAndCavesGame(engine) {
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
         if (!isMultiplayerGuest()) {
           updateBlockTicks(dt);
-          updateFurnaces(dt);
+          updateFurnaceTicks(dt);
         }
         updatePlayerVitals(dt);
         saveWorld(false);
@@ -11324,7 +11764,7 @@ export default function CubesAndCavesGame(engine) {
         player.placeCooldown = Math.max(0, player.placeCooldown - dt);
         if (!isMultiplayerGuest()) {
           updateBlockTicks(dt);
-          updateFurnaces(dt);
+          updateFurnaceTicks(dt);
         }
         updatePlayerVitals(dt);
         saveWorld(false);
@@ -11343,7 +11783,7 @@ export default function CubesAndCavesGame(engine) {
         updateInventoryCursorPosition();
         if (!isMultiplayerGuest()) {
           updateBlockTicks(dt);
-          updateFurnaces(dt);
+          updateFurnaceTicks(dt);
         }
         updatePlayerVitals(dt);
         saveWorld(false);
@@ -11376,7 +11816,7 @@ export default function CubesAndCavesGame(engine) {
       }
 
       const multiplayerGuest = isMultiplayerGuest();
-      updateMultiplayerSession(dt);
+      updateMultiplayerSessionTicks(dt);
       if (!multiplayerGuest) {
         updateBlockTicks(dt);
       }
@@ -11432,8 +11872,8 @@ export default function CubesAndCavesGame(engine) {
       updateInteractions();
       if (!multiplayerGuest) {
         updateItems(dt);
-        updateFurnaces(dt);
-        updateSpawning(dt);
+        updateFurnaceTicks(dt);
+        updateSpawnTicks(dt);
       }
 
       // Mobs update + render feed.

@@ -230,8 +230,8 @@ export function buildWeatherParticlePass(world, player, weatherState, settingsSt
   }
 
   const timeSeconds = Number(weatherState?.timeSeconds) || 0;
-  const renderDistance = clamp(Number(settingsState?.renderDistanceChunks) || DEFAULT_RENDER_DISTANCE, 2, 6);
-  const radius = clamp(6 + renderDistance * 1.8 + (weatherType === WEATHER_TYPES.THUNDER ? 1.5 : 0), 7, 18);
+  const renderDistance = clamp(Number(settingsState?.renderDistanceChunks) || DEFAULT_RENDER_DISTANCE, 2, 12);
+  const radius = clamp(6 + renderDistance * 1.8 + (weatherType === WEATHER_TYPES.THUNDER ? 1.5 : 0), 7, 30);
   const budget = Math.max(18, Math.floor(getWeatherParticleBudget(settingsState, weatherState) * intensity));
   const drops = [];
   const splashes = [];

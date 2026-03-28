@@ -174,7 +174,7 @@ export function createCommandRuntime({
     }
 
     if (cmd === "rd" || cmd === "renderdistance") {
-      const rd = clamp(Number(args[0]) || settings.renderDistanceChunks, 2, 6);
+      const rd = clamp(Number(args[0]) || settings.renderDistanceChunks, 2, 12);
       settings.renderDistanceChunks = rd;
       setSettingsUI();
       state.glRenderer?.setRenderDistance(rd);

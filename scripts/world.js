@@ -82,6 +82,107 @@ function getNearbyVillageCenters(x, z, seed, radius = 128) {
   return centers;
 }
 
+const SURFACE_STRUCTURE_REGION_CHUNKS = 5;
+const DUNGEON_REGION_CHUNKS = 4;
+const DUNGEON_MOB_TYPES = ["zombie", "skeleton", "spider"];
+
+function getSurfaceStructureInRegion(regionX, regionZ, seed) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const hash = hash4(regionX * 61, 17, regionZ * 67, worldSeed + 15213);
+  if ((hash % 100) >= 34) {
+    return null;
+  }
+  const inner = Math.max(1, SURFACE_STRUCTURE_REGION_CHUNKS - 2);
+  const chunkX = regionX * SURFACE_STRUCTURE_REGION_CHUNKS + 1 + (Math.floor(hash / 7) % inner);
+  const chunkZ = regionZ * SURFACE_STRUCTURE_REGION_CHUNKS + 1 + (Math.floor(hash / 19) % inner);
+  const kindIndex = Math.floor(hash / 43) % 3;
+  return {
+    kind: kindIndex === 0 ? "ruined_tower" : kindIndex === 1 ? "camp" : "stone_well",
+    x: chunkX * CHUNK_SIZE + 2 + (Math.floor(hash / 97) % 12) + 0.5,
+    z: chunkZ * CHUNK_SIZE + 2 + (Math.floor(hash / 193) % 12) + 0.5,
+    seed: hash
+  };
+}
+
+function getNearbySurfaceStructures(x, z, seed, radius = 160) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const regionWorldSize = SURFACE_STRUCTURE_REGION_CHUNKS * CHUNK_SIZE;
+  const minRegionX = Math.floor((x - radius) / regionWorldSize);
+  const maxRegionX = Math.floor((x + radius) / regionWorldSize);
+  const minRegionZ = Math.floor((z - radius) / regionWorldSize);
+  const maxRegionZ = Math.floor((z + radius) / regionWorldSize);
+  const structures = [];
+
+  for (let regionX = minRegionX; regionX <= maxRegionX; regionX += 1) {
+    for (let regionZ = minRegionZ; regionZ <= maxRegionZ; regionZ += 1) {
+      const structure = getSurfaceStructureInRegion(regionX, regionZ, worldSeed);
+      if (!structure) continue;
+      const dx = structure.x - x;
+      const dz = structure.z - z;
+      if (dx * dx + dz * dz <= radius * radius) {
+        structures.push(structure);
+      }
+    }
+  }
+
+  return structures;
+}
+
+function getDungeonAnchorInRegion(regionX, regionZ, seed) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const hash = hash4(regionX * 73, 29, regionZ * 79, worldSeed + 20473);
+  if ((hash % 100) >= 26) {
+    return null;
+  }
+  const inner = Math.max(1, DUNGEON_REGION_CHUNKS - 1);
+  const chunkX = regionX * DUNGEON_REGION_CHUNKS + (Math.floor(hash / 11) % inner);
+  const chunkZ = regionZ * DUNGEON_REGION_CHUNKS + (Math.floor(hash / 23) % inner);
+  return {
+    x: chunkX * CHUNK_SIZE + 3 + (Math.floor(hash / 61) % 10) + 0.5,
+    z: chunkZ * CHUNK_SIZE + 3 + (Math.floor(hash / 127) % 10) + 0.5,
+    seed: hash,
+    mobType: DUNGEON_MOB_TYPES[Math.floor(hash / 43) % DUNGEON_MOB_TYPES.length]
+  };
+}
+
+function getNearbyDungeonAnchors(x, z, seed, radius = 112) {
+  const worldSeed = normalizeWorldSeed(seed, generateRandomWorldSeed());
+  const regionWorldSize = DUNGEON_REGION_CHUNKS * CHUNK_SIZE;
+  const minRegionX = Math.floor((x - radius) / regionWorldSize);
+  const maxRegionX = Math.floor((x + radius) / regionWorldSize);
+  const minRegionZ = Math.floor((z - radius) / regionWorldSize);
+  const maxRegionZ = Math.floor((z + radius) / regionWorldSize);
+  const anchors = [];
+
+  for (let regionX = minRegionX; regionX <= maxRegionX; regionX += 1) {
+    for (let regionZ = minRegionZ; regionZ <= maxRegionZ; regionZ += 1) {
+      const anchor = getDungeonAnchorInRegion(regionX, regionZ, worldSeed);
+      if (!anchor) continue;
+      const dx = anchor.x - x;
+      const dz = anchor.z - z;
+      if (dx * dx + dz * dz <= radius * radius) {
+        anchors.push(anchor);
+      }
+    }
+  }
+
+  return anchors;
+}
+
+function getDungeonPlacementForAnchor(terrain, anchor) {
+  const column = terrain.describeColumn(Math.floor(anchor.x), Math.floor(anchor.z));
+  if (!column || column.height <= SEA_LEVEL + 6 || column.biome === "riverbank") {
+    return null;
+  }
+  const maxDepth = Math.max(10, Math.min(30, column.height - 12));
+  const depth = 8 + (Math.floor(anchor.seed / 89) % maxDepth);
+  const y = clamp(column.height - depth, 10, Math.max(10, column.height - 7));
+  return {
+    ...anchor,
+    y
+  };
+}
+
 class TerrainGenerator {
   constructor(seed) {
     this.seed = seed;
@@ -674,7 +775,9 @@ class Chunk {
     this.generateOreVeins(baseX, baseZ);
 
     this.decorateTrees(baseX, baseZ);
+    this.decorateSurfaceStructures(baseX, baseZ);
     this.decorateVillage(baseX, baseZ);
+    this.decorateDungeons(baseX, baseZ);
 
     this.generated = true;
     this.world.applyOverridesToChunk(this);
@@ -731,6 +834,194 @@ class Chunk {
     }
 
     this.writeWorldBlock(worldX, groundY + height + 2, worldZ, BLOCK.LEAVES, false);
+  }
+
+  decorateSurfaceStructures(baseX, baseZ) {
+    const structures = getNearbySurfaceStructures(baseX + CHUNK_SIZE * 0.5, baseZ + CHUNK_SIZE * 0.5, this.world.seed, CHUNK_SIZE * 4.5);
+    for (const structure of structures) {
+      if (structure.x < baseX - 20 || structure.x > baseX + CHUNK_SIZE + 20 || structure.z < baseZ - 20 || structure.z > baseZ + CHUNK_SIZE + 20) {
+        continue;
+      }
+      if (getNearbyVillageCenters(structure.x, structure.z, this.world.seed, 28).length > 0) {
+        continue;
+      }
+      const centerX = Math.floor(structure.x);
+      const centerZ = Math.floor(structure.z);
+      const column = this.world.terrain.describeColumn(centerX, centerZ);
+      if (!column || column.height <= SEA_LEVEL + 1 || column.slope > 7) {
+        continue;
+      }
+      const groundY = clamp(column.height, 2, WORLD_HEIGHT - 9);
+      if (structure.kind === "ruined_tower") {
+        this.applyRuinedTowerAt(centerX, groundY, centerZ, structure.seed);
+      } else if (structure.kind === "camp") {
+        this.applyCampAt(centerX, groundY, centerZ, structure.seed);
+      } else {
+        this.applyStoneWellAt(centerX, groundY, centerZ, structure.seed);
+      }
+    }
+  }
+
+  decorateDungeons(baseX, baseZ) {
+    const anchors = getNearbyDungeonAnchors(baseX + CHUNK_SIZE * 0.5, baseZ + CHUNK_SIZE * 0.5, this.world.seed, CHUNK_SIZE * 4.5);
+    for (const anchor of anchors) {
+      const placement = getDungeonPlacementForAnchor(this.world.terrain, anchor);
+      if (!placement) continue;
+      if (placement.x < baseX - 12 || placement.x > baseX + CHUNK_SIZE + 12 || placement.z < baseZ - 12 || placement.z > baseZ + CHUNK_SIZE + 12) {
+        continue;
+      }
+      this.applyDungeonAt(Math.floor(placement.x), placement.y, Math.floor(placement.z), placement.seed);
+    }
+  }
+
+  applyRuinedTowerAt(centerX, groundY, centerZ, seed) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -2; dz <= 2; dz += 1) {
+        const wx = centerX + dx;
+        const wz = centerZ + dz;
+        const columnY = this.world.terrain.describeColumn(wx, wz).height;
+        for (let y = columnY + 1; y <= groundY; y += 1) {
+          this.writeWorldBlock(wx, y, wz, BLOCK.COBBLESTONE, true);
+        }
+        this.writeWorldBlock(wx, groundY, wz, BLOCK.COBBLESTONE, true);
+      }
+    }
+
+    const towerHeight = 5 + (seed % 3);
+    for (let y = groundY + 1; y <= groundY + towerHeight; y += 1) {
+      for (let dx = -2; dx <= 2; dx += 1) {
+        for (let dz = -2; dz <= 2; dz += 1) {
+          const edge = Math.abs(dx) === 2 || Math.abs(dz) === 2;
+          if (!edge) {
+            this.writeWorldBlock(centerX + dx, y, centerZ + dz, BLOCK.AIR, true);
+            continue;
+          }
+          const damage = hash4(centerX + dx, y, centerZ + dz, seed + 411) % 100;
+          const corner = Math.abs(dx) === 2 && Math.abs(dz) === 2;
+          if (!corner && damage < 19) {
+            this.writeWorldBlock(centerX + dx, y, centerZ + dz, BLOCK.AIR, true);
+            continue;
+          }
+          this.writeWorldBlock(centerX + dx, y, centerZ + dz, corner ? BLOCK.WOOD : BLOCK.COBBLESTONE, true);
+        }
+      }
+    }
+
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        this.writeWorldBlock(centerX + dx, groundY + towerHeight, centerZ + dz, BLOCK.PLANKS, true);
+      }
+    }
+    this.writeWorldBlock(centerX, groundY + towerHeight + 1, centerZ, BLOCK.TORCH, true);
+  }
+
+  applyCampAt(centerX, groundY, centerZ, seed) {
+    for (let dx = -3; dx <= 3; dx += 1) {
+      for (let dz = -3; dz <= 3; dz += 1) {
+        const wx = centerX + dx;
+        const wz = centerZ + dz;
+        const columnY = this.world.terrain.describeColumn(wx, wz).height;
+        for (let y = columnY + 1; y <= groundY; y += 1) {
+          this.writeWorldBlock(wx, y, wz, BLOCK.DIRT, true);
+        }
+        if (Math.abs(dx) <= 2 && Math.abs(dz) <= 2) {
+          this.writeWorldBlock(wx, groundY, wz, BLOCK.PLANKS, true);
+        }
+      }
+    }
+
+    for (const [dx, dz] of [[-2, -1], [2, -1], [-2, 1], [2, 1]]) {
+      this.writeWorldBlock(centerX + dx, groundY + 1, centerZ + dz, BLOCK.WOOD, true);
+      this.writeWorldBlock(centerX + dx, groundY + 2, centerZ + dz, BLOCK.WOOD, true);
+    }
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        if (Math.abs(dx) === 2 && Math.abs(dz) === 1) continue;
+        this.writeWorldBlock(centerX + dx, groundY + 3, centerZ + dz, BLOCK.WHITE_WOOL, true);
+      }
+    }
+
+    this.writeWorldBlock(centerX - 1, groundY + 1, centerZ - 1, BLOCK.BED, true);
+    this.writeWorldBlock(centerX + 1, groundY + 1, centerZ + 1, BLOCK.CRAFTING_TABLE, true);
+    if ((seed % 2) === 0) {
+      this.writeWorldBlock(centerX, groundY + 1, centerZ + 2, BLOCK.FURNACE, true);
+    }
+    this.writeWorldBlock(centerX - 3, groundY + 1, centerZ, BLOCK.TORCH, true);
+    this.writeWorldBlock(centerX + 3, groundY + 1, centerZ, BLOCK.TORCH, true);
+  }
+
+  applyStoneWellAt(centerX, groundY, centerZ, seed) {
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -2; dz <= 2; dz += 1) {
+        const wx = centerX + dx;
+        const wz = centerZ + dz;
+        const columnY = this.world.terrain.describeColumn(wx, wz).height;
+        for (let y = columnY + 1; y <= groundY; y += 1) {
+          this.writeWorldBlock(wx, y, wz, BLOCK.COBBLESTONE, true);
+        }
+      }
+    }
+
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        const edge = Math.abs(dx) === 1 || Math.abs(dz) === 1;
+        this.writeWorldBlock(centerX + dx, groundY + 1, centerZ + dz, edge ? BLOCK.COBBLESTONE : BLOCK.WATER, true);
+      }
+    }
+
+    for (const [dx, dz] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) {
+      this.writeWorldBlock(centerX + dx, groundY + 1, centerZ + dz, BLOCK.WOOD, true);
+      this.writeWorldBlock(centerX + dx, groundY + 2, centerZ + dz, BLOCK.WOOD, true);
+      this.writeWorldBlock(centerX + dx, groundY + 3, centerZ + dz, BLOCK.WOOD, true);
+    }
+
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -2; dz <= 2; dz += 1) {
+        if (Math.abs(dx) < 2 && Math.abs(dz) < 2 && (hash4(centerX + dx, groundY, centerZ + dz, seed + 613) % 100) < 22) {
+          continue;
+        }
+        this.writeWorldBlock(centerX + dx, groundY + 4, centerZ + dz, BLOCK.PLANKS, true);
+      }
+    }
+  }
+
+  applyDungeonAt(centerX, centerY, centerZ, seed) {
+    const halfX = 3 + (seed % 2);
+    const halfZ = 3 + (Math.floor(seed / 5) % 2);
+    const height = 4;
+    for (let dx = -halfX; dx <= halfX; dx += 1) {
+      for (let dz = -halfZ; dz <= halfZ; dz += 1) {
+        for (let dy = -1; dy <= height; dy += 1) {
+          const wx = centerX + dx;
+          const wy = centerY + dy;
+          const wz = centerZ + dz;
+          const shell = dy === -1 || dy === height || Math.abs(dx) === halfX || Math.abs(dz) === halfZ;
+          if (shell) {
+            const cracked = hash4(wx, wy, wz, seed + 877) % 100;
+            this.writeWorldBlock(wx, wy, wz, cracked < 20 ? BLOCK.STONE : BLOCK.COBBLESTONE, true);
+          } else {
+            this.writeWorldBlock(wx, wy, wz, BLOCK.AIR, true);
+          }
+        }
+      }
+    }
+
+    this.writeWorldBlock(centerX, centerY, centerZ, BLOCK.COBBLESTONE, true);
+    this.writeWorldBlock(centerX, centerY + 1, centerZ, BLOCK.AIR, true);
+    const doorwaySide = Math.floor(seed / 17) % 4;
+    if (doorwaySide === 0) {
+      this.writeWorldBlock(centerX - halfX, centerY, centerZ, BLOCK.AIR, true);
+      this.writeWorldBlock(centerX - halfX, centerY + 1, centerZ, BLOCK.AIR, true);
+    } else if (doorwaySide === 1) {
+      this.writeWorldBlock(centerX + halfX, centerY, centerZ, BLOCK.AIR, true);
+      this.writeWorldBlock(centerX + halfX, centerY + 1, centerZ, BLOCK.AIR, true);
+    } else if (doorwaySide === 2) {
+      this.writeWorldBlock(centerX, centerY, centerZ - halfZ, BLOCK.AIR, true);
+      this.writeWorldBlock(centerX, centerY + 1, centerZ - halfZ, BLOCK.AIR, true);
+    } else {
+      this.writeWorldBlock(centerX, centerY, centerZ + halfZ, BLOCK.AIR, true);
+      this.writeWorldBlock(centerX, centerY + 1, centerZ + halfZ, BLOCK.AIR, true);
+    }
   }
 
   decorateVillage(baseX, baseZ) {
@@ -1787,6 +2078,12 @@ class World {
     }
 
     return { x: 0.5, y: SEA_LEVEL + 2, z: 0.5 };
+  }
+
+  getNearbyDungeonSpawners(x, z, radius = 112) {
+    return getNearbyDungeonAnchors(x, z, this.seed, radius)
+      .map((anchor) => getDungeonPlacementForAnchor(this.terrain, anchor))
+      .filter(Boolean);
   }
 
   raycast(origin, direction, maxDistance = MAX_REACH) {

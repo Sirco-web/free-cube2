@@ -65,7 +65,7 @@ export function createResourcePackSupport({
     { path: "assets/PNG/Tiles/stone.png", atlas: "blocks", texture: "stone" },
     { path: "assets/PNG/Tiles/trunk_top.png", atlas: "blocks", texture: "oak_log_top" },
     { path: "assets/PNG/Tiles/trunk_side.png", atlas: "blocks", texture: "oak_log" },
-    { path: "assets/PNG/Tiles/leaves.png", atlas: "blocks", texture: "oak_leaves" },
+    { path: "assets/32px Seamless MC Texture Gigantopack/all textures/leaves_oak_opaque.png", atlas: "blocks", texture: "oak_leaves" },
     { path: "assets/PNG/Tiles/water.png", atlas: "blocks", texture: "water_still" },
     { path: "assets/PNG/Tiles/lava.png", atlas: "blocks", texture: "lava_still" },
     { path: "assets/PNG/Tiles/sand.png", atlas: "blocks", texture: "sand" },

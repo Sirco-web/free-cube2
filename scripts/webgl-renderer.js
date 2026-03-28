@@ -113,7 +113,7 @@ class WebGLVoxelRenderer {
   }
 
   setRenderDistance(distance) {
-    this.renderDistanceChunks = clamp(distance, 1, 6);
+    this.renderDistanceChunks = clamp(distance, 1, 12);
     this.settings.renderDistanceChunks = this.renderDistanceChunks;
     this.visibleOffsets = getChunkLoadOffsets(this.renderDistanceChunks);
   }
